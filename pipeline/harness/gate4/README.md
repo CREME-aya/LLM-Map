@@ -1,6 +1,6 @@
 # PoC Gate 4 評価データセット（日本語 120 発話＋期待コード表）
 
-> **参照仕様**: [`docs/specs/07-parameters-and-poc-gates.md`](../../../docs/specs/07-parameters-and-poc-gates.md)（Gate 4）、[`docs/specs/slm-command-code.md`](../../../docs/specs/slm-command-code.md)
+> **参照仕様**: [`docs/specs/07-parameters-and-poc-gates.md`](../../../docs/specs/07-parameters-and-poc-gates.md)（Gate 4）、[`docs/specs/03-routing-and-two-layer-control.md`](../../../docs/specs/03-routing-and-two-layer-control.md)、[`docs/adr/0007-l3-one-line-command-and-confirm-separation.md`](../../../docs/adr/0007-l3-one-line-command-and-confirm-separation.md)
 > **文法ファイル**: [`android/native/inference/grammars/driving_command_v1.gbnf`](../../../android/native/inference/grammars/driving_command_v1.gbnf)
 > **スキーマ正本**: [`schema/slm-command-code.v1.json`](../../../schema/slm-command-code.v1.json)
 

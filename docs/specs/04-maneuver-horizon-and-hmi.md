@@ -15,23 +15,26 @@
 ## 2. `ManeuverHorizon` v1 厳密データモデル
 
 ```text
-RouteKey    = { trip_id, trip_revision: u64, route_revision: u64, graph_version }
+MonoMs      = u64          // 単調時刻（ミリ秒）。JSON では整数（number）
+U64Str      = u64          // JSON では十進文字列。OSM / Valhalla 由来の ID・revision など Web に渡りうる値だけ
+
+RouteKey    = { trip_id, trip_revision: U64Str, route_revision: U64Str, graph_version }
 ManeuverId  = { route_key, leg_index: u32, ordinal: u32 }
 RouteAnchor = { leg_index: u32, leg_shape_index: u32, along_route_cm: u64 }
 
-Evidence<T> = Confirmed { value: T, source_ref, observed_at? }
-            | Inferred  { value: T, rule_id, source_refs[] }
-            | Unknown   { reason: Missing | Conflict | DirectionUnclear | VersionMismatch }
+Evidence<T> = confirmed { value: T, source_ref, observed_at? }
+            | inferred  { value: T, rule_id, source_refs[] }
+            | unknown   { reason: missing | conflict | direction_unclear | version_mismatch }
 
-Arrow       = Left | Right | SlightLeft | SlightRight | SharpLeft | SharpRight
-            | UTurnLeft | UTurnRight | KeepLeft | KeepRight | ForkLeft | ForkRight
-            | MergeLeft | MergeRight | Merge | ExitLeft | ExitRight | Exit
-            | Roundabout { exit_number?: u8 } | FerryBoard | FerryLeave
-            | StraightDecision | Arrive | Generic
+Arrow       = left | right | slight_left | slight_right | sharp_left | sharp_right
+            | u_turn_left | u_turn_right | keep_left | keep_right | fork_left | fork_right
+            | merge_left | merge_right | merge | exit_left | exit_right | exit
+            | roundabout { exit_number?: u8 } | ferry_board | ferry_leave
+            | straight_decision | arrive | generic
 
-Crossing    = NotApplicable | AcrossOncoming | NoCrossing
-Signal      = Present | Absent
-Protection  = Protected | Unprotected
+Crossing    = not_applicable | across_oncoming | no_crossing
+Signal      = present | absent
+Protection  = protected | unprotected
 
 Maneuver = {
   id: ManeuverId,
@@ -40,7 +43,7 @@ Maneuver = {
   junction_name?: Text,
   road_name?: Text,
   route_ref?: Text,
-  side_of_traffic: Left,
+  side_of_traffic: left,
   crossing: Evidence<Crossing>,
   approach_signal: Evidence<Signal>,
   right_turn_protection: Evidence<Protection>,
@@ -51,9 +54,10 @@ Maneuver = {
 }
 
 AvoidOffer = {
+  offer_id: String,             // user_tap.target_id が指す ID（alt_route_id・override_id と同じ扱い。下記注記）
   alt_route_id: String,
   delta_eta_ms: i64,
-  decision_deadline_monotonic_ms: u64,
+  decision_deadline_monotonic_ms: MonoMs,
   summary: {                    // 文面は持たない（下記注記）
     template_id,
     delta_eta_ms,
@@ -75,30 +79,31 @@ ManeuverHorizon = {
   schema_version: 1,
   route_key: RouteKey,
   frame_seq: u64,
-  sampled_at_monotonic_ms: u64,
-  valid_until_monotonic_ms: u64,
-  status: Tracking | Uncertain | OffRoute | Rerouting | Finished,
+  sampled_at_monotonic_ms: MonoMs,
+  valid_until_monotonic_ms: MonoMs,
+  status: tracking | uncertain | off_route | rerouting | finished,
   matched_progress_cm?: u64,
   upcoming: [HorizonEntry; 0..3],
-  next_p1_deadline_monotonic_ms?: u64,
-  next_complex_window?: { start_monotonic_ms: u64, end_monotonic_ms?: u64 },
+  next_p1_deadline_monotonic_ms?: MonoMs,
+  next_complex_window?: { start_monotonic_ms: MonoMs, end_monotonic_ms?: MonoMs },
   refs: { next?: JunctionRef, last?: PassedRef }   // frame_seq と同じ版。ref_table の正本
 }
 
-JunctionRef = { ref, maneuver_id: ManeuverId, kind, deadline_mono_ms: u64 }
-PassedRef   = { ref, maneuver_id: ManeuverId, passed_at_mono_ms: u64, passed_along_cm: u32 }
+JunctionRef = { ref, maneuver_id: ManeuverId, kind, deadline_mono_ms: MonoMs }
+PassedRef   = { ref, maneuver_id: ManeuverId, passed_at_mono_ms: MonoMs, passed_along_cm: u32 }
 ```
 
 - **`refs`**: L3 命令コードの `jp=next` / `jp=last`（[03 §4.1](03-routing-and-two-layer-control.md)）が参照する対象表（ref_table）の正本。`frame_seq` と同じ版として発行し、他所で別の参照表を持たない。`JunctionRef` は次の難所（`jp=next`）で、締切 `deadline_mono_ms` を持つ。`PassedRef` は通過済みの直近難所（`jp=last`）で、通過時刻 `passed_at_mono_ms` と通過位置 `passed_along_cm` を持ち、`jp=last` の範囲判定（03 §4.1）に使う。
 - **`AvoidOffer.summary`**: 文面そのものは持たない。表示・発話の文面は `template_id` と数値から **Kotlin のテンプレートで生成** し、**画面と音声で同じ文面** を使う。SLM は関与しない。
-- **数値の JSON 表現**: `u64` は JSON では **十進文字列** で受け渡す。
-- **`dc_tick` との関係**: `ManeuverHorizon` は `dc_tick` の `TickOutput.horizon?` として返る。`horizon` は **`frame_seq` が変わったときだけ** 返し、変化がなければ省略できる。`TickOutput` はほかに `voice_cmds` / `ui_cmds` / `planner_cmds` / `next_wake_mono_ms` / `log` を持つ。`next_wake_mono_ms` は **新しい入力がなくても出力が変わり得る最も早い単調時刻** で、Kotlin はそれまでに `dc_tick` を呼ぶ（早めに呼ぶのは可）。待つものがなければ **null** で、その場合は Fix が届くたびの tick だけでよい。型定義の全文は [ADR-0008](../adr/0008-dc-tick-single-event-entry.md) を正本とする。
+- **数値・列挙の JSON 表現**: `U64Str`（OSM / Valhalla 由来の ID・revision など Web に渡りうる `u64`）だけを **十進文字列** で受け渡し、`MonoMs`（単調時刻）やその他の数値は JSON の **整数（number）** とする。列挙値は JSON 上 **snake_case**（`tracking`・`across_oncoming` 等）。
+- **`AvoidOffer.offer_id`**: 回避チップを指す ID。`user_tap.target_id` は回避チップならこの `offer_id`、それ以外は `override_id` / `confirm_screen_id` を指す（[ADR-0008](../adr/0008-dc-tick-single-event-entry.md)）。
+- **`dc_tick` との関係**: `ManeuverHorizon` は `dc_tick` の `TickOutput.horizon?` として返る。`horizon` は **`frame_seq` が変わったときだけ** 返し、変化がなければ省略できる。`TickOutput` はほかに `voice_cmds` / `ui_cmds` / `planner_cmds` / `next_wake_mono_ms` / `log` を持つ。`next_wake_mono_ms` は **新しい入力がなくても出力が変わり得る最も早い単調時刻**（探索の監視期限を含む）で、Kotlin はそれまでに `dc_tick` を呼ぶ（早めに呼ぶのは可）。待つものがなければ **null** で、その場合は Fix が届くたびの tick だけでよい。型定義の全文は [ADR-0008](../adr/0008-dc-tick-single-event-entry.md) を正本とする。
 
 ### 2.1 正規化・距離軸・グルーピング規則
-1. **Trip と Directions の突き合わせ**: C++ 側で同一 leg の Trip と Directions（`begin/end_shape_index`, `begin/end_path_index`）を照合。Odin が内部辺を畳む箇所は位置対応を検証し、範囲外や不整合時は誤誘導せずデータエラーを返す。未知 maneuver type は `Generic` とし左右推論で補完しない。
+1. **Trip と Directions の突き合わせ**: C++ 側で同一 leg の Trip と Directions（`begin/end_shape_index`, `begin/end_path_index`）を照合。Odin が内部辺を畳む箇所は位置対応を検証し、範囲外や不整合時は誤誘導せずデータエラーを返す。未知 maneuver type は `generic` とし左右推論で補完しない。
 2. **独立の累積距離軸**: leg ごとの polyline にアンカーを投影し `along_route_cm` を作成。別軸の `maneuver.length` は使わない。ETA は辺ごとの走行予測と端点時刻から補間し、GPS の瞬間速度だけで計算しない。
 3. **対象操作の選別**:
-   - 出発・道なりの通常直進・単なる道路名変更・仮想経由点は除外し、分岐の選択が必要な直進のみ `StraightDecision` として残す。
+   - 出発・道なりの通常直進・単なる道路名変更・仮想経由点は除外し、分岐の選択が必要な直進のみ `straight_decision` として残す。
    - 環状交差点（ラウンドアバウト）は進入〜退出を画面上 **1 枠** に束ねつつ、内部では両アンカーの案内時刻を保持する（不一致時は出口番号を補完しない）。
    - 都道府県境で路線名が変わっても同一操作の `ManeuverId` は再発行しない。
 4. **連続分岐の `group_id` と枠消費規則**:
@@ -113,9 +118,9 @@ Android の単一 `NavigationSession` actor が、GNSS・マップマッチン�
 
 - **操作通過条件**: 単純な円形半径や GPS 速度だけで通過判定せず、**精度・進行方向・連続性を満たす次の辺上の高信頼マッチ（例：2 サンプル連続）** で通過確定。短い後方ジッタで過去操作を復活させない。
 - **状態ごとの抑制ルール**:
-  - 鮮度初期上限は **2.5 秒**。高架・並行道路・トンネル等で確信不足時は `Uncertain` とし、距離/秒数更新・P2/P3 音声・3 手先の新規提案を抑制。
-  - `OffRoute` / `Rerouting` 時は旧方向案内を保留し「経路を確認中」を表示（再探索の応答は終端イベント `search_finished`（[03 §3.1](03-routing-and-two-layer-control.md)）で受け、**`outcome=ok` かつ `route_key`（`trip_revision` / `route_revision` / `graph_version` を含む）が現行一致、`status=Tracking` のときのみ** 原子コミット。cancel 後に届いた `ok` は `discarded_late` として記録し結果は使わない）。
-  - `Finished` 時は先読み配列 `upcoming` を空にする。
+  - 鮮度初期上限は **2.5 秒**。高架・並行道路・トンネル等で確信不足時は `uncertain` とし、距離/秒数更新・P2/P3 音声・3 手先の新規提案を抑制。
+  - `off_route` / `rerouting` 時は旧方向案内を保留し「経路を確認中」を表示（再探索の応答は終端イベント `search_finished`（[03 §3.1](03-routing-and-two-layer-control.md)）で受け、**`outcome=ok` かつ `route_key`（`trip_revision` / `route_revision` / `graph_version` を含む）が現行一致、`status=tracking` のときのみ** 原子コミット。cancel 後に届いた `ok` は `discarded_late`、`engine_stuck` の後に届いた `ok` は `discarded_after_stuck` として記録し、どちらも結果は使わない。`engine_stuck` の後も逸脱再探索が必要なら直後に新しい `start` を出す）。
+  - `finished` 時は先読み配列 `upcoming` を空にする。
   - `next_p1_deadline_monotonic_ms` には画面が省く中間案内ステップや連続グループ内側の締切も含める。
 
 ---
@@ -135,7 +140,7 @@ Android の単一 `NavigationSession` actor が、GNSS・マップマッチン�
   - 高速道路：到達 **60 秒前** で「準備」、**20 秒前** で「まもなく」（標識に合わせて 2km / 1km / 500m を重視）。
 - **色覚配慮バッジ（形＋文字＋確からしさ区別）**:
   - 信号なし右折（琥珀三角 `▲信号なし`）、狭路進入（縦二重線 `狭路`）、短い合流（合流記号 `合流`）、車線位置（`左車線` 等）。
-  - `Confirmed` は **塗りつぶし**、`Inferred`/`Unknown` は **輪郭線＋`?`** で視覚区別。
+  - `confirmed` は **塗りつぶし**、`inferred`/`unknown` は **輪郭線＋`?`** で視覚区別。
 - **アニメーション規則**: 通過時は全体を 1 段上へ **250 ms スライド**（跳ねなし）、再探索時は **150 ms クロスフェード**。注意を引く過度な点滅は禁止。
 
 ### 4.2 画面レイアウト（縦置き / 横置き / 高速道路モード）
@@ -185,7 +190,7 @@ Android の単一 `NavigationSession` actor が、GNSS・マップマッチン�
 - **回避チップの発火と締め切り**:
   1. 3 手先（または到達約 120 秒前）に `信号なし右折` / `狭路` が入ると、裏で決定論 L1/L2 によりその操作を回避する迂回経路を計算。計算予算は **1.5 秒** とし、**締切（回避分岐の 20 秒前）＋計算予算 以上手前** のときだけ計算を開始する。探索は RoutePlanner の単一優先度キュー（[03 §3.1](03-routing-and-two-layer-control.md)）に載り、優先順は 逸脱再探索 > 明示計画 > **回避チップ** > 比較探索 の **3 番目**。
   2. 増加時間が迂回上限（[03 §3.2](03-routing-and-two-layer-control.md) の式。走行中は `base_eta` = **残り ETA**）以内かつ **締切より手前** なら、対象カードに `[回避 +2分]` を提示し、到達約 60 秒前に 1 回だけ音声予告。
-  3. 1 タップ（76 dp 以上）または音声「回避」でクロスフェード切替（5 秒以内の「戻して」で取消可）。締切経過後は即座に消す。音声「回避」で確定するのは **Rust 辞書照合で一致した `dict_norm`** の場合のみで、確定入口はこれと `user_tap` の 2 つだけ（SLM の出力では確定しない。[ADR-0007](../adr/0007-l3-one-line-command-and-confirm-separation.md)）。
+  3. 1 タップ（76 dp 以上、`user_tap{target_id: offer_id, action: avoid}`）または音声「回避」でクロスフェード切替（5 秒以内の「戻して」で取消可。L3 命令コードでは `CXL`、[03 §4.1](03-routing-and-two-layer-control.md)）。締切経過後は即座に消す。音声「回避」で確定するのは **Rust 辞書照合で一致した `dict_norm`** の場合のみで、確定入口はこれと `user_tap` の 2 つだけ（SLM の出力では確定しない。[ADR-0007](../adr/0007-l3-one-line-command-and-confirm-separation.md)）。
   4. 出発前比較でユーザーが承知して選んだ箇所への回避提案は出さず（バッジのみ表示）、音声予告は **1 走行最大 5 回** に制限。
   5. 表示・締切・取消の判定はすべて `dc_tick`（[ADR-0008](../adr/0008-dc-tick-single-event-entry.md)）で行う。
   6. **停止遅延（探索 cancel から実停止まで）を実測するまでは、走行中の回避チップ先読みは無効（既定）** として PoC を進める。

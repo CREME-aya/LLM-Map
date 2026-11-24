@@ -40,7 +40,7 @@ L3 の出力は **L2 本表（`profile_weights` / `avoidance_nodes_edges`）へ�
 | `RoutePlanner` | Android (Kotlin) | `TripPlanSnapshot` + 任意 `ValidatedPersonalOverride` → `RouteComparison` | 非同期実行・期限・地域パック DL を管理。`plan_request_id` とデータ版を固定し、遅延完了による上書きを禁止。 |
 | `CandidatePlanner` | Rust (`drive-core`) | 確定目的地・車幅・通行制約・出発時刻・予算 → 順序付き `CandidateRequest[]` | 外部 IO なし。ラベルは `baseline` / `engine_alternate` / `costing_variant` / `through_anchor`。 |
 | `RoutingEngine` | C++ (`valhalla`) | `CandidateRequest` → `EngineCandidate` or `EngineError` | アクセス制限・右左折規制・車幅規制・タイル完全性の信頼境界。タイル欠落は不完全エラーとして分離。 |
-| `RouteEnricher` | C++ + Rust | Trip protobuf 有向辺・位置参照 ＋ 同版属性 sidecar → `CandidateFacts` | C++ が同一呼出しで graph edge ID と方向を解決し、Rust が区間距離・難所数・根拠 3 値を純粋集計。shape からの再推定は禁止。**属性 sidecar** はタイル単位の固定長バイナリを mmap し、タイル内有向辺インデックスで引く。manifest で `graph_version`・SHA-256 と組にする。C++ は SQLite を使わない（[ADR-0002](../adr/0002-narrow-pure-rust-core.md) の二重リンク回避）。元タグ欠損 = `Unknown`、sidecar 欠落/破損 = データ不完全（不完全エラー扱い）。バイト配置は `pipeline/packs/sidecar-format.md` が正本（詳細は [02 §1](02-architecture-and-stack.md)）。 |
+| `RouteEnricher` | C++ + Rust | Trip protobuf 有向辺・位置参照 ＋ 同版属性 sidecar → `CandidateFacts` | C++ が同一呼出しで graph edge ID と方向を解決し、Rust が区間距離・難所数・根拠 3 値を純粋集計。shape からの再推定は禁止。**属性 sidecar** はタイル単位の固定長バイナリを mmap し、タイル内有向辺インデックスで引く。manifest で `graph_version`・SHA-256 と組にする。C++ は SQLite を使わない（[ADR-0002](../adr/0002-narrow-pure-rust-core.md) の二重リンク回避）。元タグ欠損 = `unknown`、sidecar 欠落/破損 = データ不完全（不完全エラー扱い）。バイト配置は `pipeline/packs/sidecar-format.md` が正本（詳細は [02 §1](02-architecture-and-stack.md)）。 |
 | `CandidateRanker` | Rust (`drive-core`) | `CandidateFacts[]` + `policy_version` + 承認済み選好 → `RouteComparison` | 合法・完全・同版の候補のみ採点。有効候補が 1 本だけでも理由付きで返す。 |
 | `PersonalIntentAdapter` | Android (`:inference`) / BYOK | 明示要求 + 最小限の選択コンテキスト → 未検証 `PersonalRoutingOverride` 候補 | GBNF 制約の有無を問わず、出力はすべて未信頼入力として扱う。 |
 | `OverrideValidator` | Rust (`drive-core`) | 未検証候補 + `IntentContract` + 許可済み候補 ID 表 → `ValidatedPersonalOverride` | 外部座標・URL・関数呼出し・未知/重複キー・範囲外・生 Valhalla パラメータをすべて拒否。 |
@@ -77,7 +77,7 @@ L3 の出力は **L2 本表（`profile_weights` / `avoidance_nodes_edges`）へ�
 |---|---|---|
 | Rust → Kotlin | `planner_cmds: start{req_id, priority, route_key, graph_version}` | 探索開始 |
 | Rust → Kotlin | `planner_cmds: cancel{req_id}` | 実行中探索の取消要求 |
-| Kotlin → Rust | `search_finished{req_id, route_key, graph_version, outcome: ok\|cancelled\|error\|timeout, comparison_ref?, engine_ms}` | **唯一の終端イベント。1 探索につき必ず 1 回**。旧 `reroute_result` / `search_cancelled` は廃止 |
+| Kotlin → Rust | `search_finished{req_id, route_key, graph_version, outcome: ok\|cancelled\|error, comparison_ref?, engine_ms}` | **唯一の終端イベント。1 探索につき必ず 1 回**。旧 `reroute_result` / `search_cancelled` は廃止 |
 
 Rust 側の探索枠の状態機械:
 
@@ -87,11 +87,15 @@ Running ──search_finished{req_id}──▶ Idle
 Running ──cancel{req_id}──▶ CancelRequested{req_id}
 CancelRequested ──search_finished{req_id}──▶ Idle
   ※ outcome=ok で戻った場合は discarded_late として記録し、結果は使わず枠だけ解放
+Running / CancelRequested ──監視期限超過（Rust が now_mono_ms で検出）──▶ engine_stuck{req_id}
+engine_stuck ──search_finished{req_id}──▶ Idle
+  ※ outcome=ok で戻っても結果は捨て、discarded_after_stuck として記録し枠だけ解放
+  ※ 逸脱再探索がまだ必要なら、直後に新しい start を出す
 不変条件: search_finished が来るまで次の start を出さない（同時 Running ≤ 1）
 ```
 
-- **結果を採用する条件**: `outcome=ok` **かつ** `route_key` が現行と一致 **かつ** 走行状態が `Tracking` のときのみ。それ以外は破棄（表示・発話に使わない）。
-- **タイムアウトと `engine_stuck`**: ネイティブ呼び出し開始からの **監視上限（短距離 5 s / 長距離 10 s、暫定。値は [07 §1](07-parameters-and-poc-gates.md)）** を超えたら Kotlin は `outcome=timeout` を通知し、Rust は `engine_stuck`（画面表示「経路を確認中」）に入る。**探索枠は占有したまま** とし、ネイティブ呼び出しが **実際に戻った時点で `search_finished` を 1 回** 返す。探索枠を解放するのはこの `search_finished` のとき。新しい Actor を作れただけでは再開しない。エンジン再初期化は `engine_reset` イベントで Rust に通知する（可否は 未確認（Gate 0 で確認））。
+- **結果を採用する条件**: `outcome=ok` **かつ** `route_key` が現行と一致 **かつ** 走行状態が `tracking` のときのみ。それ以外は破棄（表示・発話に使わない）。
+- **タイムアウトと `engine_stuck`**: ネイティブ呼び出し開始からの **監視上限（短距離 5 s / 長距離 10 s、暫定。値は [07 §1](07-parameters-and-poc-gates.md)）** の超過は **Rust が検出** する（`now_mono_ms` と `start` を出した時刻から判定）。Kotlin は timeout を通知せず、`next_wake_mono_ms`（監視期限を含む）に合わせて `dc_tick` を呼ぶだけ。超過したら Rust は `engine_stuck`（画面表示「経路を確認中」）に入る。そのため `search_finished.outcome` に `timeout` は無い。**探索枠は占有したまま** とし、ネイティブ呼び出しが **実際に戻った時点で `search_finished` を 1 回** 返す。探索枠を解放するのはこの `search_finished` のときで、`ok` で戻っても結果は捨て `discarded_after_stuck` として記録する（cancel 後の `ok` は従来どおり `discarded_late`）。逸脱再探索がまだ必要なら直後に新しい `start` を出す。新しい Actor を作れただけでは再開しない。エンジン再初期化は `engine_reset` イベントで Rust に通知する（可否は 未確認（Gate 0 で確認））。
 - **Valhalla 割り込み**: 根拠 — 固定版ソースで割り込みコールバック対応を確認済み（sol6.2さん）。valhalla-mobile 0.6.2 に (1) `route` への割り込みコールバック、(2) lock-free アトミックフラグによる `cancel(req_id)` のパッチを当てる。中断例外は **C++ ラッパー内で必ず捕捉** し `outcome=cancelled` の終端に変換する（例外を JNI 越しに投げない）。cancel 後に同じ Actor で次探索が成功するかは 未確認（Gate 0 で確認）。
 - **先読みの既定**: 停止遅延を実測するまで、**走行中の回避チップ先読みは無効** のまま PoC を進める。
 - 共通テストデータ（逸脱による cancel → 再探索の順序）は [07 §2](07-parameters-and-poc-gates.md) の Gate 7 を参照。
@@ -118,9 +122,9 @@ CancelRequested ──search_finished{req_id}──▶ Idle
   3. **狭路距離**: 「確認済み狭路」「推定狭路」を分け、「幅未確認の生活道路距離」を併記。
 
 #### 根拠の 3 値（`Evidence<T>`）と安全側スコア初期値
-- **`Confirmed`**: 方向付き実測・現地記録または信頼済み一次タグで確定。
-- **`Inferred`**: 車線数・道路種別・形状等による傍証（`lanes` から物理幅メートル値を捏造しない。無タグ信号は「保護不明」扱い、信号＋右折レーンだけで保護現示を断定しない）。
-- **`Unknown`**: タグ欠損・版不一致・古い記録の矛盾（幅未確認の生活道路を、既知の右折回避のために無条件で優遇しない）。
+- **`confirmed`**: 方向付き実測・現地記録または信頼済み一次タグで確定。
+- **`inferred`**: 車線数・道路種別・形状等による傍証（`lanes` から物理幅メートル値を捏造しない。無タグ信号は「保護不明」扱い、信号＋右折レーンだけで保護現示を断定しない）。
+- **`unknown`**: タグ欠損・版不一致・古い記録の矛盾（幅未確認の生活道路を、既知の右折回避のために無条件で優遇しない）。
 
 | 評価項目（左側通行・普通車） | 暫定ペナルティ（秒相当・PoC 校正前提） |
 |---|---:|
@@ -224,7 +228,7 @@ level ::= "L" | "N" | "H"
 | 入口 | 内容 |
 |---|---|
 | **辞書照合の `dict_norm`** | Rust の辞書照合で一致した定型語（`asr_result{text_class: dict, dict_norm}`） |
-| **`user_tap`** | 画面タップ（`user_tap{target_id, action}`） |
+| **`user_tap`** | 画面タップ（`user_tap{target_id, action}`。`target_id` は回避チップの `offer_id`、または `override_id` / `confirm_screen_id`） |
 
 - **SLM の `YES` では確定しない**（再確認を促すのみ）。
 - 承認時に `target_id`（提案 ID・経路版・対象難所・期限）を **再検証** する。発話中に提案が差し替わった場合、**承認を新しい提案へ引き継がない**。
@@ -232,11 +236,11 @@ level ::= "L" | "N" | "H"
 
 #### `dc_validate_override` の入出力（Rust C ABI v1）
 ```text
-dc_validate_override(h, { code_line, contract, utterance_mono_ms, ref_frame_seq, pending_offer_id? })
+dc_validate_override(h, { code_line, contract, utterance_id, utterance_mono_ms, ref_frame_seq, pending_offer_id? })
   → Applied  { override_id, override, review_proposal?, route_key, expires_at_mono_ms }
   | Rejected { code }        // code は上記 7 種
 ```
-- `code_line` は §4.1 の 1 行命令コードそのもの。`utterance_mono_ms` / `expires_at_mono_ms` は単調時刻（§5「時刻の種類」）。ABI 全体は [02 §2.1](02-architecture-and-stack.md)。
+- `code_line` は §4.1 の 1 行命令コードそのもの。`utterance_id` は **必須**（`dc_tick` の `asr_started` / `asr_result` と同じ ID。Gate 4 で遅延を突き合わせるため）。`utterance_mono_ms` / `expires_at_mono_ms` は単調時刻（§5「時刻の種類」）。ABI 全体は [02 §2.1](02-architecture-and-stack.md)。
 
 ---
 

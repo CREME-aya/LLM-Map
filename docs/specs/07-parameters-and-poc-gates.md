@@ -12,14 +12,14 @@
 |---|---|---|---|
 | **候補探索・採点** | 探索要求 / 受理候補 / 同時数上限 | 最大 5 要求 / 受理 7 候補 / 同時 1 探索 | `RoutePlanner` の単一優先度キューで同時実行は物理的に 1 本（[03 §3.1](03-routing-and-two-layer-control.md)） |
 | **候補探索・採点** | 比較予算（比較結果を返す期限） | 短距離: 3 秒 / 長距離: 8 秒 | 温状態前提。期限超過時はその時点の完了候補で比較結果を返す（[03 §3.1](03-routing-and-two-layer-control.md)） |
-| **候補探索・採点** | 監視上限（`engine_stuck` 判定） | 短距離: 5 秒 / 長距離: 10 秒（ネイティブ呼び出し開始から） | 暫定。超過で Kotlin が timeout を通知し Rust は `engine_stuck`（「経路を確認中」表示）。探索枠は占有したままで、解放するのは呼び出しが実際に戻った `search_finished`（1 回）のとき（[03 §3.1](03-routing-and-two-layer-control.md)） |
+| **候補探索・採点** | 監視上限（`engine_stuck` 判定） | 短距離: 5 秒 / 長距離: 10 秒（ネイティブ呼び出し開始から） | 暫定。超過は Rust が `now_mono_ms` と `start` 時刻から検出して `engine_stuck`（「経路を確認中」表示）にする（Kotlin は通知せず、監視期限を含む `next_wake_mono_ms` で tick を呼ぶだけ）。探索枠は占有したままで、解放するのは呼び出しが実際に戻った `search_finished`（1 回）のとき。そのとき `ok` でも結果は捨てる（`discarded_after_stuck`）（[03 §3.1](03-routing-and-two-layer-control.md)） |
 | **候補探索・採点** | 迂回上限 `DetourPolicy` | `short_threshold_s: 1800` / `short_cap_s: 180` / `long_cap_s: 900` / `long_cap_ratio: 0.15` / `ratio_cap: 1.35` / `tight_factor: 0.5` | 採否は増加秒数で判定（式は [03 §3.2](03-routing-and-two-layer-control.md)）。L1/L2/L3 共通で `dc_rank` と `dc_avoid_offer_eval` が同じ関数を使う。走行中の回避チップは `base_eta` = 残り ETA。`profile_weights.max_detour_ratio` 既定は NULL（= 方針値）、ユーザー値は厳しくする方向のみ有効で 1.35 で頭打ち |
 | **候補探索・採点** | 運転しやすさペナルティ（秒相当） | 対向無信号/不明右折 +45s / 信号有不明 +25s / 保護確認 +10s / 右折入口 +90s / 狭路 (<4.0m) +30s/100m / 幅不明生活道路 +15s/100m / 合流 +15s | ETA 表示には加算しない（Gate 3 でタグ率と監査により校正） |
 | **候補探索・採点** | C++ → Kotlin → Rust 受け渡し＋解析 | 短距離 7 候補で p95 `<= 300 ms` | 超過なら内訳を調査し、コピーが主因なら `DirectByteBuffer` を比較。計測点は JNI ラッパー側（[02 §2.1](02-architecture-and-stack.md)） |
 | **個人プロファイル** | 学習回避記録の自動減衰 (TTL) | 最終発火から 180 日 | L2 明示承認後のみ有効 |
 | **個人プロファイル** | `jp=last` の対象範囲 | 通過後 180 秒以内 かつ 1.5 km 以内の直近難所 | 経路は変えず `profile_proposals` へ。該当なしはエラーにせず提案を作らない（[03 §4.1](03-routing-and-two-layer-control.md)） |
 | **速度・モード切替** | 走行中ソフトモード突入 / 解除 | 突入: `>= 8 km/h` を 3〜5 秒連続<br>解除: `<= 3 km/h` を 10〜30 秒連続（信号待ち除外） | [01-product-and-ux](01-product-and-ux.md), [04-maneuver-horizon](04-maneuver-horizon-and-hmi.md) |
-| **位置・鮮度** | 測位鮮度上限 | 2.5 秒 | 超過時は `Uncertain` |
+| **位置・鮮度** | 測位鮮度上限 | 2.5 秒 | 超過時は `uncertain` |
 | **3 手先 HMI** | 連続分岐グルーピング閾値 | 都市 `120 m` / 高速 `200 m` / 最早 ETA 差 `12 秒`（先頭 2 操作） | 音声は `HorizonEntry.group_id` のみ参照（[04 §2.1](04-maneuver-horizon-and-hmi.md)） |
 | **3 手先 HMI** | 強調タイミング（準備 / まもなく） | 一般道: 30 秒前 / 8 秒前<br>高速道路: 60 秒前 / 20 秒前 | 距離丸め・UI 更新 1 Hz 上限 |
 | **3 手先 HMI** | 回避チップ締切 / 上限 / 地図復帰 | 分岐 20 秒前締切 / 1 走行予告最大 5 回 / パン復帰 10 秒 / ドロワー閉 15 秒 | タップ領域 76 dp 以上 |
@@ -105,7 +105,7 @@ t1 fix: 逸脱検知 → cancel{r1}, ui: 経路を確認中
 t2 search_finished{r1, ok} → 結果破棄・枠解放 → start{r2, reroute}
 t3 search_finished{r2, ok} → 原子コミット・新 horizon
 検証: 同時 Running ≤ 1 / r1 由来の表示・発話 0 / (t2−t1),(t3−t1) を記録
-派生: t2 が来ない → timeout → engine_stuck → 実際の戻り後 search_finished → r2
+派生: t2 が来ない → 監視期限超過を Rust が検出 → engine_stuck → 実際の戻り後 search_finished{r1}（ok でも discarded_after_stuck）→ 枠解放 → start{r2, reroute}
 ```
 
 ### 2.5 Gate 4 / 7 共通: 提案差し替え系テスト（`pending_offer`）

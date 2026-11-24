@@ -1,7 +1,7 @@
 # Driving SLM 1-Line Fixed Command Grammar (v1)
 # Target runtime: llama.cpp C API (Tier 1 CPU NEON / Tier 2 Vulkan GPU)
 # Target model:   Qwen2.5-0.5B-Instruct Q4_K_M (spec ceiling <= 32 tokens; grammar max <= 15 tokens)
-# Spec reference: docs/specs/slm-command-code.md, schema/slm-command-code.v1.json
+# Spec reference: docs/specs/03-routing-and-two-layer-control.md, docs/adr/0007-l3-one-line-command-and-confirm-separation.md, schema/slm-command-code.v1.json
 #
 # Guarantees enforced structurally by grammar:
 #   1. Single-line output terminated by "\n"

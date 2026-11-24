@@ -20,7 +20,7 @@ Round 5〜6 の 3 者協議により、「1 人＋AI コーディングでの完
 | **経路エンジン層** | **Valhalla C++**（`Rallista/valhalla-mobile` 0.6.2 構成 NDK r29 / CMake / Ninja / vcpkg 起点 ＋ 有向辺取得用の薄い C++ 境界） | GraphHopper は Android オフライン公式サポート終了、OSRM は条件柔軟性・NDK 同梱に難があるため Valhalla を選定。既成 AAR は PBF 非対応であり、同一 Actor 呼出しから `Trip` と `Directions` の有向辺・index を抽出して JNI 返却する薄い C++ 境界を追加。**配送 ABI 全 `.so` の 16 KB ページ対応必須**。<br>**割り込みパッチ**: valhalla-mobile 0.6.2 に (1) route への割り込みコールバック (2) lock-free アトミックフラグによる `cancel(req_id)` の 2 点をパッチ（固定版ソースで割り込みコールバック対応を確認済み（sol6.2さん））。中断例外は **C++ ラッパー内で必ず捕捉して `cancelled` 終端に変換し、JNI を越えさせない**（探索キューと `search_finished` は [03 §3.1](03-routing-and-two-layer-control.md)）。<br>**属性 sidecar の読み取り**: タイル単位の固定長バイナリを mmap し、タイル内有向辺インデックスで引く。C++ は SQLite を使わない（[ADR-0002](../adr/0002-narrow-pure-rust-core.md) の二重リンク回避）。 |
 | **ローカル SLM 推論層** | **別プロセス (`android:process=":inference"`, `exported=false`)** に隔離<br>・基準（Tier 1）: **`llama.cpp` C API**（CPU NEON）＋ **`Qwen2.5-0.5B-Instruct` Q4_K_M** (491 MB, Apache-2.0) ＋ **GBNF**（モデル本体は任意 DL）<br>・加速（Tier 2）: **`llama.cpp` Vulkan GPU** ／ 実証済み SoC 向け **`LiteRT-LM` NPU** 別アダプター | **Rust コアには一切繋がず**、Kotlin の推論コントローラ配下に限定。ドライバ障害やハングでナビ本体が落ちないよう別プロセス隔離。 |
 | **Web 補完版** | **TypeScript ＋ Vite ＋ React ＋ Tailwind CSS ＋ Zod ＋ MapLibre GL JS ＋ `pmtiles`** → **Cloudflare Pages** | AI コーディングで最も安定するデファクト構成。「家で計画し、家で振り返る」専用で走行ナビは実装しない。共有スキーマは JSON Schema を正として Zod と Rust `serde` 型の双方を生成・検証。 |
-| **全国データ生成 & 配布** | 固定 Docker (Linux) ＋ **`Planetiler`**（PMTiles）＋ **`Valhalla Mjolnir`**（全国一括）＋ **Python / Rust**（ABR・文化財・歴史 SQLite、属性 sidecar）→ **Cloudflare R2** | アプリと生成側 Valhalla のコミット・グラフ版を完全一致させ、同一版から地域/回廊チャンクを分割配布。<br>**属性 sidecar**: タイル単位の固定長バイナリ（mmap 前提、タイル内有向辺インデックス）とし、manifest で `graph_version`・SHA-256 と組にする。元タグ欠損 = `Unknown`、sidecar 欠落/破損 = **データ不完全**。バイト配置の正本は `pipeline/packs/sidecar-format.md`（JSON Schema には複製しない）。Gate 2 の検証と C++ 読み取りテストで **同じバイナリフィクスチャ** を使う。Rust は sidecar を直接読まず、採点用 JSON（`schema/`）を受け取る。 |
+| **全国データ生成 & 配布** | 固定 Docker (Linux) ＋ **`Planetiler`**（PMTiles）＋ **`Valhalla Mjolnir`**（全国一括）＋ **Python / Rust**（ABR・文化財・歴史 SQLite、属性 sidecar）→ **Cloudflare R2** | アプリと生成側 Valhalla のコミット・グラフ版を完全一致させ、同一版から地域/回廊チャンクを分割配布。<br>**属性 sidecar**: タイル単位の固定長バイナリ（mmap 前提、タイル内有向辺インデックス）とし、manifest で `graph_version`・SHA-256 と組にする。元タグ欠損 = `unknown`、sidecar 欠落/破損 = **データ不完全**。バイト配置の正本は `pipeline/packs/sidecar-format.md`（JSON Schema には複製しない）。Gate 2 の検証と C++ 読み取りテストで **同じバイナリフィクスチャ** を使う。Rust は sidecar を直接読まず、採点用 JSON（`schema/`）を受け取る。 |
 
 ---
 
@@ -82,8 +82,8 @@ Round 5〜6 の 3 者協議により、「1 人＋AI コーディングでの完
 - **バッファ所有規約**: 入力 `dc_in{ptr,len}` は **呼び出し側所有**（関数復帰まで有効）。出力 `dc_out` は **Rust が確保** し、呼び出し側が `dc_buf_free` で解放します。
 - **返り値形式**: `{ ok, data | error{ code, msg } }`。Rust 内の panic は `catch_unwind` で捕捉し `E_PANIC` として返します（panic を境界の外へ漏らさない）。
 - **呼び出しスレッド**: 呼び出すのは **`NavigationSession` actor 1 本のみ**。Rust はセッション状態を持ちますが、**IO・スレッド・時計を持ちません**。
-- **`dc_validate_override`**: 入力 `{ code_line, contract, utterance_mono_ms, ref_frame_seq, pending_offer_id? }` → 出力 `Applied { override_id, override, review_proposal?, route_key, expires_at_mono_ms } | Rejected{ code }`。1 行命令コードの解析は Rust で行い、Kotlin で JSON に組み直しません。
-- **単調時刻規約**: Kotlin が毎回 `SystemClock.elapsedRealtimeNanos()/1e6` を `now_mono_ms` として渡します。Fix の時刻は `Location.getElapsedRealtimeNanos()` 由来。時刻の巻き戻りを検出した場合は前値に合わせ、`clock_regression` をログに記録します。GPX リプレイでは合成時計を使います。
+- **`dc_validate_override`**: 入力 `{ code_line, contract, utterance_id, utterance_mono_ms, ref_frame_seq, pending_offer_id? }`（`utterance_id` は必須。Gate 4 の遅延突き合わせ用） → 出力 `Applied { override_id, override, review_proposal?, route_key, expires_at_mono_ms } | Rejected{ code }`。`Applied` / `Rejected` は型名で、JSON では判別タグ `"result": "applied" | "rejected"`（snake_case）として出します。1 行命令コードの解析は Rust で行い、Kotlin で JSON に組み直しません。
+- **単調時刻規約**: Kotlin が毎回 `SystemClock.elapsedRealtimeNanos()/1e6` を `now_mono_ms` として渡します。Fix の時刻は `Location.getElapsedRealtimeNanos()` 由来。時刻の巻き戻りを検出した場合は前値に合わせ、`clock_regression` をログに記録します。GPX リプレイでは合成時計を使います。単調時刻（`MonoMs`）は JSON の **整数（number）** で渡します。十進文字列（`U64Str`）にするのは、OSM / Valhalla 由来の ID・revision など **Web に渡りうる `u64`** だけです（下記境界ルール 3）。
 - **`dc_tick` の型**: `TickInput` / `Event` / `TickOutput` の型定義全文は [ADR-0008](../adr/0008-dc-tick-single-event-entry.md) を正本とし、ここには重複記載しません。
 
 #### C++ → Kotlin → Rust の受け渡し
@@ -93,7 +93,7 @@ Round 5〜6 の 3 者協議により、「1 人＋AI コーディングでの完
 ### 越えてはならない境界ルール
 1. **Rust ↔ C++ 直接結合の禁止**: Kotlin 層が「Kotlin ↔ Rust」「Kotlin ↔ Valhalla C++」「Kotlin ↔ Inference (`:inference`)」を調停し、Rust と C++ を直接リンクしません（`libc++_shared.so`・シンボル衝突防止）。
 2. **Rust コアの純粋性維持**: Rust 内に SQLite (`rusqlite`)・HTTP・ファイル I/O・Android ログを持ち込まず、Kotlin 側で取得した確定レコード（候補集合、属性、位置 Fix）のみを入力として純粋計算します。
-3. **JSON の `u64` ID 表現**: TypeScript (IEEE 754 `number` は 53-bit 上限) での丸めを防ぐため、OSM / Valhalla 系の `u64` ID は JSON 境界で **十進文字列** として扱います。
+3. **JSON の `u64` ID 表現**: TypeScript (IEEE 754 `number` は 53-bit 上限) での丸めを防ぐため、OSM / Valhalla 系の `u64` ID・revision など Web に渡りうる値は JSON 境界で **十進文字列**（`U64Str`）として扱います。単調時刻（`MonoMs`）など他の数値は JSON の整数です。
 4. **16 KB ページサイズ必須検査**: `Valhalla`・`Rust cdylib`・`llama.cpp`・`MapLibre`・`sqlite-bundled`・`libc++_shared` を含む最終配送 ABI (`arm64-v8a`) の全 `.so` について ELF LOAD alignment ≥ 16 KB、`bundletool dump config` (`PAGE_ALIGNMENT_16K`)、`zipalign -c -P 16 -v 4` を検査ゲートにします。
 
 ---
