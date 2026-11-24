@@ -1,0 +1,1 @@
+{"now_mono_ms": 100, "events": [{"at_mono_ms": 15, "kind": "search_finished", "req_id": "r1", "route_key": {"trip_id": "t1", "trip_revision": "3", "route_revision": "7", "graph_version": "jp-2026.11.0"}, "graph_version": "jp-2026.11.0", "outcome": "timeout", "engine_ms": 12}]}

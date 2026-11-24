@@ -171,6 +171,8 @@ pub struct TickOutput {
     /// Earliest mono time at which the output may change without new input, including the
     /// search watchdog deadline. Kotlin calls dc_tick by then (earlier is fine).
     /// `null` = nothing to wait for (tick on each Fix only). ADR-0008 decision 3.
+    /// Always present on the wire (explicit `null`), so a missing field is rejected.
+    #[serde(deserialize_with = "required_nullable")]
     pub next_wake_mono_ms: Option<MonoMs>,
     pub log: Vec<LogEvent>,
 }
@@ -191,14 +193,42 @@ pub enum PlannerCmd {
     },
 }
 
-/// Single priority queue order (higher wins). Values from the Gate 7 common test data.
-/// TODO(abi-v1): 03 §3.1 has 4 levels (逸脱再探索 > 明示計画 > 回避チップ > 比較探索);
-/// JSON names for 明示計画 / 比較探索 are not specified, so only these two exist yet.
+/// Single priority queue order (03 §3.1 table; team decision 2026-11-24 for the JSON names).
+/// Highest first: `reroute` (逸脱再探索) > `explicit_plan` (明示計画) > `avoid_chip`
+/// (回避チップ) > `comparison` (比較探索). `Ord` follows the same order (higher wins);
+/// variant order below is therefore lowest → highest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchPriority {
+    Comparison,
     AvoidChip,
+    ExplicitPlan,
     Reroute,
+}
+
+/// Distance class fixed by the Planner *before* searching (team decision 2026-11-24).
+/// It selects the comparison budget (03 §3.1 item 3, 07 §1: short 3 s / long 8 s, counted
+/// from the plan start) and the native watchdog limit (03 §3.1, 07 §1: short 5 s /
+/// long 10 s, counted from each native call's start). Fixed for all candidate searches of
+/// the same plan_request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DistanceClass {
+    Short,
+    Long,
+}
+
+impl DistanceClass {
+    /// Pre-search ETA estimate threshold: `< 1800 s` (30 min) → short.
+    pub const SHORT_ETA_LIMIT_S: u64 = 1800;
+
+    /// `eta_estimate_s < 1800` → short; `>= 1800` or no estimate → long.
+    pub fn from_eta_estimate_s(eta_estimate_s: Option<u64>) -> Self {
+        match eta_estimate_s {
+            Some(s) if s < Self::SHORT_ETA_LIMIT_S => Self::Short,
+            _ => Self::Long,
+        }
+    }
 }
 
 /// TODO(abi-v1): UiCmd catalogue not specified; only what the planner needs today.
@@ -223,4 +253,14 @@ pub struct LogEvent {
     pub req_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub detail: Option<String>,
+}
+
+/// `Option<T>` that must be present (may be `null`). Without `deserialize_with`, serde would
+/// treat a missing `Option` field as `None`; tick.schema.json requires the key.
+fn required_nullable<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d)
 }

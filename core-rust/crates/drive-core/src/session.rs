@@ -1,32 +1,47 @@
 //! `dc_session` state. Single-threaded: called only from the NavigationSession actor.
 
 use crate::command_line::{self, Command, JpRef};
-use crate::planner::{Effects, SearchPlanner};
+use crate::planner::{Effects, SearchLimits, SearchPlanner};
 use contracts::override_types::{RejectCode, ValidateOverrideRequest, ValidateOverrideResult};
-use contracts::tick::{EventBody, LogEvent, SearchPriority, ThermalStatus, TickInput, TickOutput};
+use contracts::tick::{
+    DistanceClass, EventBody, LogEvent, SearchPriority, ThermalStatus, TickInput, TickOutput,
+};
 use contracts::{ErrorCode, RouteKey};
 use serde::Deserialize;
 
 /// `dc_session_new` config. TODO(abi-v1): config contents are not specified anywhere;
-/// only the provisional search watchdog limit is read. Unknown fields are rejected.
+/// only the provisional search limits (03 §3.1 / 07 §1) can be overridden, each defaulting
+/// to the 07 §1 initial value. Unknown fields are rejected.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 pub struct SessionConfig {
-    /// Watchdog limit from the start of the native call (03 §3.1 / 07 §1, provisional):
-    /// long-distance 10 s. TODO(drive-core): short-distance 5 s needs the distance class of
-    /// the request, which the planner does not know yet; one limit is used for all searches.
-    #[serde(default = "default_deadline")]
-    pub search_deadline_ms: u64,
-}
-
-fn default_deadline() -> u64 {
-    10_000
+    /// Native watchdog limit from each `start`, short / long distance (5 s / 10 s).
+    pub watchdog_short_ms: u64,
+    pub watchdog_long_ms: u64,
+    /// Comparison budget from the plan start, short / long distance (3 s / 8 s).
+    pub comparison_budget_short_ms: u64,
+    pub comparison_budget_long_ms: u64,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
+        let l = SearchLimits::default();
         Self {
-            search_deadline_ms: default_deadline(),
+            watchdog_short_ms: l.watchdog_short_ms,
+            watchdog_long_ms: l.watchdog_long_ms,
+            comparison_budget_short_ms: l.comparison_budget_short_ms,
+            comparison_budget_long_ms: l.comparison_budget_long_ms,
+        }
+    }
+}
+
+impl SessionConfig {
+    fn limits(&self) -> SearchLimits {
+        SearchLimits {
+            watchdog_short_ms: self.watchdog_short_ms,
+            watchdog_long_ms: self.watchdog_long_ms,
+            comparison_budget_short_ms: self.comparison_budget_short_ms,
+            comparison_budget_long_ms: self.comparison_budget_long_ms,
         }
     }
 }
@@ -81,7 +96,7 @@ pub struct Session {
 impl Session {
     pub fn new(config: SessionConfig) -> Self {
         Self {
-            planner: SearchPlanner::new(config.search_deadline_ms),
+            planner: SearchPlanner::new(config.limits()),
             last_now_mono_ms: None,
             current_route_key: None,
             thermal: ThermalLevel::None,
@@ -105,6 +120,22 @@ impl Session {
     /// TODO(abi-v1): will be set by dc_route_commit (not implemented yet).
     pub fn set_current_route_key(&mut self, key: RouteKey) {
         self.current_route_key = Some(key);
+    }
+
+    /// Planner hook: fix the distance class of a plan_request before its candidate
+    /// searches are requested (team decision 2026-11-24). Same id → class kept.
+    /// TODO(drive-core): driven by dc_plan_candidates / TripPlanSnapshot once implemented.
+    pub fn begin_plan(
+        &mut self,
+        now_mono_ms: u64,
+        plan_request_id: &str,
+        eta_estimate_s: Option<u64>,
+    ) -> (DistanceClass, TickOutput) {
+        let mut fx = Effects::default();
+        let c = self
+            .planner
+            .begin_plan(now_mono_ms, plan_request_id, eta_estimate_s, &mut fx);
+        (c, self.finish(fx, Vec::new()))
     }
 
     /// Internal hook for triggers that are not wired yet (off-route detection from `fix`,

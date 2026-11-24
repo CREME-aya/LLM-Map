@@ -13,7 +13,8 @@ pub struct ValidateOverrideRequest {
     /// Required: same id as `asr_started` / `asr_result` (Gate 4 latency matching).
     pub utterance_id: String,
     pub utterance_mono_ms: MonoMs,
-    /// `ManeuverHorizon.frame_seq` the refs were read from (u64 → JSON number, 04 §2).
+    /// `ManeuverHorizon.frame_seq` the refs were read from. JSON number, not U64Str
+    /// (04 §2; team agreement 2026-11-24: frame_seq stays numeric).
     pub ref_frame_seq: u64,
     #[serde(default)]
     pub pending_offer_id: Option<String>,

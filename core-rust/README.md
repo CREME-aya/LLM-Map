@@ -17,7 +17,7 @@ core-rust/
 |---:|---|---|---|
 | 1 | `dc_abi_version()` | Returns a u32 with the ABI version in the upper 16 bits and the schema version in the lower 16 (currently `0x0001_0001`) | Implemented |
 | 2 | `dc_buf_free(dc_out)` | Frees a `dc_out` allocated by Rust, exactly once. `{NULL,0}` is a no-op | Implemented |
-| 3 | `dc_session_new(config, **out)` | Creates the session state (search slot, deadlines, etc.) from config JSON. On failure sets `*out=NULL` and returns an error envelope | Implemented (config holds only `search_deadline_ms` = watchdog limit, default 10 s; short-distance 5 s TODO) |
+| 3 | `dc_session_new(config, **out)` | Creates the session state (search slot, deadlines, etc.) from config JSON. On failure sets `*out=NULL` and returns an error envelope | Implemented (config: optional `watchdog_{short,long}_ms` 5 s / 10 s and `comparison_budget_{short,long}_ms` 3 s / 8 s; distance class `short|long` fixed per plan from the pre-search ETA, < 1800 s → short) |
 | 4 | `dc_session_free(s)` | Frees the session when the actor explicitly closes it. NULL is safe; double free is undefined | Implemented |
 | 5 | `dc_plan_candidates(snapshot)` | Builds the candidate search requests `CandidateRequest[]` from a `TripPlanSnapshot` | `E_UNIMPLEMENTED` |
 | 6 | `dc_rank(req)` | Applies L1/L2 3-axis scoring and the detour cap (shared with #11) to `{facts[], policy, profile}` and returns a `RouteComparison` | `E_UNIMPLEMENTED` |
