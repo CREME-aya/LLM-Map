@@ -22,11 +22,11 @@ public final class JniSmoke {
         long[] h = new long[1];
         check("sessionNew", DcNative.sessionNew(b("{}"), h), "\"ok\":true");
         if (h[0] == 0) { System.out.println("FAIL handle == 0"); System.exit(1); }
-        check("tick", DcNative.tick(h[0], b("{\"now_mono_ms\":\"10\",\"events\":[{\"at_mono_ms\":\"9\",\"kind\":\"thermal\",\"status\":\"shutdown\"}]}")), "thermal_changed");
+        check("tick", DcNative.tick(h[0], b("{\"now_mono_ms\":10,\"events\":[{\"at_mono_ms\":9,\"kind\":\"thermal\",\"status\":\"shutdown\"}]}")), "thermal_changed");
         check("tick bad", DcNative.tick(h[0], b("{")), "E_SCHEMA");
         check("tick null array", DcNative.tick(h[0], null), "E_SCHEMA");
-        check("tick handle 0", DcNative.tick(0L, b("{\"now_mono_ms\":\"1\"}")), "E_INVALID_HANDLE");
-        check("validateOverride", DcNative.validateOverride(h[0], b("{\"code_line\":\"OVR dt=R\",\"contract\":{},\"utterance_mono_ms\":\"1\",\"ref_frame_seq\":\"1\"}")), "SYNTAX");
+        check("tick handle 0", DcNative.tick(0L, b("{\"now_mono_ms\":1}")), "E_INVALID_HANDLE");
+        check("validateOverride", DcNative.validateOverride(h[0], b("{\"code_line\":\"OVR dt=R\",\"contract\":{},\"utterance_id\":\"u1\",\"utterance_mono_ms\":1,\"ref_frame_seq\":1}")), "SYNTAX");
         check("routeCommit", DcNative.routeCommit(h[0], b("{}")), "E_UNIMPLEMENTED");
         check("avoidOfferEval", DcNative.avoidOfferEval(h[0], b("{}")), "E_UNIMPLEMENTED");
         check("planCandidates", DcNative.planCandidates(b("{}")), "E_UNIMPLEMENTED");
@@ -34,8 +34,8 @@ public final class JniSmoke {
         check("tripScore", DcNative.tripScore(b("{}")), "E_UNIMPLEMENTED");
         check("exchangeValidate", DcNative.exchangeValidate(b("{}")), "E_UNIMPLEMENTED");
         // large payload pass-through (≈1 MB) still round-trips as a ByteArray
-        StringBuilder sb = new StringBuilder("{\"now_mono_ms\":\"20\",\"events\":[");
-        for (int i = 0; i < 20000; i++) { if (i > 0) sb.append(','); sb.append("{\"at_mono_ms\":\"20\",\"kind\":\"low_memory\"}"); }
+        StringBuilder sb = new StringBuilder("{\"now_mono_ms\":20,\"events\":[");
+        for (int i = 0; i < 20000; i++) { if (i > 0) sb.append(','); sb.append("{\"at_mono_ms\":20,\"kind\":\"low_memory\"}"); }
         sb.append("]}");
         check("tick 1MB", DcNative.tick(h[0], b(sb.toString())), "\"ok\":true");
         DcNative.sessionFree(h[0]);

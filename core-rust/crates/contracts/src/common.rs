@@ -1,6 +1,8 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// u64 carried as a decimal string on the JSON boundary (02 §2 rule 3).
+/// u64 carried as a decimal string on the JSON boundary (02 §2.1 / boundary rule 3).
+/// Only for u64 values that can reach the Web: OSM / Valhalla derived IDs and revisions
+/// (`trip_revision`, `route_revision`, edge ids). Everything else is a JSON number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct U64Str(pub u64);
 
@@ -28,8 +30,8 @@ impl<'de> Deserialize<'de> for U64Str {
 }
 
 /// Monotonic milliseconds (SystemClock.elapsedRealtime basis). Rust never reads a clock.
-/// TODO(schema-v1): draft #13 types MonoMs as U64Str; confirm string vs number.
-pub type MonoMs = U64Str;
+/// JSON integer (number), not a decimal string (ADR-0008 decision 2, 04 §2).
+pub type MonoMs = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

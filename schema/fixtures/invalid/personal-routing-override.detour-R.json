@@ -1,2 +1,2 @@
 {"schema_version":1,"intent_contract_id":"ic1","plan_request_id":"p1","trip_revision":"3","action":"suggest_route_preference",
- "weights":{},"junction_preferences":[],"detour":"R","expires_at_mono_ms":"1"}
+ "weights":{},"junction_preferences":[],"detour":"R","expires_at_mono_ms":1}

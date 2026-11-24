@@ -2,24 +2,24 @@
 use crate::common::{MonoMs, RouteKey, U64Str};
 use serde::{Deserialize, Serialize};
 
-/// Request of dc_validate_override (docs v1.2 02 §2.1:
-/// `{code_line, contract, utterance_mono_ms, ref_frame_seq, pending_offer_id?}`).
+/// Request of dc_validate_override (docs v1.2 02 §2.1 / 03 §4.2:
+/// `{code_line, contract, utterance_id, utterance_mono_ms, ref_frame_seq, pending_offer_id?}`).
 /// TODO(abi-v1): `contract` shape (IntentContract) is not defined; kept as raw JSON.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateOverrideRequest {
     pub code_line: String,
     pub contract: serde_json::Value,
-    /// In the #40 header draft but not in docs v1.2 02 §2.1 → optional. TODO(abi-v1): decide.
-    #[serde(default)]
-    pub utterance_id: Option<String>,
+    /// Required: same id as `asr_started` / `asr_result` (Gate 4 latency matching).
+    pub utterance_id: String,
     pub utterance_mono_ms: MonoMs,
-    pub ref_frame_seq: U64Str,
+    /// `ManeuverHorizon.frame_seq` the refs were read from (u64 → JSON number, 04 §2).
+    pub ref_frame_seq: u64,
     #[serde(default)]
     pub pending_offer_id: Option<String>,
 }
 
-/// Rejection reasons (devteam #40 / #37).
+/// Rejection reasons (03 §4.2, 7 kinds). Fixed uppercase strings as written in the docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RejectCode {
@@ -32,7 +32,8 @@ pub enum RejectCode {
     NoPendingTarget,
 }
 
-/// TODO(abi-v1): JSON tagging of Applied | Rejected is not specified; `result` tag is provisional.
+/// `Applied | Rejected` are type names; JSON carries the discriminator
+/// `"result": "applied" | "rejected"` (ADR-0008 decision 1, 02 §2.1).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)] // boundary DTO, built once per call

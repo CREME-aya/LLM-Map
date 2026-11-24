@@ -5,6 +5,13 @@ import java.io.Closeable
 // Owner of one dc_session handle. Must be confined to the NavigationSession actor
 // (single thread / single coroutine); this class does no locking on purpose.
 //
+// Time / scheduling contract (docs v1.2 ADR-0008):
+// - Pass SystemClock.elapsedRealtimeNanos()/1e6 as now_mono_ms (a JSON number) on every tick.
+// - Call tick() again no later than TickOutput.next_wake_mono_ms (it includes the search
+//   watchdog deadline); null means "tick on each Fix only". Never report a search timeout:
+//   Rust detects it from now_mono_ms and enters engine_stuck. search_finished.outcome is
+//   ok | cancelled | error, sent exactly once when the native call really returns.
+//
 // TODO(android): NOT COMPILED (no Gradle/Android SDK yet).
 // TODO(android): JSON parsing of the envelope (kotlinx.serialization?) is not decided;
 //                methods return the raw envelope bytes for now.

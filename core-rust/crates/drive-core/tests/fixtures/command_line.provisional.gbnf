@@ -1,15 +1,14 @@
-# PROVISIONAL COPY — canonical GBNF is owned by Hydrogenくん (not placed in the repo yet).
-# Source: devteam #23 (cmd set) + #25 (leading-key branch, fixed order rc→nr→mg→dt→jp, dt=T|S).
-# TODO(gbnf): canonical path is schema/slm/override.gbnf (v1.2 decision); switch the test to it once Hydrogenくん places it.
+# PROVISIONAL COPY of the GBNF in docs v1.2 03 §4.1 (verbatim). The canonical file is
+# schema/slm/override.gbnf (owned by Hydrogenくん); it did not exist on the base branch
+# CREME/chore-integrate-team-worktrees @ 1cb4e5a.
+# TODO(gbnf): delete this copy once schema/slm/override.gbnf lands; tests/command_line.rs
+#             already prefers the canonical file when it is present.
 root     ::= cmd "\n"
 cmd      ::= override | "CXL" | "WHY" | "BMK" | "YES" | "NO" | "NOOP"
-override ::= "OVR" (
-    " rc=" level (" nr=" level)? (" mg=" level)? (" dt=" detour)? (" jp=" jref)?
-  | " nr=" level (" mg=" level)? (" dt=" detour)? (" jp=" jref)?
-  | " mg=" level (" dt=" detour)? (" jp=" jref)?
-  | " dt=" detour (" jp=" jref)?
-  | " jp=" jref
-)
-level    ::= "L" | "N" | "H"
-detour   ::= "T" | "S"
-jref     ::= "last" | "next"
+override ::= "OVR" ( rc nr? mg? dt? jp? | nr mg? dt? jp? | mg dt? jp? | dt jp? | jp )
+rc ::= " rc=" level
+nr ::= " nr=" level
+mg ::= " mg=" level
+dt ::= " dt=" ("T" | "S")
+jp ::= " jp=" ("last" | "next")
+level ::= "L" | "N" | "H"

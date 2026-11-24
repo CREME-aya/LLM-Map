@@ -5,13 +5,14 @@
   "description": "Shared definitions. Source: devteam #13 draft (common.schema.json) + 02 §2 rule 3 (u64 as decimal string). TODO(schema-v1): $id host is a placeholder.",
   "$defs": {
     "U64Str": {
-      "description": "u64 as decimal string (TypeScript number is 53-bit).",
+      "description": "u64 as decimal string (TypeScript number is 53-bit). Only for Web-reachable u64 IDs / revisions (OSM / Valhalla derived ids, trip_revision, route_revision). docs v1.2 02 §2.1, 04 §2.",
       "type": "string",
       "pattern": "^(0|[1-9][0-9]{0,19})$"
     },
     "MonoMs": {
-      "description": "Monotonic ms (SystemClock.elapsedRealtime basis). Rust never reads a clock. Draft #13 defines MonoMs = U64Str. TODO(schema-v1): confirm string (vs number) for tick-rate fields.",
-      "$ref": "#/$defs/U64Str"
+      "description": "Monotonic ms (SystemClock.elapsedRealtime basis) as a JSON integer (number), not a decimal string. Rust never reads a clock. docs v1.2 ADR-0008 decision 2, 04 §2.",
+      "type": "integer",
+      "minimum": 0
     },
     "UnixS": {
       "description": "UNIX seconds (wall clock). Kept separate from MonoMs (time-kind separation, checklist #8).",

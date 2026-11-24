@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://slm-map.invalid/schema/maneuver-horizon.schema.json",
   "title": "ManeuverHorizon (v1 skeleton)",
-  "description": "Single source for UI and voice. Source: docs v1.2 04 §2 (shrimpfish) — u64 -> U64Str, refs{next?,last?}, AvoidOffer.summary structured (no text). JunctionRef/PassedRef fields: team decision relayed 2026-11-24 (not yet in docs). TODO(schema-v1): Flag enum, JunctionRef.kind enum; enum casing (docs use PascalCase, JSON here uses snake_case).",
+  "description": "Single source for UI and voice. Source: docs v1.2 04 §2 — U64Str only for trip_revision / route_revision (RouteKey); MonoMs, frame_seq and the other u64 values are JSON integers; enum values snake_case; refs{next?,last?}; AvoidOffer{offer_id, summary structured (no text)}. TODO(schema-v1): Flag enum, JunctionRef.kind enum.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -22,7 +22,8 @@
       "$ref": "common.schema.json#/$defs/RouteKey"
     },
     "frame_seq": {
-      "$ref": "common.schema.json#/$defs/U64Str"
+      "type": "integer",
+      "minimum": 0
     },
     "sampled_at_monotonic_ms": {
       "$ref": "common.schema.json#/$defs/MonoMs"
@@ -40,7 +41,8 @@
       ]
     },
     "matched_progress_cm": {
-      "$ref": "common.schema.json#/$defs/U64Str"
+      "type": "integer",
+      "minimum": 0
     },
     "upcoming": {
       "type": "array",
@@ -121,7 +123,8 @@
           "minimum": 0
         },
         "along_route_cm": {
-          "$ref": "common.schema.json#/$defs/U64Str"
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -245,12 +248,18 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "offer_id",
         "alt_route_id",
         "delta_eta_ms",
         "decision_deadline_monotonic_ms",
         "summary"
       ],
       "properties": {
+        "offer_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "ID that user_tap.target_id points at for an avoid chip (same treatment as alt_route_id / override_id)."
+        },
         "alt_route_id": {
           "type": "string"
         },
@@ -297,7 +306,7 @@
           }
         }
       },
-      "description": "TODO(schema-v1): docs define no offer id; what user_tap.target_id refers to is not specified."
+      "description": "Avoid chip (04 §2). Display/voice text is generated in Kotlin from summary.template_id; the SLM is not involved."
     },
     "EtaRange": {
       "type": "object",
@@ -356,7 +365,7 @@
       }
     },
     "JunctionRef": {
-      "description": "Target for jp=next (fixed at utterance time). Fields per team decision; kind enum TODO.",
+      "description": "Target for jp=next (fixed at utterance time). 04 §2. TODO(schema-v1): kind enum.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -382,7 +391,7 @@
       }
     },
     "PassedRef": {
-      "description": "Target for jp=last (passed within 180 s and 1.5 km). Fields per team decision.",
+      "description": "Target for jp=last (passed within 180 s and 1.5 km). 04 §2.",
       "type": "object",
       "additionalProperties": false,
       "required": [

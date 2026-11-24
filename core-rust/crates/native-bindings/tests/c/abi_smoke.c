@@ -22,9 +22,9 @@ int main(void) {
     dc_session* s = NULL;
     fails += expect(dc_session_new(in_str("{}"), &s), "\"ok\":true", "session_new");
     if (!s) { puts("FAIL session is NULL"); return 1; }
-    fails += expect(dc_tick(s, in_str("{\"now_mono_ms\":\"10\"}")), "\"planner_cmds\":[]", "tick");
+    fails += expect(dc_tick(s, in_str("{\"now_mono_ms\":10}")), "\"planner_cmds\":[]", "tick");
     fails += expect(dc_validate_override(s, in_str(
-        "{\"code_line\":\"YES\",\"contract\":{},\"utterance_mono_ms\":\"1\",\"ref_frame_seq\":\"1\"}")),
+        "{\"code_line\":\"YES\",\"contract\":{},\"utterance_id\":\"u1\",\"utterance_mono_ms\":1,\"ref_frame_seq\":1}")),
         "NO_PENDING_TARGET", "validate_override");
     fails += expect(dc_route_commit(s, in_str("{}")), "E_UNIMPLEMENTED", "route_commit");
     fails += expect(dc_avoid_offer_eval(s, in_str("{}")), "E_UNIMPLEMENTED", "avoid_offer_eval");
