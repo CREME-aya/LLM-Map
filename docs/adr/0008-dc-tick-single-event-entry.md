@@ -14,7 +14,8 @@
    - 入力 `dc_in{ptr,len}` は呼び出し側が持つ（関数が戻るまで有効）。出力 `dc_out` は Rust が確保し、`dc_buf_free` で解放する。返り値は `{ok, data | error{code,msg}}` で、panic は `catch_unwind` で捕まえて `E_PANIC` にする。
    - 呼び出すのは `NavigationSession` actor 1 本だけ。
    - `dc_validate_override` の結果 `Applied` / `Rejected` は型名で、JSON では判別タグ `"result": "applied" | "rejected"`（snake_case）として出す（Rust 内部の状態名 `Idle` / `Running` / `CancelRequested` は JSON に出ないので PascalCase のまま）。
-2. **走行中のイベントは `dc_tick` からしか入れない**。下の型定義は **本 ADR が正本** で、他の文書には要点とリンクだけを置く。
+2. **走行中のイベントは `dc_tick` からしか入れない**。型の分担は次のとおり。**JSON の形（フィールド名・型・必須/任意・列挙値・判別タグ）の正本は `schema/tick.schema.json`**（テストで機械検証する）。**各フィールドの意味と決定の理由の正本は本 ADR**。下の型定義は本 ADR での要約で、形が `schema/tick.schema.json` と食い違ったら schema を正として本 ADR を直す。他の文書には要点とリンクだけを置く。
+   - 判別タグ：`Event` は `kind`、`PlannerCmd` は `cmd`、`UiCmd` は `ui` で種別を表す（例：`{"at_mono_ms":…, "kind":"tts_started", "token":…}`）。
 
 ```
 TickInput  = { now_mono_ms, fix?: Fix, events: [Event] }          // events は at_mono_ms 昇順（Rust が検証）
@@ -39,7 +40,7 @@ TickOutput = { horizon?, voice_cmds, ui_cmds, planner_cmds, next_wake_mono_ms: u
    - `events` が `at_mono_ms` の昇順になっていない場合、Rust は **並べ替えず**、前の値に合わせて `clock_regression` を記録する。
 3. **出力**
    - `horizon` は `frame_seq` が変わったときだけ返す（[04 §2](../specs/04-maneuver-horizon-and-hmi.md)）。
-   - `planner_cmds: start{req_id, priority, route_key, graph_version} | cancel{req_id}` は Rust が出し、Kotlin が実行する。
+   - `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version} | cancel{req_id}` は Rust が出し、Kotlin が実行する。
    - `next_wake_mono_ms` は、**新しい入力がなくても出力が変わり得る最も早い単調時刻**（探索の監視期限を含む）。Kotlin はそれまでに `dc_tick` を呼ぶ（早めに呼ぶのは可）。待つものがなければ **null** で、その場合は Fix が届くたびの tick だけでよい。
 4. **状態は持つが、IO・スレッド・時計は持たない**: Rust はセッション（`dc_session_new` / `dc_session_free`）の中に状態を持つ。IO・スレッド・時計は持たない。
 5. **単調時刻の規約**

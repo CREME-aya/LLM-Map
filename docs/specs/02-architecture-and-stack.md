@@ -30,7 +30,9 @@ Round 5〜6 の 3 者協議により、「1 人＋AI コーディングでの完
 
 ```text
 <repo-root>/
-├── schema/                   # JSON Schema（唯一の正：TripPlan, IntentContract, Override, DriveDiary）
+├── schema/                   # JSON Schema（JSON の形の唯一の正）：common / trip-plan-snapshot / candidate-facts /
+│   │                         #   maneuver-horizon / personal-routing-override / tick（dc_tick 入出力。意味は ADR-0008）
+│   │                         #   ※ IntentContract・DriveDiary・exchange-v1 は未作成
 │   ├── fixtures/             # Rust (serde) と Web (Zod) の共通適合テストデータ
 │   └── slm/
 │       ├── override.gbnf     # L3 1 行命令コードの GBNF 正本（docs の写しは 03 §4.1）
