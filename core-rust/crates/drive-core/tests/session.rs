@@ -117,7 +117,7 @@ fn clock_regression_is_logged() {
 #[test]
 fn session_config_rejects_unknown_fields() {
     assert!(Session::from_json(br#"{}"#).is_ok());
-    assert!(Session::from_json(br#"{"search_deadline_ms":5000}"#).is_ok());
+    assert!(Session::from_json(br#"{"watchdog_short_ms":4000}"#).is_ok());
     assert_eq!(
         Session::from_json(br#"{"nope":1}"#).unwrap_err().code,
         ErrorCode::Schema

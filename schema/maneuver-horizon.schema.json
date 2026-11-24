@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://slm-map.invalid/schema/maneuver-horizon.schema.json",
   "title": "ManeuverHorizon (v1 skeleton)",
-  "description": "Single source for UI and voice. Source: docs v1.2 04 §2 — U64Str only for trip_revision / route_revision (RouteKey); MonoMs, frame_seq and the other u64 values are JSON integers; enum values snake_case; refs{next?,last?}; AvoidOffer{offer_id, summary structured (no text)}. TODO(schema-v1): Flag enum, JunctionRef.kind enum.",
+  "description": "Single source for UI and voice. Source: docs v1.2 04 §2 — U64Str only for trip_revision / route_revision (RouteKey); MonoMs, frame_seq (team agreement 2026-11-24: stays numeric) and the other u64 values are JSON integers; enum values snake_case; refs{next?,last?}; AvoidOffer{offer_id, summary structured (no text)}. TODO(schema-v1): Flag enum, JunctionRef.kind enum.",
   "type": "object",
   "additionalProperties": false,
   "required": [

@@ -1,0 +1,630 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slm-map.invalid/schema/tick.schema.json",
+  "title": "dc_tick v2 (TickInput / Event / TickOutput)",
+  "description": "dc_tick v2 contract. Canonical: docs v1.2 ADR-0008 (decisions 2/3/6) and 03 §3.1. Mirrors contracts::tick (core-rust). *_mono_ms are JSON integers; enum values snake_case; reroute_result / search_cancelled are abolished (search_finished is the only terminal event); search_finished.outcome has no timeout. The root accepts either a TickInput or a TickOutput; validate against #/$defs/<Name> for a specific type. TODO(schema-v1): token / utterance_id / reason / tier value types, VoiceCmd shape, UiCmd catalogue and the PlannerCmd tag name `cmd` are provisional.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/TickInput"
+    },
+    {
+      "$ref": "#/$defs/TickOutput"
+    }
+  ],
+  "$defs": {
+    "TickInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "now_mono_ms"
+      ],
+      "properties": {
+        "now_mono_ms": {
+          "$ref": "common.schema.json#/$defs/MonoMs"
+        },
+        "fix": {
+          "$ref": "#/$defs/Fix"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "description": "In at_mono_ms ascending order (Rust clamps and logs clock_regression otherwise; it does not re-sort)."
+        }
+      }
+    },
+    "Fix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "at_mono_ms",
+        "lat",
+        "lon",
+        "acc_m"
+      ],
+      "properties": {
+        "at_mono_ms": {
+          "$ref": "common.schema.json#/$defs/MonoMs"
+        },
+        "lat": {
+          "type": "number"
+        },
+        "lon": {
+          "type": "number"
+        },
+        "acc_m": {
+          "type": "number"
+        },
+        "bearing": {
+          "type": "number"
+        },
+        "speed": {
+          "type": "number"
+        }
+      }
+    },
+    "Event": {
+      "description": "Event = {at_mono_ms} & one kind-specific variant, tagged by `kind`.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "token"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "tts_started"
+            },
+            "token": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "token"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "tts_done"
+            },
+            "token": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "token"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "tts_stopped"
+            },
+            "token": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "utterance_id"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "asr_started"
+            },
+            "utterance_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "utterance_id",
+            "text_class"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "asr_result"
+            },
+            "utterance_id": {
+              "type": "string"
+            },
+            "text_class": {
+              "enum": [
+                "dict",
+                "natural"
+              ]
+            },
+            "dict_norm": {
+              "type": "string"
+            }
+          },
+          "description": "Dictionary matching is done in Rust; raw utterance text never crosses (only text_class + normalized dict string)."
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "utterance_id"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "asr_failed"
+            },
+            "utterance_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "utterance_id",
+            "status",
+            "confirm_screen_id"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "override_ready"
+            },
+            "utterance_id": {
+              "type": "string"
+            },
+            "override_id": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "ok",
+                "timeout",
+                "error"
+              ]
+            },
+            "confirm_screen_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "target_id",
+            "action"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "user_tap"
+            },
+            "target_id": {
+              "type": "string"
+            },
+            "action": {
+              "enum": [
+                "confirm",
+                "avoid",
+                "undo"
+              ]
+            }
+          },
+          "description": "Only taps come from Kotlin as consent. target_id = AvoidOffer.offer_id | override_id | confirm_screen_id (ADR-0008, 03 §4.2)."
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "status"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "thermal"
+            },
+            "status": {
+              "$ref": "#/$defs/ThermalStatus"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "low_memory"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "reason"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "inference_down"
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "tier"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "inference_up"
+            },
+            "tier": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "audio_focus_lost"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "active"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "call_state"
+            },
+            "active": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "req_id",
+            "route_key",
+            "graph_version",
+            "outcome",
+            "engine_ms"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "search_finished"
+            },
+            "req_id": {
+              "type": "string"
+            },
+            "route_key": {
+              "$ref": "common.schema.json#/$defs/RouteKey"
+            },
+            "graph_version": {
+              "type": "string"
+            },
+            "outcome": {
+              "$ref": "#/$defs/SearchOutcome"
+            },
+            "comparison_ref": {
+              "type": "string"
+            },
+            "engine_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Wall time of the Valhalla call (measurement only)."
+            }
+          },
+          "description": "The single terminal event: exactly one per started search. There is no timeout outcome (03 §3.1)."
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "engine_reset"
+            }
+          },
+          "description": "Valhalla actor re-created. Does not by itself resume searching."
+        }
+      ]
+    },
+    "ThermalStatus": {
+      "description": "Android THERMAL_STATUS_* (7 levels).",
+      "enum": [
+        "none",
+        "light",
+        "moderate",
+        "severe",
+        "critical",
+        "emergency",
+        "shutdown"
+      ]
+    },
+    "SearchOutcome": {
+      "enum": [
+        "ok",
+        "cancelled",
+        "error"
+      ]
+    },
+    "SearchPriority": {
+      "description": "Single priority queue, highest first: reroute > explicit_plan > avoid_chip > comparison (03 §3.1).",
+      "enum": [
+        "reroute",
+        "explicit_plan",
+        "avoid_chip",
+        "comparison"
+      ]
+    },
+    "TickOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "voice_cmds",
+        "ui_cmds",
+        "planner_cmds",
+        "next_wake_mono_ms",
+        "log"
+      ],
+      "properties": {
+        "horizon": {
+          "$ref": "maneuver-horizon.schema.json",
+          "description": "Only present when frame_seq changed (04 §2)."
+        },
+        "voice_cmds": {
+          "type": "array",
+          "items": {},
+          "description": "TODO(schema-v1): VoiceCmd shape not specified."
+        },
+        "ui_cmds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UiCmd"
+          }
+        },
+        "planner_cmds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlannerCmd"
+          }
+        },
+        "next_wake_mono_ms": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Earliest mono time the output may change without new input (watchdog deadline, comparison budget). null = nothing to wait for. ADR-0008 decision 3."
+        },
+        "log": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LogEvent"
+          }
+        }
+      }
+    },
+    "PlannerCmd": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cmd",
+            "req_id",
+            "priority",
+            "route_key",
+            "graph_version"
+          ],
+          "properties": {
+            "cmd": {
+              "const": "start"
+            },
+            "req_id": {
+              "type": "string"
+            },
+            "priority": {
+              "$ref": "#/$defs/SearchPriority"
+            },
+            "route_key": {
+              "$ref": "common.schema.json#/$defs/RouteKey"
+            },
+            "graph_version": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cmd",
+            "req_id"
+          ],
+          "properties": {
+            "cmd": {
+              "const": "cancel"
+            },
+            "req_id": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "UiCmd": {
+      "description": "TODO(schema-v1): catalogue not specified; only what the planner emits today.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ui"
+          ],
+          "properties": {
+            "ui": {
+              "const": "show_checking_route"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ui",
+            "req_id"
+          ],
+          "properties": {
+            "ui": {
+              "const": "search_result_ready"
+            },
+            "req_id": {
+              "type": "string"
+            },
+            "comparison_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "LogEvent": {
+      "description": "Structured, privacy-safe log (no raw utterance text).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "at_mono_ms",
+        "what"
+      ],
+      "properties": {
+        "at_mono_ms": {
+          "$ref": "common.schema.json#/$defs/MonoMs"
+        },
+        "what": {
+          "type": "string"
+        },
+        "req_id": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

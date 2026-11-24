@@ -9,12 +9,14 @@ The contract shared by Web (Zod) and Rust (serde) (ADR-0002 §4). All files use 
 | `candidate-facts.schema.json` | `CandidateFacts` (scoring JSON generated once by C++) | Input to `dc_rank` / `dc_avoid_offer_eval` |
 | `maneuver-horizon.schema.json` | `ManeuverHorizon` v1 (including `refs{next?,last?}` and `AvoidOffer.offer_id`) | `TickOutput.horizon` |
 | `personal-routing-override.schema.json` | Expanded form of the 1-line `OVR` code | `Applied.override` from `dc_validate_override` |
+| `tick.schema.json` | `dc_tick` v2: `TickInput` / `Fix` / `Event` (all v2 kinds) / `TickOutput` / `PlannerCmd` / `UiCmd` / `LogEvent` (root = TickInput or TickOutput; specific types under `$defs`) | `dc_tick` in / out |
 
 - `fixtures/valid/<schema>.*.json` must pass the schema; `fixtures/invalid/<schema>.*.json` must fail it.
   This is checked by `core-rust/crates/contracts/tests/schema_fixtures.rs`.
 - Not placed here (owned by other members): `schema/slm/override.gbnf` and `schema/slm/expected_codes.json` (Hydrogenくん).
   The sidecar binary spec is `pipeline/packs/sidecar-format.md` (sol6.2さん).
-- The `dc_tick` `TickInput`/`TickOutput` types are canonical in ADR-0008. This skeleton has no tick schema yet; only the Rust types exist (`contracts::tick`) (TODO).
+- The `dc_tick` `TickInput`/`TickOutput` types are canonical in ADR-0008; `tick.schema.json` mirrors them and `contracts::tick`.
+  The contracts tests check that the serde types and the tick fixtures (`fixtures/*/tick.*.json`, `core-rust/tests/fixtures/tick/`) agree with it.
 
 JSON conventions (docs v1.2 ADR-0008 decision 2 / 04 §2): `MonoMs` and other numbers are JSON integers; `U64Str`
 is used only for Web-reachable u64 IDs / revisions; enum values are snake_case.
