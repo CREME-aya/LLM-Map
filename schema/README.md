@@ -9,11 +9,12 @@ The contract shared by Web (Zod) and Rust (serde) (ADR-0002 §4). All files use 
 | `candidate-facts.schema.json` | `CandidateFacts` (scoring JSON generated once by C++) | Input to `dc_rank` / `dc_avoid_offer_eval` |
 | `maneuver-horizon.schema.json` | `ManeuverHorizon` v1 (including `refs{next?,last?}` and `AvoidOffer.offer_id`) | `TickOutput.horizon` |
 | `personal-routing-override.schema.json` | Expanded form of the 1-line `OVR` code | `Applied.override` from `dc_validate_override` |
+| `slm/override.gbnf` | Canonical GBNF grammar for the driving-time 1-line L3 command code (03 §4.1) | `:inference` (`llama.cpp`), `drive-core` parser conformance, Gate 4 harness |
+| `slm/expected_codes.json` | Canonical specification of 1-line command codes, deterministic phrase dictionary, OVR canonical order, and Gate 4 scoring policy (03 §4.1 / 07 §2.3) | Gate 4 harness (`pipeline/harness/gate4/`), Rust dict prefilter |
 
 - `fixtures/valid/<schema>.*.json` must pass the schema; `fixtures/invalid/<schema>.*.json` must fail it.
   This is checked by `core-rust/crates/contracts/tests/schema_fixtures.rs`.
-- Not placed here (owned by other members): `schema/slm/override.gbnf` and `schema/slm/expected_codes.json` (Hydrogenくん).
-  The sidecar binary spec is `pipeline/packs/sidecar-format.md` (sol6.2さん).
+- The sidecar binary spec is `pipeline/packs/sidecar-format.md` (sol6.2さん).
 - The `dc_tick` `TickInput`/`TickOutput` types are canonical in ADR-0008. This skeleton has no tick schema yet; only the Rust types exist (`contracts::tick`) (TODO).
 
 JSON conventions (docs v1.2 ADR-0008 decision 2 / 04 §2): `MonoMs` and other numbers are JSON integers; `U64Str`

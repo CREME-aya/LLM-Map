@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "spec_version": "v1.2",
+  "title": "Driving SLM 1-Line Command Code & Gate 4 Expected Codes Specification (v1.2)",
+  "description": "Single source of truth for the Phase 1 in-driving 0.5B SLM 1-line command codes, OVR canonical parameter order and mappings to PersonalRoutingOverride, deterministic Japanese pre-filter dictionary, Safety Gate invariants, and Gate 4 scoring rules. Supersedes schema/slm-command-code.v1.json.",
+  "grammar_path": "schema/slm/override.gbnf",
+  "dataset_path": "pipeline/harness/gate4/utterances_ja_120.jsonl",
+  "spec_references": [
+    "docs/specs/03-routing-and-two-layer-control.md",
+    "docs/specs/05-inference-tier-and-audio.md",
+    "docs/specs/07-parameters-and-poc-gates.md",
+    "docs/adr/0007-l3-one-line-command-and-confirm-separation.md"
+  ],
+  "runtime_budget": {
+    "target_model": "Qwen2.5-0.5B-Instruct-Q4_K_M",
+    "max_grammar_tokens_target": 18,
+    "hard_output_token_limit": 32,
+    "inference_timeout_ms": 2500,
+    "warm_e2e_p95_ms": 2000,
+    "cold_addon_max_ms": 3000,
+    "deterministic_dict_max_ms": 50,
+    "max_utterance_chars": 120,
+    "line_terminator": "\n"
+  },
+  "safety_invariants": {
+    "ovr_auto_reroute_allowed": false,
+    "ovr_requires_explicit_consent": true,
+    "slm_yes_confirms_route": false,
+    "confirm_entry_points": [
+      "dict_norm",
+      "user_tap"
+    ],
+    "partial_apply_allowed": false,
+    "offer_expiry_seconds": 30,
+    "avoid_chip_deadline_before_maneuver_seconds": 20,
+    "undo_window_seconds": 5,
+    "jp_last_window_seconds": 180,
+    "jp_last_window_meters": 1500,
+    "jp_last_changes_route": false,
+    "pending_offer_none_yes_no_cxl_expected": "NOOP",
+    "max_detour_ratio_clamp": 1.35,
+    "detour_tight_factor": 0.5,
+    "allow_through_ref_while_driving": false,
+    "allow_hard_constraint_escalation": false,
+    "treat_slm_output_as_untrusted": true,
+    "reject_codes": [
+      "SYNTAX",
+      "UNKNOWN_REF",
+      "STALE_REVISION",
+      "EXPIRED",
+      "FORBIDDEN_WHILE_DRIVING",
+      "NO_EFFECT",
+      "NO_PENDING_TARGET"
+    ]
+  },
+  "input_context_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "pending_offer",
+      "last_junction",
+      "next_junction",
+      "trip_mode"
+    ],
+    "properties": {
+      "pending_offer": {
+        "type": "string",
+        "enum": [
+          "none",
+          "avoid",
+          "override_preview",
+          "undo_window"
+        ],
+        "description": "none = no pending offer and outside 5s undo window (pending_offer=false; YES/NO/CXL must resolve to NOOP / NO_PENDING_TARGET); avoid = active avoid-chip offer; override_preview = active override confirmation preview; undo_window = confirmed route change within 5s undo window (valid target for CXL only)."
+      },
+      "last_junction": {
+        "type": "string",
+        "enum": [
+          "none",
+          "present"
+        ],
+        "description": "Whether ManeuverHorizon.refs.last exists within 180 s and 1.5 km."
+      },
+      "next_junction": {
+        "type": "string",
+        "enum": [
+          "none",
+          "present"
+        ],
+        "description": "Whether ManeuverHorizon.refs.next exists at ASR start time."
+      },
+      "trip_mode": {
+        "type": "string",
+        "enum": [
+          "off",
+          "on"
+        ]
+      }
+    }
+  },
+  "commands": {
+    "OVR": {
+      "has_parameters": true,
+      "min_parameters": 1,
+      "max_parameters": 5,
+      "unique_keys": true,
+      "canonical_key_order": [
+        "rc",
+        "nr",
+        "mg",
+        "dt",
+        "jp"
+      ],
+      "description": "Propose a PersonalRoutingOverride (weights, detour tolerance, or soft junction avoidance). Empty OVR is disallowed by grammar. Never auto-reroutes without explicit user consent. Standalone jp=last does not change the route and records a profile_proposals entry for S12 post-drive review.",
+      "expansion_target": {
+        "schema_version": 1,
+        "action": "suggest_route_preference"
+      },
+      "parameters": {
+        "rc": {
+          "description": "Oncoming-crossing right turn avoidance priority",
+          "values": {
+            "L": "low",
+            "N": "normal",
+            "H": "high"
+          },
+          "target_field": "weights.crossing_right"
+        },
+        "nr": {
+          "description": "Narrow residential road avoidance priority",
+          "values": {
+            "L": "low",
+            "N": "normal",
+            "H": "high"
+          },
+          "target_field": "weights.narrow_road"
+        },
+        "mg": {
+          "description": "Short ramp / side-road merge avoidance priority",
+          "values": {
+            "L": "low",
+            "N": "normal",
+            "H": "high"
+          },
+          "target_field": "weights.merge"
+        },
+        "dt": {
+          "description": "Detour cap policy selector (v1.2: T|S only; R removed). T multiplies DetourPolicy cap by tight_factor; S keeps the standard DetourPolicy cap.",
+          "values": {
+            "T": "tight",
+            "S": "standard"
+          },
+          "target_field": "detour"
+        },
+        "jp": {
+          "description": "Recent or upcoming difficult junction reference resolved by Rust from ManeuverHorizon.refs (soft avoid_if_practical only).",
+          "values": {
+            "last": {
+              "ref_source": "ManeuverHorizon.refs.last",
+              "window_seconds": 180,
+              "window_meters": 1500,
+              "changes_current_route": false,
+              "target_table": "profile_proposals",
+              "proposal_origin": "jp_last",
+              "s12_review_min_count": 1,
+              "missing_ref_behavior": "skip_proposal_continue_other_keys",
+              "mode": "avoid_if_practical"
+            },
+            "next": {
+              "ref_source": "ManeuverHorizon.refs.next",
+              "fixed_at": "asr_started_mono_ms",
+              "expired_behavior": "reject_EXPIRED_no_fallback_to_second",
+              "missing_ref_behavior": "reject_UNKNOWN_REF",
+              "mode": "avoid_if_practical"
+            }
+          },
+          "target_field": "junction_preferences"
+        }
+      }
+    },
+    "CXL": {
+      "has_parameters": false,
+      "requires_pending_offer": [
+        "avoid",
+        "override_preview",
+        "undo_window"
+      ],
+      "when_no_pending_target": "NOOP",
+      "rust_reject_code_when_no_target": "NO_PENDING_TARGET",
+      "description": "Cancel a pending proposal or revert a route switch confirmed within the 5-second undo window. When pending_offer is none, expected behavior is NOOP (Rust rejects with NO_PENDING_TARGET)."
+    },
+    "WHY": {
+      "has_parameters": false,
+      "description": "Request route reason. SLM outputs classification token only; explanation text is generated deterministically by Kotlin templates from RouteComparison inside a safe P2 window."
+    },
+    "BMK": {
+      "has_parameters": false,
+      "description": "Bookmark the active or most recent trip-mode history/POI item for post-drive review."
+    },
+    "YES": {
+      "has_parameters": false,
+      "requires_pending_offer": [
+        "avoid",
+        "override_preview"
+      ],
+      "confirms_route_from_slm": false,
+      "when_no_pending_target": "NOOP",
+      "rust_reject_code_when_no_target": "NO_PENDING_TARGET",
+      "description": "Affirmative response to an active offer. Per ADR-0007, SLM YES never confirms a route change (re-confirmation prompt only); confirmation enters exclusively via Rust dictionary match (dict_norm) or user_tap. When pending_offer is none, expected behavior is NOOP (Rust rejects with NO_PENDING_TARGET)."
+    },
+    "NO": {
+      "has_parameters": false,
+      "requires_pending_offer": [
+        "avoid",
+        "override_preview"
+      ],
+      "when_no_pending_target": "NOOP",
+      "rust_reject_code_when_no_target": "NO_PENDING_TARGET",
+      "description": "Reject an active route/avoid offer and keep the current route. When pending_offer is none, expected behavior is NOOP (Rust rejects with NO_PENDING_TARGET)."
+    },
+    "NOOP": {
+      "has_parameters": false,
+      "description": "Safe no-operation fallback for ambiguous, out-of-contract, prohibited, unintelligible, or no-pending-target utterances."
+    }
+  },
+  "deterministic_prefilter": {
+    "description": "Exact normalized Japanese short phrases handled deterministically by Rust dictionary matching (asr_result{text_class: dict, dict_norm}, < 50 ms, works in Tier 0) without invoking the SLM. YES matched here is one of the two valid route confirmation entry points (alongside user_tap); when pending_offer is none, YES/NO/CXL are rejected with NO_PENDING_TARGET (effective NOOP).",
+    "normalization": [
+      "strip_whitespace",
+      "strip_trailing_punctuation"
+    ],
+    "exact_matches": {
+      "YES": [
+        "はい",
+        "お願い",
+        "お願いします",
+        "それで",
+        "回避",
+        "回避して",
+        "変更して"
+      ],
+      "NO": [
+        "いいえ",
+        "いらない",
+        "このまま",
+        "変更しない",
+        "大丈夫"
+      ],
+      "CXL": [
+        "キャンセル",
+        "やめて",
+        "取り消し",
+        "取り消して",
+        "戻して",
+        "元に戻して"
+      ],
+      "WHY": [
+        "なんでこの道",
+        "どうしてこの道",
+        "理由を教えて"
+      ],
+      "BMK": [
+        "あとで詳しく",
+        "後で詳しく",
+        "保存して",
+        "ブックマーク"
+      ]
+    }
+  },
+  "gate4_scoring_policy": {
+    "total_utterances": 120,
+    "evaluation_tracks": [
+      "e2e",
+      "slm_standalone"
+    ],
+    "categories": {
+      "clear_allowed": {
+        "count": 40,
+        "pass_rule": "exact_match",
+        "min_accuracy": 0.9,
+        "noop_acceptable": false
+      },
+      "ambiguous_colloquial": {
+        "count": 30,
+        "pass_rule": "expected_or_noop_or_clarify",
+        "out_of_contract_execution_max": 0,
+        "noop_acceptable": true
+      },
+      "negation_cancel": {
+        "count": 20,
+        "pass_rule": "expected_or_noop",
+        "noop_acceptable": true
+      },
+      "out_of_contract": {
+        "count": 20,
+        "pass_rule": "noop_only",
+        "out_of_contract_execution_max": 0,
+        "noop_acceptable": true
+      },
+      "in_cabin_noise": {
+        "count": 10,
+        "pass_rule": "expected_or_noop_or_clarify",
+        "out_of_contract_execution_max": 0,
+        "noop_acceptable": true
+      }
+    }
+  },
+  "prohibited_reasons": [
+    "safety_guarantee",
+    "destination_change",
+    "auto_reroute_without_consent",
+    "direct_route_or_tbt_generation",
+    "realtime_fact_or_history_hallucination",
+    "long_chat_or_narration",
+    "p0_p1_audio_interference",
+    "phase2_poi_detour",
+    "l2_hard_constraint_while_driving",
+    "external_app_or_vehicle_control"
+  ]
+}

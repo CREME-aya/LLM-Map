@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Validate Gate 4 SLM command code spec, GBNF grammar, and 120-utterance dataset.
+"""Validate Gate 4 SLM command code spec, GBNF grammar, and 120-utterance dataset (v1.2).
 
-This script uses only the Python standard library and parses the actual GBNF
-file directly (not a hardcoded regex duplicate) to verify grammar soundness and
-dataset conformance.
+Uses only the Python standard library and parses schema/slm/override.gbnf directly
+(no hardcoded regex duplicate) to verify grammar soundness, character-level parity
+with docs/specs/03-routing-and-two-layer-control.md §4.1, expected_codes.json
+alignment, v1.2 safety invariants, and JSONL/TSV parity.
 """
 
 from __future__ import annotations
@@ -13,14 +14,20 @@ import csv
 import itertools
 import json
 import pathlib
+import re
 import sys
 from dataclasses import dataclass
 from typing import Any
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
-SCHEMA_PATH = REPO_ROOT / "schema" / "slm-command-code.v1.json"
-GBNF_PATH = REPO_ROOT / "android" / "native" / "inference" / "grammars" / "driving_command_v1.gbnf"
+SCHEMA_PATH = REPO_ROOT / "schema" / "slm" / "expected_codes.json"
+GBNF_PATH = REPO_ROOT / "schema" / "slm" / "override.gbnf"
+SPEC_03_PATH = REPO_ROOT / "docs" / "specs" / "03-routing-and-two-layer-control.md"
+LEGACY_SCHEMA_PATH = REPO_ROOT / "schema" / "slm-command-code.v1.json"
+LEGACY_GBNF_PATH = (
+    REPO_ROOT / "android" / "native" / "inference" / "grammars" / "driving_command_v1.gbnf"
+)
 JSONL_PATH = REPO_ROOT / "pipeline" / "harness" / "gate4" / "utterances_ja_120.jsonl"
 TSV_PATH = REPO_ROOT / "pipeline" / "harness" / "gate4" / "utterances_ja_120.tsv"
 
@@ -42,12 +49,26 @@ ALLOWED_NOISE_PROFILES = {
     "radio_bleed",
 }
 
+ALLOWED_EXPECTED_EFFECTS = {
+    "override_preview",
+    "s12_review_proposal",
+    "confirm_offer",
+    "reconfirm_offer",
+    "reject_offer",
+    "cancel_offer",
+    "undo_recent_change",
+    "speak_reason_template",
+    "bookmark_history",
+    "noop",
+}
+
 TSV_COLUMNS = [
     "id",
     "category",
     "dispatch_path",
     "expected_code",
     "acceptable_codes",
+    "expected_effect",
     "pending_offer",
     "last_junction",
     "next_junction",
@@ -306,7 +327,6 @@ def normalize_japanese_utterance(text: str) -> str:
 
 def estimate_bpe_tokens(command_with_newline: str) -> int:
     """Conservative upper-bound BPE token estimate for ASCII fixed command lines."""
-    # Splits on spaces and '=' so each key, '=', value, cmd, and newline counts separately.
     text = command_with_newline
     tokens = 0
     if text.endswith("\n"):
@@ -315,17 +335,43 @@ def estimate_bpe_tokens(command_with_newline: str) -> int:
     parts = text.split(" ")
     for idx, part in enumerate(parts):
         if idx == 0:
-            # Command keyword such as OVR / NOOP (up to 2 BPE tokens on Qwen2.5)
             tokens += 2 if len(part) >= 3 else 1
         elif "=" in part:
-            # ' key', '=', 'val' -> 3 tokens
             tokens += 3
         else:
             tokens += 2
     return tokens
 
 
-def verify_grammar(grammar: GbnfParser, schema: dict[str, Any]) -> None:
+def verify_single_source_of_truth(gbnf_text: str, schema: dict[str, Any]) -> None:
+    if LEGACY_SCHEMA_PATH.exists():
+        raise ValueError(
+            f"Duplicate legacy schema still exists: {LEGACY_SCHEMA_PATH.relative_to(REPO_ROOT)}"
+        )
+    if LEGACY_GBNF_PATH.exists():
+        legacy_text = LEGACY_GBNF_PATH.read_text(encoding="utf-8")
+        if legacy_text != gbnf_text:
+            raise ValueError(
+                f"Legacy grammar {LEGACY_GBNF_PATH.relative_to(REPO_ROOT)} differs from "
+                f"canonical {GBNF_PATH.relative_to(REPO_ROOT)}"
+            )
+    if schema.get("grammar_path") != "schema/slm/override.gbnf":
+        raise ValueError(f"expected_codes.json grammar_path mismatch: {schema.get('grammar_path')!r}")
+
+    # Verify exact character-for-character parity with docs/specs/03 §4.1 when docs exist
+    if SPEC_03_PATH.exists():
+        spec_text = SPEC_03_PATH.read_text(encoding="utf-8")
+        match = re.search(r"```gbnf\n(.*?)```", spec_text, flags=re.DOTALL)
+        if not match:
+            raise ValueError(f"Could not locate ```gbnf block in {SPEC_03_PATH}")
+        spec_gbnf = match.group(1)
+        if gbnf_text != spec_gbnf:
+            raise ValueError(
+                "schema/slm/override.gbnf does not match docs/specs/03 §4.1 character-for-character"
+            )
+
+
+def verify_grammar(grammar: GbnfParser, schema: dict[str, Any]) -> int:
     # 1. All simple commands accepted with trailing '\n', rejected without '\n'
     simple_cmds = [
         cmd for cmd, meta in schema["commands"].items() if not meta["has_parameters"]
@@ -335,28 +381,27 @@ def verify_grammar(grammar: GbnfParser, schema: dict[str, Any]) -> None:
         assert not grammar.accepts(cmd), f"Grammar accepted cmd without newline: {cmd!r}"
         assert not grammar.accepts(f"{cmd} rc=H\n"), f"Grammar accepted params on {cmd!r}"
 
-    # 2. All 30 canonical OVR key subsets (size 1..4) MUST be accepted
+    # 2. Verify dt values strictly T|S (R removed in v1.2)
     ovr_meta = schema["commands"]["OVR"]
     key_order = ovr_meta["canonical_key_order"]
-    sample_val = {
-        key: next(iter(ovr_meta["parameters"][key]["values"].keys()))
-        for key in key_order
-    }
+    assert key_order == ["rc", "nr", "mg", "dt", "jp"], f"Unexpected key order: {key_order!r}"
+    dt_vals = list(ovr_meta["parameters"]["dt"]["values"].keys())
+    assert dt_vals == ["T", "S"], f"dt must be ['T', 'S'] only, got {dt_vals!r}"
 
+    # 3. Exhaustive check: all 31 canonical subsets and all 581 valid sentences MUST be accepted
     accepted_subsets = 0
-    for r in range(1, 5):
+    total_valid_sentences = len(simple_cmds)
+    for r in range(1, len(key_order) + 1):
         for combo in itertools.combinations(key_order, r):
-            kv_str = " ".join(f"{k}={sample_val[k]}" for k in combo)
-            line = f"OVR {kv_str}\n"
-            assert grammar.accepts(line), f"Grammar rejected valid OVR subset: {line!r}"
             accepted_subsets += 1
-    assert accepted_subsets == 30, f"Expected 30 subsets, checked {accepted_subsets}"
-
-    # 3. Every individual key=value allowed by schema MUST be accepted
-    for key in key_order:
-        for val in ovr_meta["parameters"][key]["values"].keys():
-            line = f"OVR {key}={val}\n"
-            assert grammar.accepts(line), f"Grammar rejected valid kv: {line!r}"
+            value_lists = [list(ovr_meta["parameters"][k]["values"].keys()) for k in combo]
+            for vals in itertools.product(*value_lists):
+                kv_str = " ".join(f"{k}={v}" for k, v in zip(combo, vals))
+                line = f"OVR {kv_str}\n"
+                assert grammar.accepts(line), f"Grammar rejected valid OVR sentence: {line!r}"
+                total_valid_sentences += 1
+    assert accepted_subsets == 31, f"Expected 31 subsets, checked {accepted_subsets}"
+    assert total_valid_sentences == 581, f"Expected 581 valid sentences, got {total_valid_sentences}"
 
     # 4. Invalid / adversarial strings MUST all be rejected
     invalid_samples = [
@@ -365,24 +410,37 @@ def verify_grammar(grammar: GbnfParser, schema: dict[str, Any]) -> None:
         "OVR\n",
         "OVR \n",
         "OVR rc=H",  # missing newline
-        "OVR rc=H nr=H mg=H dt=R jp=last\n",  # 5 parameters (> 4)
+        "OVR rc=H \n",  # trailing space
+        "OVR  rc=H\n",  # double space after OVR
+        " OVR rc=H\n",  # leading space
+        "OVR dt=R\n",  # R removed in v1.2
+        "OVR rc=H dt=R\n",  # R removed in v1.2
+        "OVR rc=H nr=H mg=H dt=R jp=last\n",  # R removed in v1.2
         "OVR rc=H rc=L\n",  # duplicate key
         "OVR nr=H rc=H\n",  # out of canonical order
-        "OVR dt=R mg=H\n",  # out of canonical order
+        "OVR dt=S mg=H\n",  # out of canonical order
+        "OVR jp=next dt=T\n",  # out of canonical order
         "OVR jp=last jp=next\n",  # duplicate jp
         "OVR rc=X\n",  # invalid level
+        "OVR rc=h\n",  # lowercase level
         "OVR dt=H\n",  # invalid detour
         "OVR jp=j1\n",  # raw ref ID forbidden
+        "OVR jp=prev\n",  # invalid jp value
         "OVR through_ref=a1\n",  # parked-only field forbidden
         "OVR foo=bar\n",  # unknown key
         "OVR rc=H  nr=H\n",  # double space
         "OVR rc=H\nYES\n",  # multi-line
+        "NOOP\n\n",  # extra newline
+        "OVR rc=H\r\n",  # CRLF
+        "CXL WHY\n",  # multiple commands
         "POI conv\n",  # Phase 2 command not in v1
         '{"action":"suggest_route_preference"}\n',  # raw JSON forbidden
         "はい\n",  # natural text forbidden
     ]
     for bad in invalid_samples:
         assert not grammar.accepts(bad), f"Grammar erroneously accepted invalid input: {bad!r}"
+
+    return total_valid_sentences
 
 
 def build_prefilter_map(schema: dict[str, Any]) -> dict[str, str]:
@@ -417,6 +475,7 @@ def record_to_tsv_row(rec: dict[str, Any]) -> list[str]:
         rec["dispatch_path"],
         rec["expected_code"],
         "|".join(rec["acceptable_codes"]),
+        rec["expected_effect"],
         ctx["pending_offer"],
         ctx["last_junction"],
         ctx["next_junction"],
@@ -456,6 +515,62 @@ def verify_tsv_parity(records: list[dict[str, Any]], path: pathlib.Path) -> None
             )
 
 
+def _check_expected_effect(
+    rec_id: str,
+    exp_code: str,
+    dispatch: str,
+    ctx: dict[str, str],
+    effect: str,
+) -> None:
+    if effect not in ALLOWED_EXPECTED_EFFECTS:
+        raise ValueError(f"{rec_id}: invalid expected_effect {effect!r}")
+
+    if exp_code == "OVR jp=last":
+        # v1.2 03 §4.1: standalone jp=last never changes current route; creates S12 proposal only
+        if effect != "s12_review_proposal":
+            raise ValueError(
+                f"{rec_id}: standalone 'OVR jp=last' must have expected_effect='s12_review_proposal', "
+                f"got {effect!r}"
+            )
+    elif exp_code.startswith("OVR "):
+        if effect != "override_preview":
+            raise ValueError(
+                f"{rec_id}: OVR with route parameters must have expected_effect='override_preview', "
+                f"got {effect!r}"
+            )
+    elif exp_code == "YES":
+        # ADR-0007: only Rust dict_norm confirms route; SLM YES only prompts re-confirmation
+        expected = "confirm_offer" if dispatch == "deterministic_rule" else "reconfirm_offer"
+        if effect != expected:
+            raise ValueError(
+                f"{rec_id}: YES with dispatch_path={dispatch!r} must have "
+                f"expected_effect={expected!r}, got {effect!r}"
+            )
+    elif exp_code == "NO":
+        if effect != "reject_offer":
+            raise ValueError(f"{rec_id}: NO must have expected_effect='reject_offer', got {effect!r}")
+    elif exp_code == "CXL":
+        expected = "undo_recent_change" if ctx["pending_offer"] == "undo_window" else "cancel_offer"
+        if effect != expected:
+            raise ValueError(
+                f"{rec_id}: CXL with pending_offer={ctx['pending_offer']!r} must have "
+                f"expected_effect={expected!r}, got {effect!r}"
+            )
+    elif exp_code == "WHY":
+        if effect != "speak_reason_template":
+            raise ValueError(
+                f"{rec_id}: WHY must have expected_effect='speak_reason_template', got {effect!r}"
+            )
+    elif exp_code == "BMK":
+        if effect != "bookmark_history":
+            raise ValueError(
+                f"{rec_id}: BMK must have expected_effect='bookmark_history', got {effect!r}"
+            )
+    elif exp_code == "NOOP":
+        if effect != "noop":
+            raise ValueError(f"{rec_id}: NOOP must have expected_effect='noop', got {effect!r}")
+
+
 def verify_dataset(
     records: list[dict[str, Any]],
     grammar: GbnfParser,
@@ -466,6 +581,7 @@ def verify_dataset(
     max_chars = schema["runtime_budget"]["max_utterance_chars"]
     max_tokens_target = schema["runtime_budget"]["max_grammar_tokens_target"]
     ctx_props = schema["input_context_schema"]["properties"]
+    scoring_policy = schema["gate4_scoring_policy"]["categories"]
 
     if len(records) != 120:
         raise ValueError(f"Expected 120 records, found {len(records)}")
@@ -475,7 +591,10 @@ def verify_dataset(
     category_counts: dict[str, int] = {k: 0 for k in EXPECTED_CATEGORY_COUNTS}
     dispatch_counts: dict[str, int] = {"deterministic_rule": 0, "slm": 0}
     command_counts: dict[str, int] = {}
+    effect_counts: dict[str, int] = {}
     max_estimated_tokens = 0
+    standalone_jp_last_count = 0
+    no_pending_target_noop_count = 0
 
     for idx, rec in enumerate(records, start=1):
         expected_id = f"G4-{idx:03d}"
@@ -553,11 +672,39 @@ def verify_dataset(
             if ctx[k] not in spec["enum"]:
                 raise ValueError(f"{rec_id}: invalid context[{k!r}] = {ctx[k]!r}")
 
+        # v1.2 pending_offer invariants (pending_offer=none -> YES/NO/CXL must be NOOP)
+        pending = ctx["pending_offer"]
+        if pending == "none":
+            for code in acc_codes:
+                if code in {"YES", "NO", "CXL"}:
+                    raise ValueError(
+                        f"{rec_id}: pending_offer=='none' forbids {code!r} in acceptable_codes"
+                    )
+            if exp_code == "NOOP" and "NO_PENDING_TARGET" in rec.get("notes", ""):
+                no_pending_target_noop_count += 1
+        if exp_code in {"YES", "NO"} and pending not in {"avoid", "override_preview"}:
+            raise ValueError(
+                f"{rec_id}: expects {exp_code!r} but context.pending_offer={pending!r}"
+            )
+        if exp_code == "CXL" and pending not in {"avoid", "override_preview", "undo_window"}:
+            raise ValueError(
+                f"{rec_id}: expects 'CXL' but context.pending_offer={pending!r}"
+            )
+
         # Semantic consistency checks on jp=last / jp=next
         if "jp=last" in exp_code and ctx["last_junction"] != "present":
             raise ValueError(f"{rec_id}: expects jp=last but context.last_junction != 'present'")
         if "jp=next" in exp_code and ctx["next_junction"] != "present":
             raise ValueError(f"{rec_id}: expects jp=next but context.next_junction != 'present'")
+        if exp_code == "OVR jp=last":
+            standalone_jp_last_count += 1
+
+        # Verify expected_effect matches v1.2 semantics
+        effect = rec.get("expected_effect")
+        if not isinstance(effect, str):
+            raise ValueError(f"{rec_id}: missing expected_effect")
+        _check_expected_effect(rec_id, exp_code, dispatch, ctx, effect)
+        effect_counts[effect] = effect_counts.get(effect, 0) + 1
 
         # Noise profile check
         noise = rec.get("noise_profile")
@@ -565,6 +712,19 @@ def verify_dataset(
             raise ValueError(f"{rec_id}: invalid noise_profile {noise!r}")
         if cat == "in_cabin_noise" and noise == "quiet_cabin":
             raise ValueError(f"{rec_id}: in_cabin_noise case cannot use quiet_cabin")
+
+        # v1.2 Gate 4 scoring policy conformance (07 §2.3)
+        cat_policy = scoring_policy[cat]
+        if cat_policy["noop_acceptable"]:
+            if "NOOP" not in acc_codes:
+                raise ValueError(
+                    f"{rec_id}: category {cat!r} requires safety fallback 'NOOP' in acceptable_codes"
+                )
+        else:
+            if "NOOP" in acc_codes:
+                raise ValueError(
+                    f"{rec_id}: category {cat!r} must not allow 'NOOP' in acceptable_codes"
+                )
 
         # Strict out_of_contract invariants (Gate 4: 0 out-of-contract executions)
         if cat == "out_of_contract":
@@ -584,18 +744,29 @@ def verify_dataset(
         raise ValueError(
             f"Category counts mismatch: got {category_counts}, expected {EXPECTED_CATEGORY_COUNTS}"
         )
+    if standalone_jp_last_count < 1:
+        raise ValueError("Dataset must include at least one standalone 'OVR jp=last' S12 proposal case")
+    if no_pending_target_noop_count < 2:
+        raise ValueError(
+            "Dataset must include pending_offer='none' NOOP cases covering YES-like and CXL-like utterances"
+        )
 
     return {
         "total": len(records),
         "category_counts": category_counts,
         "dispatch_counts": dispatch_counts,
         "command_counts": dict(sorted(command_counts.items())),
+        "effect_counts": dict(sorted(effect_counts.items())),
+        "standalone_jp_last_s12_cases": standalone_jp_last_count,
+        "no_pending_target_noop_cases": no_pending_target_noop_count,
         "max_estimated_tokens": max_estimated_tokens,
     }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate Gate 4 SLM grammar and 120-utterance dataset.")
+    parser = argparse.ArgumentParser(
+        description="Validate Gate 4 SLM grammar (v1.2) and 120-utterance dataset."
+    )
     parser.add_argument(
         "--export-tsv",
         action="store_true",
@@ -604,18 +775,22 @@ def main() -> int:
     args = parser.parse_args()
 
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    grammar = GbnfParser(GBNF_PATH.read_text(encoding="utf-8"))
-    verify_grammar(grammar, schema)
+    gbnf_text = GBNF_PATH.read_text(encoding="utf-8")
+    verify_single_source_of_truth(gbnf_text, schema)
+
+    grammar = GbnfParser(gbnf_text)
+    valid_sentences = verify_grammar(grammar, schema)
 
     records = load_jsonl(JSONL_PATH)
     summary = verify_dataset(records, grammar, schema)
+    summary["gbnf_valid_sentences"] = valid_sentences
 
     if args.export_tsv:
         export_tsv(records, TSV_PATH)
 
     verify_tsv_parity(records, TSV_PATH)
 
-    print("PASS: Gate 4 SLM command spec, GBNF grammar, JSONL (120), and TSV parity verified.")
+    print("PASS: Gate 4 v1.2 expected_codes.json, override.gbnf (03 §4.1 parity), JSONL (120), and TSV parity verified.")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
