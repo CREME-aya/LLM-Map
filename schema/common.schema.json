@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slm-map.invalid/schema/common.schema.json",
+  "title": "common (schema v1 skeleton)",
+  "description": "Shared definitions. Source: devteam #13 draft (common.schema.json) + 02 §2 rule 3 (u64 as decimal string). TODO(schema-v1): $id host is a placeholder.",
+  "$defs": {
+    "U64Str": {
+      "description": "u64 as decimal string (TypeScript number is 53-bit).",
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "MonoMs": {
+      "description": "Monotonic ms (SystemClock.elapsedRealtime basis). Rust never reads a clock. Draft #13 defines MonoMs = U64Str. TODO(schema-v1): confirm string (vs number) for tick-rate fields.",
+      "$ref": "#/$defs/U64Str"
+    },
+    "UnixS": {
+      "description": "UNIX seconds (wall clock). Kept separate from MonoMs (time-kind separation, checklist #8).",
+      "type": "integer",
+      "minimum": 0
+    },
+    "RouteKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trip_id", "trip_revision", "route_revision", "graph_version"],
+      "properties": {
+        "trip_id": { "type": "string", "minLength": 1 },
+        "trip_revision": { "$ref": "#/$defs/U64Str" },
+        "route_revision": { "$ref": "#/$defs/U64Str" },
+        "graph_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "EvidenceKind": { "enum": ["confirmed", "inferred", "unknown"] },
+    "Evidence": {
+      "description": "Evidence<T> flattened form from draft #13. value type is constrained by the referencing schema. TODO(schema-v1): 04 §2 has richer per-variant fields (observed_at, source_refs[]); reconcile.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/EvidenceKind" },
+        "value": {},
+        "source_ref": { "type": "string" },
+        "rule_id": { "type": "string" },
+        "reason": { "enum": ["missing", "conflict", "direction_unclear", "version_mismatch"] }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "const": "unknown" } } },
+          "then": { "required": ["reason"], "not": { "required": ["value"] } },
+          "else": { "required": ["value"] } }
+      ]
+    },
+    "ErrorCode": {
+      "description": "dc_core error codes (devteam #40). E_UNIMPLEMENTED is a skeleton-only placeholder, TODO(abi-v1): remove before ABI freeze.",
+      "enum": ["E_SCHEMA", "E_VERSION", "E_STALE", "E_REJECTED", "E_PANIC", "E_INVALID_HANDLE", "E_UNIMPLEMENTED"]
+    },
+    "DcEnvelope": {
+      "description": "Every dc_out is {ok:true,data} | {ok:false,error{code,msg}} (dc_core.h).",
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["ok", "data"],
+          "properties": { "ok": { "const": true }, "data": {} } },
+        { "type": "object", "additionalProperties": false, "required": ["ok", "error"],
+          "properties": {
+            "ok": { "const": false },
+            "error": { "type": "object", "additionalProperties": false, "required": ["code", "msg"],
+              "properties": { "code": { "$ref": "#/$defs/ErrorCode" }, "msg": { "type": "string" } } } } }
+      ]
+    }
+  }
+}

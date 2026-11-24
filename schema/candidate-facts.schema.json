@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slm-map.invalid/schema/candidate-facts.schema.json",
+  "title": "CandidateFacts (v1 skeleton)",
+  "description": "Per-candidate scoring input generated once by C++ and passed as ByteArray to dc_rank. Source: devteam #13 draft. TODO(schema-v1): junction kind enum and fingerprint format are not specified.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidate_id", "label", "plan_request_id", "graph_version", "fingerprint", "legal",
+               "complete", "eta_ms", "length_m", "counts", "narrow_m", "unknown_width_residential_m",
+               "unknown_length_m", "junctions", "through_anchors"],
+  "properties": {
+    "candidate_id": { "type": "string", "minLength": 1 },
+    "label": { "enum": ["baseline", "engine_alternate", "costing_variant", "through_anchor"] },
+    "plan_request_id": { "type": "string", "minLength": 1 },
+    "graph_version": { "type": "string", "minLength": 1 },
+    "fingerprint": { "type": "string", "minLength": 1 },
+    "legal": { "type": "boolean" },
+    "complete": { "type": "boolean" },
+    "eta_ms": { "type": "integer", "minimum": 0 },
+    "length_m": { "type": "integer", "minimum": 0 },
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["right_unprotected", "right_signal_unknown_protection", "right_signal_unknown",
+                   "right_protected", "right_entry", "merges"],
+      "properties": {
+        "right_unprotected": { "type": "integer", "minimum": 0 },
+        "right_signal_unknown_protection": { "type": "integer", "minimum": 0 },
+        "right_signal_unknown": { "type": "integer", "minimum": 0 },
+        "right_protected": { "type": "integer", "minimum": 0 },
+        "right_entry": { "type": "integer", "minimum": 0 },
+        "merges": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "narrow_m": {
+      "type": "object", "additionalProperties": false, "required": ["confirmed", "inferred"],
+      "properties": {
+        "confirmed": { "type": "integer", "minimum": 0 },
+        "inferred": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "unknown_width_residential_m": { "type": "integer", "minimum": 0 },
+    "unknown_length_m": { "type": "integer", "minimum": 0 },
+    "junctions": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["ref", "edge_in", "edge_out", "kind", "evidence"],
+        "properties": {
+          "ref": { "type": "string", "pattern": "^j[0-9]+$" },
+          "edge_in": { "$ref": "common.schema.json#/$defs/U64Str" },
+          "edge_out": { "$ref": "common.schema.json#/$defs/U64Str" },
+          "kind": { "type": "string", "description": "TODO(schema-v1): closed enum not yet defined." },
+          "evidence": { "$ref": "common.schema.json#/$defs/Evidence" }
+        }
+      }
+    },
+    "through_anchors": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["ref", "edge"],
+        "properties": {
+          "ref": { "type": "string", "pattern": "^a[0-9]+$" },
+          "edge": { "$ref": "common.schema.json#/$defs/U64Str" }
+        }
+      }
+    }
+  }
+}

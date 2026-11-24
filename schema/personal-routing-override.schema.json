@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slm-map.invalid/schema/personal-routing-override.schema.json",
+  "title": "PersonalRoutingOverride (v1 skeleton)",
+  "description": "Expanded form of the 1-line OVR code produced by dc_validate_override. Source: devteam #13 draft; dt is T|S only (tight|standard). additionalProperties:false on every level.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "intent_contract_id", "plan_request_id", "trip_revision", "action",
+               "weights", "junction_preferences", "detour", "expires_at_mono_ms"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "intent_contract_id": { "type": "string", "minLength": 1 },
+    "plan_request_id": { "type": "string", "minLength": 1 },
+    "trip_revision": { "$ref": "common.schema.json#/$defs/U64Str" },
+    "action": { "const": "suggest_route_preference" },
+    "weights": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "crossing_right": { "$ref": "#/$defs/Level" },
+        "narrow_road": { "$ref": "#/$defs/Level" },
+        "merge": { "$ref": "#/$defs/Level" }
+      }
+    },
+    "junction_preferences": {
+      "type": "array", "maxItems": 3,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["ref", "mode"],
+        "properties": {
+          "ref": { "type": "string", "description": "Must be an ID present in the candidate/ref table (checked by Rust, not by schema)." },
+          "mode": { "const": "avoid_if_practical" }
+        }
+      }
+    },
+    "through_ref": { "type": "string" },
+    "detour": { "enum": ["standard", "tight"] },
+    "expires_at_mono_ms": { "$ref": "common.schema.json#/$defs/MonoMs" }
+  },
+  "$defs": {
+    "Level": { "enum": ["low", "normal", "high"] }
+  }
+}

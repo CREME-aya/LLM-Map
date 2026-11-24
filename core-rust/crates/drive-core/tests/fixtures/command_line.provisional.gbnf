@@ -1,0 +1,15 @@
+# PROVISIONAL COPY — canonical GBNF is owned by Hydrogenくん (not placed in the repo yet).
+# Source: devteam #23 (cmd set) + #25 (leading-key branch, fixed order rc→nr→mg→dt→jp, dt=T|S).
+# TODO(gbnf): canonical path is schema/slm/override.gbnf (v1.2 decision); switch the test to it once Hydrogenくん places it.
+root     ::= cmd "\n"
+cmd      ::= override | "CXL" | "WHY" | "BMK" | "YES" | "NO" | "NOOP"
+override ::= "OVR" (
+    " rc=" level (" nr=" level)? (" mg=" level)? (" dt=" detour)? (" jp=" jref)?
+  | " nr=" level (" mg=" level)? (" dt=" detour)? (" jp=" jref)?
+  | " mg=" level (" dt=" detour)? (" jp=" jref)?
+  | " dt=" detour (" jp=" jref)?
+  | " jp=" jref
+)
+level    ::= "L" | "N" | "H"
+detour   ::= "T" | "S"
+jref     ::= "last" | "next"

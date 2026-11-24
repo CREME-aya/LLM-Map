@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slm-map.invalid/schema/trip-plan-snapshot.schema.json",
+  "title": "TripPlanSnapshot (v1 skeleton)",
+  "description": "Input of dc_plan_candidates. Source: devteam #13 draft. TODO(schema-v1): GeoPoint shape, vias[] item shape, budget units are not specified in the conversation and are provisional.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "trip_id", "trip_revision", "plan_request_id", "graph_version",
+               "policy_version", "origin", "destination", "vias", "vehicle", "avoid",
+               "depart_at_unix_s", "budget"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "trip_id": { "type": "string", "minLength": 1 },
+    "trip_revision": { "$ref": "common.schema.json#/$defs/U64Str" },
+    "plan_request_id": { "type": "string", "minLength": 1 },
+    "graph_version": { "type": "string", "minLength": 1 },
+    "policy_version": { "type": "string", "minLength": 1 },
+    "origin": { "$ref": "#/$defs/GeoPoint" },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["display_point"],
+      "properties": {
+        "display_point": { "$ref": "#/$defs/GeoPoint" },
+        "vehicle_entry": {
+          "type": "object", "additionalProperties": false, "required": ["id", "evidence"],
+          "properties": { "id": { "type": "string" }, "evidence": { "$ref": "common.schema.json#/$defs/Evidence" } }
+        },
+        "pedestrian_exit": { "$ref": "#/$defs/GeoPoint" }
+      }
+    },
+    "vias": { "type": "array", "items": { "$ref": "#/$defs/GeoPoint" } },
+    "vehicle": {
+      "type": "object", "additionalProperties": false, "required": ["profile", "width_mm", "height_mm"],
+      "properties": {
+        "profile": { "const": "standard_car" },
+        "width_mm": { "type": "integer", "minimum": 0 },
+        "height_mm": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "avoid": {
+      "type": "object", "additionalProperties": false, "required": ["toll", "ferry"],
+      "properties": { "toll": { "type": "boolean" }, "ferry": { "type": "boolean" } }
+    },
+    "depart_at_unix_s": { "$ref": "common.schema.json#/$defs/UnixS" },
+    "budget": {
+      "type": "object", "additionalProperties": false, "required": ["max_requests", "deadline_ms"],
+      "properties": {
+        "max_requests": { "type": "integer", "minimum": 1 },
+        "deadline_ms": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "GeoPoint": {
+      "description": "TODO(schema-v1): provisional WGS84 point; not defined in the conversation.",
+      "type": "object", "additionalProperties": false, "required": ["lat", "lon"],
+      "properties": {
+        "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+        "lon": { "type": "number", "minimum": -180, "maximum": 180 }
+      }
+    }
+  }
+}

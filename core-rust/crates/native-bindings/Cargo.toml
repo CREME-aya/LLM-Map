@@ -1,0 +1,18 @@
+[package]
+name = "native-bindings"
+description = "Thin hand-written C ABI (dc_core.h, ABI v1) + JNI ByteArray pass-through over drive-core."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# libdc_core.so (Android, via cargo-ndk) / libdc_core.dylib (host tests).
+name = "dc_core"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+contracts = { path = "../contracts" }
+drive-core = { path = "../drive-core" }
+serde_json.workspace = true
+jni-sys = "0.3"

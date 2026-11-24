@@ -1,0 +1,1 @@
+{"schema_version":1,"route_key":{"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"},"frame_seq":"1","sampled_at_monotonic_ms":"1","valid_until_monotonic_ms":"2","status":"tracking","upcoming":[1,2,3,4]}

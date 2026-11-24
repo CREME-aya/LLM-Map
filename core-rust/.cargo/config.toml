@@ -1,0 +1,5 @@
+# 16 KB page size for the shipped arm64-v8a .so (02 §2 rule 4, devteam #40 Day 2).
+# TODO(gate0): unverified here - no Android NDK / cargo-ndk on this machine.
+#              Verify with `readelf -l libdc_core.so` (LOAD Align >= 0x4000).
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

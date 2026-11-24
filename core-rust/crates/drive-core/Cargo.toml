@@ -1,0 +1,12 @@
+[package]
+name = "drive-core"
+description = "Narrow pure Rust core: state machines driven only by TickInput (no IO, DB, threads, clocks)."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+contracts = { path = "../contracts" }
+serde.workspace = true
+serde_json.workspace = true

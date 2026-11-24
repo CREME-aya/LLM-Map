@@ -1,0 +1,412 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slm-map.invalid/schema/maneuver-horizon.schema.json",
+  "title": "ManeuverHorizon (v1 skeleton)",
+  "description": "Single source for UI and voice. Source: docs v1.2 04 §2 (shrimpfish) — u64 -> U64Str, refs{next?,last?}, AvoidOffer.summary structured (no text). JunctionRef/PassedRef fields: team decision relayed 2026-11-24 (not yet in docs). TODO(schema-v1): Flag enum, JunctionRef.kind enum; enum casing (docs use PascalCase, JSON here uses snake_case).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "route_key",
+    "frame_seq",
+    "sampled_at_monotonic_ms",
+    "valid_until_monotonic_ms",
+    "status",
+    "upcoming"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "route_key": {
+      "$ref": "common.schema.json#/$defs/RouteKey"
+    },
+    "frame_seq": {
+      "$ref": "common.schema.json#/$defs/U64Str"
+    },
+    "sampled_at_monotonic_ms": {
+      "$ref": "common.schema.json#/$defs/MonoMs"
+    },
+    "valid_until_monotonic_ms": {
+      "$ref": "common.schema.json#/$defs/MonoMs"
+    },
+    "status": {
+      "enum": [
+        "tracking",
+        "uncertain",
+        "off_route",
+        "rerouting",
+        "finished"
+      ]
+    },
+    "matched_progress_cm": {
+      "$ref": "common.schema.json#/$defs/U64Str"
+    },
+    "upcoming": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/HorizonEntry"
+      }
+    },
+    "next_p1_deadline_monotonic_ms": {
+      "$ref": "common.schema.json#/$defs/MonoMs"
+    },
+    "next_complex_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start_monotonic_ms"
+      ],
+      "properties": {
+        "start_monotonic_ms": {
+          "$ref": "common.schema.json#/$defs/MonoMs"
+        },
+        "end_monotonic_ms": {
+          "$ref": "common.schema.json#/$defs/MonoMs"
+        }
+      }
+    },
+    "refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "next": {
+          "$ref": "#/$defs/JunctionRef"
+        },
+        "last": {
+          "$ref": "#/$defs/PassedRef"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "ManeuverId": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "route_key",
+        "leg_index",
+        "ordinal"
+      ],
+      "properties": {
+        "route_key": {
+          "$ref": "common.schema.json#/$defs/RouteKey"
+        },
+        "leg_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "RouteAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "leg_index",
+        "leg_shape_index",
+        "along_route_cm"
+      ],
+      "properties": {
+        "leg_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "leg_shape_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "along_route_cm": {
+          "$ref": "common.schema.json#/$defs/U64Str"
+        }
+      }
+    },
+    "Arrow": {
+      "description": "Roundabout carries optional exit_number. TODO(schema-v1): encoding of tagged Roundabout{exit_number} is provisional.",
+      "oneOf": [
+        {
+          "enum": [
+            "left",
+            "right",
+            "slight_left",
+            "slight_right",
+            "sharp_left",
+            "sharp_right",
+            "u_turn_left",
+            "u_turn_right",
+            "keep_left",
+            "keep_right",
+            "fork_left",
+            "fork_right",
+            "merge_left",
+            "merge_right",
+            "merge",
+            "exit_left",
+            "exit_right",
+            "exit",
+            "ferry_board",
+            "ferry_leave",
+            "straight_decision",
+            "arrive",
+            "generic"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "roundabout"
+          ],
+          "properties": {
+            "roundabout": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "exit_number": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Maneuver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "anchor",
+        "arrow",
+        "side_of_traffic",
+        "crossing",
+        "approach_signal",
+        "right_turn_protection",
+        "approach_width_mm",
+        "departure_width_mm",
+        "advisory_flags"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ManeuverId"
+        },
+        "anchor": {
+          "$ref": "#/$defs/RouteAnchor"
+        },
+        "arrow": {
+          "$ref": "#/$defs/Arrow"
+        },
+        "junction_name": {
+          "type": "string"
+        },
+        "road_name": {
+          "type": "string"
+        },
+        "route_ref": {
+          "type": "string"
+        },
+        "side_of_traffic": {
+          "const": "left"
+        },
+        "crossing": {
+          "$ref": "common.schema.json#/$defs/Evidence"
+        },
+        "approach_signal": {
+          "$ref": "common.schema.json#/$defs/Evidence"
+        },
+        "right_turn_protection": {
+          "$ref": "common.schema.json#/$defs/Evidence"
+        },
+        "approach_width_mm": {
+          "$ref": "common.schema.json#/$defs/Evidence"
+        },
+        "departure_width_mm": {
+          "$ref": "common.schema.json#/$defs/Evidence"
+        },
+        "roundabout_leave_anchor": {
+          "$ref": "#/$defs/RouteAnchor"
+        },
+        "advisory_flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "TODO(schema-v1): Flag enum not defined."
+        }
+      }
+    },
+    "AvoidOffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alt_route_id",
+        "delta_eta_ms",
+        "decision_deadline_monotonic_ms",
+        "summary"
+      ],
+      "properties": {
+        "alt_route_id": {
+          "type": "string"
+        },
+        "delta_eta_ms": {
+          "type": "integer"
+        },
+        "decision_deadline_monotonic_ms": {
+          "$ref": "common.schema.json#/$defs/MonoMs"
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "template_id",
+            "delta_eta_ms",
+            "avoided"
+          ],
+          "properties": {
+            "template_id": {
+              "type": "string"
+            },
+            "delta_eta_ms": {
+              "type": "integer"
+            },
+            "avoided": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "unprotected_right",
+                "narrow_m"
+              ],
+              "properties": {
+                "unprotected_right": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                },
+                "narrow_m": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      },
+      "description": "TODO(schema-v1): docs define no offer id; what user_tap.target_id refers to is not specified."
+    },
+    "EtaRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "earliest",
+        "typical",
+        "latest"
+      ],
+      "properties": {
+        "earliest": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "typical": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "latest": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "HorizonEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maneuver",
+        "action_required"
+      ],
+      "properties": {
+        "maneuver": {
+          "$ref": "#/$defs/Maneuver"
+        },
+        "group_id": {
+          "$ref": "#/$defs/ManeuverId"
+        },
+        "from_vehicle_m": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "seg_from_prev_m": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eta_range_ms": {
+          "$ref": "#/$defs/EtaRange"
+        },
+        "action_required": {
+          "type": "boolean"
+        },
+        "avoid_offer": {
+          "$ref": "#/$defs/AvoidOffer"
+        }
+      }
+    },
+    "JunctionRef": {
+      "description": "Target for jp=next (fixed at utterance time). Fields per team decision; kind enum TODO.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "maneuver_id",
+        "kind",
+        "deadline_mono_ms"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string"
+        },
+        "maneuver_id": {
+          "$ref": "#/$defs/ManeuverId"
+        },
+        "kind": {
+          "type": "string",
+          "description": "TODO(schema-v1): closed enum not defined."
+        },
+        "deadline_mono_ms": {
+          "$ref": "common.schema.json#/$defs/MonoMs"
+        }
+      }
+    },
+    "PassedRef": {
+      "description": "Target for jp=last (passed within 180 s and 1.5 km). Fields per team decision.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "maneuver_id",
+        "passed_at_mono_ms",
+        "passed_along_cm"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string"
+        },
+        "maneuver_id": {
+          "$ref": "#/$defs/ManeuverId"
+        },
+        "passed_at_mono_ms": {
+          "$ref": "common.schema.json#/$defs/MonoMs"
+        },
+        "passed_along_cm": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    }
+  }
+}

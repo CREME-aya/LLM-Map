@@ -1,0 +1,14 @@
+[package]
+name = "contracts"
+description = "Serde types mirroring schema/ and the dc_tick v2 contract. No IO."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+jsonschema = { version = "0.18", default-features = false, features = ["draft202012"] }

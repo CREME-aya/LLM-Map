@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/contracts", "crates/drive-core", "crates/native-bindings"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "UNLICENSED" # TODO(owner): license not decided
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# dc_core.h contract: panics are caught at the boundary with catch_unwind -> E_PANIC.
+# That only works with unwinding, so never switch these to "abort" (devteam #21 / #40).
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"

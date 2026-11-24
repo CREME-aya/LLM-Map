@@ -1,0 +1,2 @@
+{"schema_version":1,"route_key":{"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"g"},"frame_seq":"1","sampled_at_monotonic_ms":"1","valid_until_monotonic_ms":"2","status":"tracking","upcoming":[],
+ "refs":{"last":{"ref":"p1","maneuver_id":{"route_key":{"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"g"},"leg_index":0,"ordinal":3},"passed_at_mono_ms":"1","passed_along_cm":"480000"}}}
