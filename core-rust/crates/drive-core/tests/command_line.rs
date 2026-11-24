@@ -1,4 +1,5 @@
-//! The Rust parser must accept exactly the language of the (provisional) GBNF.
+//! The Rust parser must accept exactly the language of the canonical GBNF
+//! (`schema/slm/override.gbnf`).
 //! Exhaustive check: enumerate every sentence the grammar generates and compare with
 //! a set of near-miss strings that it must reject.
 use drive_core::command_line::{parse, Command};
@@ -32,19 +33,13 @@ fn grammar_language() -> Vec<String> {
     out
 }
 
-/// The grammar the parser is checked against: the canonical `schema/slm/override.gbnf`
-/// if it exists, otherwise the provisional copy of docs 03 §4.1.
-/// TODO(gbnf): drop the fallback once schema/slm/override.gbnf is on the branch.
+/// The canonical grammar (`schema/slm/override.gbnf`) the parser is checked against.
 fn gbnf_source() -> (String, &'static str) {
     let canonical =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../schema/slm/override.gbnf");
-    match std::fs::read_to_string(&canonical) {
-        Ok(g) => (g, "schema/slm/override.gbnf"),
-        Err(_) => (
-            include_str!("fixtures/command_line.provisional.gbnf").to_owned(),
-            "provisional copy",
-        ),
-    }
+    let grammar = std::fs::read_to_string(&canonical)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", canonical.display()));
+    (grammar, "schema/slm/override.gbnf")
 }
 
 #[test]

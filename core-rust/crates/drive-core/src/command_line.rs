@@ -4,9 +4,7 @@
 //! branch): keys in fixed order rc → nr → mg → dt → jp, each at most once, `dt` is `T|S`
 //! only, empty `OVR` is not allowed.
 //!
-//! TODO(gbnf): the canonical grammar is `schema/slm/override.gbnf` (owned by Hydrogenくん,
-//! not on the base branch yet). `tests/command_line.rs` checks that file when present and
-//! falls back to the provisional copy `tests/fixtures/command_line.provisional.gbnf`.
+//! The canonical grammar is `schema/slm/override.gbnf`, checked by `tests/command_line.rs`.
 
 use contracts::override_types::{Detour, Level};
 
