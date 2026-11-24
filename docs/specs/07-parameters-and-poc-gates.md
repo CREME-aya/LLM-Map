@@ -11,7 +11,8 @@
 | カテゴリ | パラメータ | 初期値（暫定初期値） | 適用・校正メモ |
 |---|---|---|---|
 | **候補探索・採点** | 探索要求 / 受理候補 / 同時数上限 | 最大 5 要求 / 受理 7 候補 / 同時 1 探索 | `RoutePlanner` の単一優先度キューで同時実行は物理的に 1 本（[03 §3.1](03-routing-and-two-layer-control.md)） |
-| **候補探索・採点** | 比較予算（比較結果を返す期限） | 短距離: 3 秒 / 長距離: 8 秒 | 温状態前提。期限超過時はその時点の完了候補で比較結果を返す（[03 §3.1](03-routing-and-two-layer-control.md)） |
+| **候補探索・採点** | 距離区分 `distance_class` | 探索前の ETA 見積もり < 30 分: `short` / 30 分以上または見積もりなし: `long` | 暫定。Planner が探索前に決め、同じ計画内では固定。比較予算と監視上限の選択に使う（`DetourPolicy` の 30 分とは別の判定）（[03 §3.1](03-routing-and-two-layer-control.md)） |
+| **候補探索・採点** | 比較予算（比較結果を返す期限） | 短距離: 3 秒 / 長距離: 8 秒（計画開始から） | 温状態前提。期限超過時はその時点の完了候補で比較結果を返す（[03 §3.1](03-routing-and-two-layer-control.md)） |
 | **候補探索・採点** | 監視上限（`engine_stuck` 判定） | 短距離: 5 秒 / 長距離: 10 秒（ネイティブ呼び出し開始から） | 暫定。超過は Rust が `now_mono_ms` と `start` 時刻から検出して `engine_stuck`（「経路を確認中」表示）にする（Kotlin は通知せず、監視期限を含む `next_wake_mono_ms` で tick を呼ぶだけ）。探索枠は占有したままで、解放するのは呼び出しが実際に戻った `search_finished`（1 回）のとき。そのとき `ok` でも結果は捨てる（`discarded_after_stuck`）（[03 §3.1](03-routing-and-two-layer-control.md)） |
 | **候補探索・採点** | 迂回上限 `DetourPolicy` | `short_threshold_s: 1800` / `short_cap_s: 180` / `long_cap_s: 900` / `long_cap_ratio: 0.15` / `ratio_cap: 1.35` / `tight_factor: 0.5` | 採否は増加秒数で判定（式は [03 §3.2](03-routing-and-two-layer-control.md)）。L1/L2/L3 共通で `dc_rank` と `dc_avoid_offer_eval` が同じ関数を使う。走行中の回避チップは `base_eta` = 残り ETA。`profile_weights.max_detour_ratio` 既定は NULL（= 方針値）、ユーザー値は厳しくする方向のみ有効で 1.35 で頭打ち |
 | **候補探索・採点** | 運転しやすさペナルティ（秒相当） | 対向無信号/不明右折 +45s / 信号有不明 +25s / 保護確認 +10s / 右折入口 +90s / 狭路 (<4.0m) +30s/100m / 幅不明生活道路 +15s/100m / 合流 +15s | ETA 表示には加算しない（Gate 3 でタグ率と監査により校正） |

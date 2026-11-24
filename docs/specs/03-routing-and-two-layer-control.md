@@ -68,16 +68,18 @@ L3 の出力は **L2 本表（`profile_weights` / `avoidance_nodes_edges`）へ�
 
 | 優先順 | 探索種別 | 備考 |
 |---:|---|---|
-| 1 | **逸脱再探索** | 走行中の最優先。下位の探索は cancel して枠を空ける |
-| 2 | **明示計画** | — |
-| 3 | **回避チップ** | 計算予算・起動条件は [04 §4.3](04-maneuver-horizon-and-hmi.md) |
-| 4 | **比較探索** | 走行中の逸脱再探索には割り込まない |
+| 1 | **逸脱再探索**（`reroute`） | 走行中の最優先。下位の探索は cancel して枠を空ける |
+| 2 | **明示計画**（`explicit_plan`） | — |
+| 3 | **回避チップ**（`avoid_chip`） | 計算予算・起動条件は [04 §4.3](04-maneuver-horizon-and-hmi.md) |
+| 4 | **比較探索**（`comparison`） | 走行中の逸脱再探索には割り込まない |
 
 | 方向 | メッセージ | 内容 |
 |---|---|---|
-| Rust → Kotlin | `planner_cmds: start{req_id, priority, route_key, graph_version}` | 探索開始 |
+| Rust → Kotlin | `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version}` | 探索開始。`priority` は上表の JSON 名、`distance_class` は下記 |
 | Rust → Kotlin | `planner_cmds: cancel{req_id}` | 実行中探索の取消要求 |
 | Kotlin → Rust | `search_finished{req_id, route_key, graph_version, outcome: ok\|cancelled\|error, comparison_ref?, engine_ms}` | **唯一の終端イベント。1 探索につき必ず 1 回**。旧 `reroute_result` / `search_cancelled` は廃止 |
+
+- **距離区分 `distance_class: short | long`（暫定）**: Planner が **探索の前に** 決める。探索前に使える ETA 見積もりが **30 分未満なら `short`、30 分以上または見積もりがなければ `long`**。同じ計画の候補探索の中では区分を固定する。比較予算（3 s / 8 s）は **計画開始から**、監視上限（5 s / 10 s）は **各ネイティブ呼び出しの開始から** 数え、どちらもこの区分で選ぶ。なお [§3.2](#32-重複除去と-3-軸採点ルール) の `DetourPolicy` の 30 分（`short_threshold_s`）は探索後の基準 ETA に適用する別の判定である。境界テストは 29:59 / 30:00 / 見積もりなしの 3 ケースと、監視上限超過後も `search_finished` まで探索枠が解放されないこと。
 
 Rust 側の探索枠の状態機械:
 

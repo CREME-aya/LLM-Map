@@ -78,7 +78,7 @@ HorizonEntry = {
 ManeuverHorizon = {
   schema_version: 1,
   route_key: RouteKey,
-  frame_seq: u64,
+  frame_seq: u64,              // JSON では整数（number）。1 ずつ増える番号で 2^53 に届かない
   sampled_at_monotonic_ms: MonoMs,
   valid_until_monotonic_ms: MonoMs,
   status: tracking | uncertain | off_route | rerouting | finished,
