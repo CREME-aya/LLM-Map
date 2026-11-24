@@ -254,6 +254,7 @@ impl SearchPlanner {
         fx.planner_cmds.push(PlannerCmd::Start {
             req_id: req_id.clone(),
             priority: p.priority,
+            distance_class: p.distance_class,
             graph_version: p.route_key.graph_version.clone(),
             route_key: p.route_key.clone(),
         });

@@ -51,6 +51,27 @@ fn run(name: &str) -> (Session, Vec<TickOutput>, usize) {
             .filter(|c| matches!(c, PlannerCmd::Start { .. }))
             .count();
         max_running = max_running.max(running);
+        // Every start carries the class the planner fixed (fixture `expect_starts`).
+        let got: Vec<Value> = out
+            .planner_cmds
+            .iter()
+            .filter_map(|c| match c {
+                PlannerCmd::Start {
+                    req_id,
+                    priority,
+                    distance_class,
+                    ..
+                } => Some(serde_json::json!({
+                    "req_id": req_id, "priority": priority, "distance_class": distance_class
+                })),
+                PlannerCmd::Cancel { .. } => None,
+            })
+            .collect();
+        let want = step["expect_starts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(got, want, "{name}: step {step}");
         outs.push(out);
     }
     (s, outs, max_running)

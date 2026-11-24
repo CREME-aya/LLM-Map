@@ -235,6 +235,7 @@ mod tick {
     fn replay_fixtures_pass_tick_schema() {
         let input = tick_def("TickInput");
         let prio = tick_def("SearchPriority");
+        let class = tick_def("DistanceClass");
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tick");
         let mut files: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -261,6 +262,11 @@ mod tick {
                     "plan" => {}
                     o => panic!("{}: unknown step {o}", p.display()),
                 }
+                // expected starts use the schema's priority / distance_class names
+                for e in step["expect_starts"].as_array().into_iter().flatten() {
+                    assert!(prio.is_valid(&e["priority"]), "{}", p.display());
+                    assert!(class.is_valid(&e["distance_class"]), "{}", p.display());
+                }
             }
         }
         assert!(ticks >= 6);
@@ -279,12 +285,15 @@ mod tick {
             SearchPriority::AvoidChip,
             SearchPriority::Comparison,
         ] {
-            planner_cmds.push(PlannerCmd::Start {
-                req_id: "r2".into(),
-                priority,
-                route_key: rk(),
-                graph_version: "g".into(),
-            });
+            for distance_class in [DistanceClass::Short, DistanceClass::Long] {
+                planner_cmds.push(PlannerCmd::Start {
+                    req_id: "r2".into(),
+                    priority,
+                    distance_class,
+                    route_key: rk(),
+                    graph_version: "g".into(),
+                });
+            }
         }
         let horizon = load(&schema_dir().join("fixtures/valid/maneuver-horizon.min.json"));
         for (next_wake, horizon) in [(None, None), (Some(u64::MAX), Some(horizon))] {
@@ -397,8 +406,13 @@ mod tick {
             .map(|x| serde_json::to_value(x).unwrap())
             .collect())
         );
-        // DistanceClass is internal to the planner today, but snake_case like the rest.
-        assert_eq!(serde_json::to_value(DistanceClass::Short).unwrap(), "short");
+        assert_eq!(
+            names("DistanceClass"),
+            ser(vec![
+                serde_json::to_value(DistanceClass::Short).unwrap(),
+                serde_json::to_value(DistanceClass::Long).unwrap(),
+            ])
+        );
     }
 
     /// Each event kind in the schema is accepted by serde and vice versa: the schema's
@@ -432,5 +446,75 @@ mod tick {
         fixture_kinds.sort();
         assert_eq!(schema_kinds, fixture_kinds);
         assert_eq!(schema_kinds.len(), 16, "v2 has 16 event kinds");
+    }
+
+    /// Unknown fields: for every event kind (and TickInput / Fix / PlannerCmd / TickOutput /
+    /// LogEvent) adding a field makes BOTH the schema (`additionalProperties: false`) and
+    /// serde reject it, and the unmodified value is accepted by both.
+    #[test]
+    fn unknown_fields_rejected_by_schema_and_serde() {
+        let event = tick_def("Event");
+        let input = tick_def("TickInput");
+        let output = tick_def("TickOutput");
+        let all = load(&schema_dir().join("fixtures/valid/tick.input.all-events.json"));
+        let mut kinds = 0;
+        for e in all["events"].as_array().unwrap() {
+            assert!(event.is_valid(e));
+            assert!(serde_json::from_value::<Event>(e.clone()).is_ok());
+            let mut bad = e.clone();
+            bad["unexpected"] = Value::from(1);
+            assert!(!event.is_valid(&bad), "schema should reject {bad}");
+            assert!(
+                serde_json::from_value::<Event>(bad.clone()).is_err(),
+                "serde should reject {bad}"
+            );
+            kinds += 1;
+        }
+        assert_eq!(kinds, 16);
+        let fix = serde_json::json!({"now_mono_ms":1,"fix":{"at_mono_ms":1,"lat":0.0,"lon":0.0,"acc_m":1.0,"alt":2}});
+        let top = serde_json::json!({"now_mono_ms":1,"extra":true});
+        for bad in [fix, top] {
+            assert!(!input.is_valid(&bad));
+            assert!(serde_json::from_value::<TickInput>(bad).is_err());
+        }
+        let good = load(&schema_dir().join("fixtures/valid/tick.output.planner.json"));
+        assert!(output.is_valid(&good));
+        serde_json::from_value::<TickOutput>(good.clone()).unwrap();
+        let mut bads = Vec::new();
+        let mut b = good.clone();
+        b["extra"] = Value::from(1);
+        bads.push(b);
+        let mut b = good.clone();
+        b["planner_cmds"][1]["extra"] = Value::from(1);
+        bads.push(b);
+        let mut b = good.clone();
+        b["log"][0]["extra"] = Value::from(1);
+        bads.push(b);
+        for bad in bads {
+            assert!(!output.is_valid(&bad), "schema should reject {bad}");
+            assert!(serde_json::from_value::<TickOutput>(bad).is_err());
+        }
+    }
+
+    /// `planner_cmds.start` carries a required `distance_class`; every serde Start passes
+    /// the schema and a Start without it is rejected by both.
+    #[test]
+    fn planner_start_distance_class_is_required() {
+        let cmd = tick_def("PlannerCmd");
+        for distance_class in [DistanceClass::Short, DistanceClass::Long] {
+            let v = serde_json::to_value(PlannerCmd::Start {
+                req_id: "r1".into(),
+                priority: SearchPriority::Reroute,
+                distance_class,
+                route_key: rk(),
+                graph_version: "g".into(),
+            })
+            .unwrap();
+            assert_eq!(errors(&cmd, &v), Vec::<String>::new());
+            let mut missing = v.clone();
+            missing.as_object_mut().unwrap().remove("distance_class");
+            assert!(!cmd.is_valid(&missing));
+            assert!(serde_json::from_value::<PlannerCmd>(missing).is_err());
+        }
     }
 }

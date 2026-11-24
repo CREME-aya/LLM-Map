@@ -213,7 +213,7 @@ impl Session {
                         &mut fx,
                     );
                 }
-                EventBody::EngineReset => self.planner.on_engine_reset(at, &mut fx),
+                EventBody::EngineReset {} => self.planner.on_engine_reset(at, &mut fx),
                 EventBody::Thermal { status } => {
                     let lvl = ThermalLevel::from(status);
                     if lvl != self.thermal {

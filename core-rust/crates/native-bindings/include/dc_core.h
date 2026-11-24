@@ -65,7 +65,8 @@ typedef struct dc_session dc_session;
           *             // after engine_stuck discarded_after_stuck
           *       | engine_reset }
           * out: {horizon? (only when frame_seq changed), voice_cmds[], ui_cmds[],
-          *       planner_cmds[start{req_id, priority, route_key, graph_version} | cancel{req_id}],
+          *       planner_cmds[start{req_id, priority, distance_class: short|long, route_key,
+          *                    graph_version} | cancel{req_id}],
           *       next_wake_mono_ms: u64|null, log[]}
           *   next_wake_mono_ms: earliest time the output may change without new input (includes the
           *   search watchdog deadline). Kotlin calls dc_tick by then; null = tick on each Fix only. */

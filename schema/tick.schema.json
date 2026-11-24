@@ -465,6 +465,13 @@
         "comparison"
       ]
     },
+    "DistanceClass": {
+      "description": "Distance class the Planner fixes before searching, for every candidate search of the same plan: pre-search ETA estimate < 1800 s -> short; >= 1800 s or no estimate -> long; searches outside any plan are long. Selects the comparison budget (3 s / 8 s from the plan start) and the watchdog limit (5 s / 10 s from each start) (03 §3.1, 07 §1).",
+      "enum": [
+        "short",
+        "long"
+      ]
+    },
     "TickOutput": {
       "type": "object",
       "additionalProperties": false,
@@ -525,6 +532,7 @@
             "cmd",
             "req_id",
             "priority",
+            "distance_class",
             "route_key",
             "graph_version"
           ],
@@ -537,6 +545,9 @@
             },
             "priority": {
               "$ref": "#/$defs/SearchPriority"
+            },
+            "distance_class": {
+              "$ref": "#/$defs/DistanceClass"
             },
             "route_key": {
               "$ref": "common.schema.json#/$defs/RouteKey"

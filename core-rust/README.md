@@ -31,6 +31,10 @@ core-rust/
 JSON conventions (docs v1.2 ADR-0008): `*_mono_ms` are JSON numbers; only Web-reachable u64 IDs / revisions
 (`trip_revision`, `route_revision`, edge ids) are decimal strings; enum values are snake_case;
 `dc_validate_override` returns `{"result":"applied"|"rejected", ...}`. `search_finished.outcome` is `ok|cancelled|error`.
+`planner_cmds.start` carries the required `distance_class: short|long` fixed by the Planner.
+Unknown fields are rejected with `E_SCHEMA` wherever the schema says `additionalProperties: false`
+(TickInput, Fix, every Event kind, PlannerCmd, TickOutput, LogEvent) and in the schema-less
+`dc_validate_override` request and `dc_session_new` config.
 
 Rules: `dc_in` is owned by the caller and valid until the function returns (not NUL-terminated). `dc_out` is allocated by Rust and released with `dc_buf_free`.
 Every return value is `{ok, data | error{code,msg}}`. Panics become `E_PANIC`. Calls come only from the NavigationSession actor.

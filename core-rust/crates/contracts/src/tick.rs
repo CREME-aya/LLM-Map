@@ -35,17 +35,61 @@ pub struct Fix {
 }
 
 /// `Event = { at_mono_ms } & (kind-specific fields)`.
-/// NOTE: `#[serde(flatten)]` prevents `deny_unknown_fields` on the outer struct;
-/// variants still reject unknown `kind` values. TODO(abi-v1): decide strictness.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+///
+/// Unknown fields are rejected like `additionalProperties: false` in tick.schema.json.
+/// serde cannot combine `#[serde(flatten)]` with `deny_unknown_fields`, so `Deserialize`
+/// is hand-written: it reads the object once (duplicate keys rejected), takes
+/// `at_mono_ms`, and hands the rest to `EventBody`, whose variants each reject unknown
+/// fields (`deny_unknown_fields` on the internally tagged enum; field-less kinds are
+/// `{}` struct variants because unit variants would silently ignore extra fields).
+/// `Serialize` still uses `flatten` (only deserialization has the restriction).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Event {
     pub at_mono_ms: MonoMs,
     #[serde(flatten)]
     pub body: EventBody,
 }
 
+impl<'de> Deserialize<'de> for Event {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let mut obj = d.deserialize_map(StrictObject)?;
+        let at = obj
+            .remove("at_mono_ms")
+            .ok_or_else(|| D::Error::missing_field("at_mono_ms"))?;
+        let at_mono_ms = MonoMs::deserialize(at).map_err(D::Error::custom)?;
+        let body =
+            EventBody::deserialize(serde_json::Value::Object(obj)).map_err(D::Error::custom)?;
+        Ok(Event { at_mono_ms, body })
+    }
+}
+
+/// JSON object reader that rejects duplicate keys (derived structs do the same; a plain
+/// `serde_json::Map` would keep the last value silently).
+struct StrictObject;
+
+impl<'de> serde::de::Visitor<'de> for StrictObject {
+    type Value = serde_json::Map<String, serde_json::Value>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an event object")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<Self::Value, A::Error> {
+        let mut out = serde_json::Map::new();
+        while let Some(k) = m.next_key::<String>()? {
+            if out.contains_key(&k) {
+                return Err(serde::de::Error::custom(format!("duplicate field `{k}`")));
+            }
+            let v: serde_json::Value = m.next_value()?;
+            out.insert(k, v);
+        }
+        Ok(out)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EventBody {
     // TODO(abi-v1): token / utterance_id / tier / reason value types are not specified (strings/u8 provisional).
     TtsStarted {
@@ -88,14 +132,14 @@ pub enum EventBody {
     Thermal {
         status: ThermalStatus,
     },
-    LowMemory,
+    LowMemory {},
     InferenceDown {
         reason: String,
     },
     InferenceUp {
         tier: u8,
     },
-    AudioFocusLost,
+    AudioFocusLost {},
     CallState {
         active: bool,
     },
@@ -112,7 +156,7 @@ pub enum EventBody {
     },
     /// Kotlin re-created the Valhalla actor. Does NOT by itself resume searching
     /// (03 §3.1: the slot is freed only by the real `search_finished`).
-    EngineReset,
+    EngineReset {},
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -160,6 +204,7 @@ pub enum SearchOutcome {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TickOutput {
     /// Only present when frame_seq changed. TODO(abi-v1): typed ManeuverHorizon (schema/maneuver-horizon.schema.json).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,14 +222,17 @@ pub struct TickOutput {
     pub log: Vec<LogEvent>,
 }
 
-/// `planner_cmds: start{req_id, priority, route_key, graph_version} | cancel{req_id}` (03 §3.1).
+/// `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version}
+/// | cancel{req_id}` (03 §3.1). `distance_class` is required: the class the Planner fixed
+/// for the plan before searching (searches outside any plan are `long`).
 /// TODO(abi-v1): tag field name `cmd` is provisional.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "cmd", rename_all = "snake_case")]
+#[serde(tag = "cmd", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlannerCmd {
     Start {
         req_id: String,
         priority: SearchPriority,
+        distance_class: DistanceClass,
         route_key: RouteKey,
         graph_version: String,
     },
@@ -246,6 +294,7 @@ pub enum UiCmd {
 
 /// Structured, privacy-safe log (no raw utterance text).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogEvent {
     pub at_mono_ms: MonoMs,
     pub what: String,
