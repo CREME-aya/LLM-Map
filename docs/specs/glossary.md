@@ -28,7 +28,7 @@
 | **`dict_norm`** | `asr_result` に付く、Rust 辞書照合で一致した定型語の正規形。経路の確定入口の一つで、SLM の `YES` では確定しない（再確認のみ）（[03 §4.2](03-routing-and-two-layer-control.md)）。 |
 | **`text_class`** | `asr_result` の発話分類（`dict` \| `natural`）。ログには発話の生文字列を残さず、`text_class` と辞書 ID のみ記録する（[ADR-0008](../adr/0008-dc-tick-single-event-entry.md)）。 |
 | **却下理由（`NO_PENDING_TARGET` 等）** | L3 命令の検証で返る理由コード：`SYNTAX` / `UNKNOWN_REF` / `STALE_REVISION` / `EXPIRED` / `FORBIDDEN_WHILE_DRIVING` / `NO_EFFECT` / `NO_PENDING_TARGET`。静的検証違反は全却下で、部分適用はしない。各コードの適用条件は [03 §4.2](03-routing-and-two-layer-control.md)。 |
-| **`search_finished`** | 探索の終端イベント `{req_id, route_key, graph_version, outcome: ok \| cancelled \| error, comparison_ref?, engine_ms}`（timeout は無い。監視上限の超過は Rust が検出して `engine_stuck`）。1 探索につき必ず 1 回届き、これが来るまで次の `start` は出さない（[03 §3.1](03-routing-and-two-layer-control.md)）。 |
+| **`search_finished`** | 探索の終端イベント `{req_id, route_key, graph_version, outcome: ok \| cancelled \| error, facts_ref?, engine_ms}`（timeout は無い。監視上限の超過は Rust が検出して `engine_stuck`）。1 探索につき必ず 1 回届き、これが来るまで次の `start` は出さない（[03 §3.1](03-routing-and-two-layer-control.md)）。 |
 | **`planner_cmds`** | `dc_tick` の出力で、Rust が出し Kotlin が実行する探索指示（`start{req_id, priority, route_key, graph_version}` \| `cancel{req_id}`）（[03 §3.1](03-routing-and-two-layer-control.md)、[ADR-0008](../adr/0008-dc-tick-single-event-entry.md)）。 |
 | **`discarded_late`** | cancel 後に `outcome=ok` が返った探索の記録。結果は使わず探索枠だけ解放する（[03 §3.1](03-routing-and-two-layer-control.md)）。 |
 | **`discarded_after_stuck`** | `engine_stuck` の後に `outcome=ok` で戻った探索の記録。結果は捨て、探索枠だけ解放する。逸脱再探索がまだ必要なら直後に新しい `start` を出す（[03 §3.1](03-routing-and-two-layer-control.md)）。 |

@@ -30,7 +30,7 @@ Event = { at_mono_ms } & (
   | thermal{status: none|light|moderate|severe|critical|emergency|shutdown}   // Rust で critical 以上を 1 つに
   | low_memory | inference_down{reason} | inference_up{tier}
   | audio_focus_lost | call_state{active}
-  | search_finished{req_id, route_key, graph_version, outcome, comparison_ref?, engine_ms}
+  | search_finished{req_id, route_key, graph_version, outcome, facts_ref?, engine_ms}
   | engine_reset )
 TickOutput = { horizon?, voice_cmds, ui_cmds, planner_cmds, next_wake_mono_ms: u64 | null, log: [LogEvent] }
 ```
@@ -40,7 +40,7 @@ TickOutput = { horizon?, voice_cmds, ui_cmds, planner_cmds, next_wake_mono_ms: u
    - `events` が `at_mono_ms` の昇順になっていない場合、Rust は **並べ替えず**、前の値に合わせて `clock_regression` を記録する。
 3. **出力**
    - `horizon` は `frame_seq` が変わったときだけ返す（[04 §2](../specs/04-maneuver-horizon-and-hmi.md)）。
-   - `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version} | cancel{req_id}` は Rust が出し、Kotlin が実行する。
+   - `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version} | cancel{req_id} | rank{plan_request_id, facts_refs, reason: all_done | budget_expired}` は Rust が出し、Kotlin が実行する。`rank` を受けた Kotlin が `dc_rank` を呼ぶ（Rust は `CandidateFacts` を持たないため）。`search_finished.facts_ref` は採点前の `CandidateFacts` への参照（意味の詳細は [03 §3.1](../specs/03-routing-and-two-layer-control.md)）。
    - `next_wake_mono_ms` は、**新しい入力がなくても出力が変わり得る最も早い単調時刻**（探索の監視期限を含む）。Kotlin はそれまでに `dc_tick` を呼ぶ（早めに呼ぶのは可）。待つものがなければ **null** で、その場合は Fix が届くたびの tick だけでよい。
 4. **状態は持つが、IO・スレッド・時計は持たない**: Rust はセッション（`dc_session_new` / `dc_session_free`）の中に状態を持つ。IO・スレッド・時計は持たない。
 5. **単調時刻の規約**

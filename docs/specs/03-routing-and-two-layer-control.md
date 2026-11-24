@@ -77,7 +77,8 @@ L3 の出力は **L2 本表（`profile_weights` / `avoidance_nodes_edges`）へ�
 |---|---|---|
 | Rust → Kotlin | `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version}` | 探索開始。`priority` は上表の JSON 名、`distance_class` は下記 |
 | Rust → Kotlin | `planner_cmds: cancel{req_id}` | 実行中探索の取消要求 |
-| Kotlin → Rust | `search_finished{req_id, route_key, graph_version, outcome: ok\|cancelled\|error, comparison_ref?, engine_ms}` | **唯一の終端イベント。1 探索につき必ず 1 回**。旧 `reroute_result` / `search_cancelled` は廃止 |
+| Rust → Kotlin | `planner_cmds: rank{plan_request_id, facts_refs: [string], reason: all_done\|budget_expired}` | 計画の採点指示。Kotlin が `dc_rank` を呼んで比較結果を表示する |
+| Kotlin → Rust | `search_finished{req_id, route_key, graph_version, outcome: ok\|cancelled\|error, facts_ref?, engine_ms}` | **唯一の終端イベント。1 探索につき必ず 1 回**。旧 `reroute_result` / `search_cancelled` は廃止 |
 
 - **距離区分 `distance_class: short | long`（暫定）**: Planner が **探索の前に** 決める。探索前に使える ETA 見積もりが **30 分未満なら `short`、30 分以上または見積もりがなければ `long`**。同じ計画の候補探索の中では区分を固定する。比較予算（3 s / 8 s）は **計画開始から**、監視上限（5 s / 10 s）は **各ネイティブ呼び出しの開始から** 数え、どちらもこの区分で選ぶ。なお [§3.2](#32-重複除去と-3-軸採点ルール) の `DetourPolicy` の 30 分（`short_threshold_s`）は探索後の基準 ETA に適用する別の判定である。境界テストは 29:59 / 30:00 / 見積もりなしの 3 ケースと、監視上限超過後も `search_finished` まで探索枠が解放されないこと。
 
@@ -95,6 +96,11 @@ engine_stuck ──search_finished{req_id}──▶ Idle
   ※ 逸脱再探索がまだ必要なら、直後に新しい start を出す
 不変条件: search_finished が来るまで次の start を出さない（同時 Running ≤ 1）
 ```
+
+- **`facts_ref` と `rank`**: `search_finished.facts_ref` は、その探索 1 本で得た **採点前の `CandidateFacts` への参照**（`outcome=ok` のときだけ）。採点には計画の候補がすべて要るため、探索ごとには `dc_rank` を呼ばない（旧名 `comparison_ref` は廃止）。
+  - Rust は、計画のすべての探索が終わったとき（`reason: all_done`）、または比較予算を超えたとき（`reason: budget_expired`）に `rank` を 1 回出す。`facts_refs` はその計画で `ok` になった探索の `facts_ref` を **要求した順** に並べたもの。空でも `rank` は出し、Kotlin の `dc_rank` は「有効候補 0 本」を理由付きで返す。
+  - 予算超過時は待っている比較探索を取り消し、新しい `start` は出さない。実行中の探索は `search_finished` まで枠を占有したまま。
+  - `rank` を出した時点で Rust はその計画を **終了** とし、以後その計画の `start` を出さない。完了を知らせるイベントは無い。`rank` 後に同じ計画の `search_finished` が戻ったら `discarded_late` として記録し、枠の解放にだけ使う。
 
 - **結果を採用する条件**: `outcome=ok` **かつ** `route_key` が現行と一致 **かつ** 走行状態が `tracking` のときのみ。それ以外は破棄（表示・発話に使わない）。
 - **タイムアウトと `engine_stuck`**: ネイティブ呼び出し開始からの **監視上限（短距離 5 s / 長距離 10 s、暫定。値は [07 §1](07-parameters-and-poc-gates.md)）** の超過は **Rust が検出** する（`now_mono_ms` と `start` を出した時刻から判定）。Kotlin は timeout を通知せず、`next_wake_mono_ms`（監視期限を含む）に合わせて `dc_tick` を呼ぶだけ。超過したら Rust は `engine_stuck`（画面表示「経路を確認中」）に入る。そのため `search_finished.outcome` に `timeout` は無い。**探索枠は占有したまま** とし、ネイティブ呼び出しが **実際に戻った時点で `search_finished` を 1 回** 返す。探索枠を解放するのはこの `search_finished` のときで、`ok` で戻っても結果は捨て `discarded_after_stuck` として記録する（cancel 後の `ok` は従来どおり `discarded_late`）。逸脱再探索がまだ必要なら直後に新しい `start` を出す。新しい Actor を作れただけでは再開しない。エンジン再初期化は `engine_reset` イベントで Rust に通知する（可否は 未確認（Gate 0 で確認））。
