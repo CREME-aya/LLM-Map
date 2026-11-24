@@ -1,0 +1,73 @@
+# OS / Editors
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment / Secrets (never commit credentials or BYOK keys)
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pem
+google-services.json
+local.properties
+
+# Rust
+**/target/
+**/*.rs.bk
+
+# Android / Gradle / Native C++
+.gradle/
+**/build/
+**/.cxx/
+**/.externalNativeBuild/
+*.apk
+*.aab
+*.apks
+*.dex
+*.so
+!tests/**/fixtures/**/*.so
+captures/
+
+# Web / Node
+node_modules/
+dist/
+.vite/
+.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Large map, routing, and model artifacts (distributed via R2 / stored on /Volumes/suneast)
+*.osm.pbf
+*.pbf
+*.pmtiles
+*.mbtiles
+*.gguf
+*.litertlm
+*.tflite
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+valhalla_tiles/
+out/
+.tmp/

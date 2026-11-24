@@ -1,0 +1,22 @@
+# Driving SLM 1-Line Fixed Command Grammar (v1)
+# Target runtime: llama.cpp C API (Tier 1 CPU NEON / Tier 2 Vulkan GPU)
+# Target model:   Qwen2.5-0.5B-Instruct Q4_K_M (spec ceiling <= 32 tokens; grammar max <= 15 tokens)
+# Spec reference: docs/specs/slm-command-code.md, schema/slm-command-code.v1.json
+#
+# Guarantees enforced structurally by grammar:
+#   1. Single-line output terminated by "\n"
+#   2. Closed command set: OVR, CXL, WHY, BMK, YES, NO, NOOP
+#   3. OVR accepts 1 to 4 unique parameters in canonical order: rc -> nr -> mg -> dt -> jp
+#      - Structurally prevents duplicate keys and key-order nondeterminism
+#      - Avoids {m,n} repetition quantifiers for broad llama.cpp GBNF compatibility
+#   4. Defense-in-depth: Rust OverrideValidator MUST still validate all output as untrusted input.
+
+root     ::= cmd "\n"
+cmd      ::= override | "CXL" | "WHY" | "BMK" | "YES" | "NO" | "NOOP"
+override ::= "OVR" ovr-body
+ovr-body ::= " rc=" level rc-tail? | " nr=" level (" mg=" level)? (" dt=" detour)? (" jp=" jref)? | " mg=" level (" dt=" detour)? (" jp=" jref)? | " dt=" detour (" jp=" jref)? | " jp=" jref
+rc-tail  ::= " nr=" level nr-max2? | " mg=" level (" dt=" detour)? (" jp=" jref)? | " dt=" detour (" jp=" jref)? | " jp=" jref
+nr-max2  ::= " mg=" level (" dt=" detour | " jp=" jref)? | " dt=" detour (" jp=" jref)? | " jp=" jref
+level    ::= "L" | "N" | "H"
+detour   ::= "T" | "S" | "R"
+jref     ::= "last" | "next"
