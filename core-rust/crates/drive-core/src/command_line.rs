@@ -1,12 +1,12 @@
 //! Parser for the driving-time 1-line command code emitted by the SLM.
 //!
-//! Must accept exactly the same language as Hydrogenくん's leading-key-branch GBNF
-//! (devteam #23/#25): keys in fixed order rc → nr → mg → dt → jp, each at most once,
-//! `dt` is `T|S` only, empty `OVR` is not allowed.
+//! Must accept exactly the same language as the GBNF of docs v1.2 03 §4.1 (leading-key
+//! branch): keys in fixed order rc → nr → mg → dt → jp, each at most once, `dt` is `T|S`
+//! only, empty `OVR` is not allowed.
 //!
 //! TODO(gbnf): the canonical grammar is `schema/slm/override.gbnf` (owned by Hydrogenくん,
-//! not placed yet). `tests/fixtures/command_line.provisional.gbnf` is a provisional copy;
-//! point the conformance test at the canonical file once it exists.
+//! not on the base branch yet). `tests/command_line.rs` checks that file when present and
+//! falls back to the provisional copy `tests/fixtures/command_line.provisional.gbnf`.
 
 use contracts::override_types::{Detour, Level};
 

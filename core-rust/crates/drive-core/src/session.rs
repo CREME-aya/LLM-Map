@@ -4,15 +4,17 @@ use crate::command_line::{self, Command, JpRef};
 use crate::planner::{Effects, SearchPlanner};
 use contracts::override_types::{RejectCode, ValidateOverrideRequest, ValidateOverrideResult};
 use contracts::tick::{EventBody, LogEvent, SearchPriority, ThermalStatus, TickInput, TickOutput};
-use contracts::{ErrorCode, RouteKey, U64Str};
+use contracts::{ErrorCode, RouteKey};
 use serde::Deserialize;
 
 /// `dc_session_new` config. TODO(abi-v1): config contents are not specified anywhere;
-/// only the provisional search deadline is read. Unknown fields are rejected.
+/// only the provisional search watchdog limit is read. Unknown fields are rejected.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionConfig {
-    /// Long-distance search budget 8 s + 2 s margin (#41, provisional initial value).
+    /// Watchdog limit from the start of the native call (03 §3.1 / 07 §1, provisional):
+    /// long-distance 10 s. TODO(drive-core): short-distance 5 s needs the distance class of
+    /// the request, which the planner does not know yet; one limit is used for all searches.
     #[serde(default = "default_deadline")]
     pub search_deadline_ms: u64,
 }
@@ -130,7 +132,7 @@ impl Session {
 
         // Time never goes backwards inside the core: clamp to the previous value and
         // record clock_regression (02 §2.1 / team decision 2026-11-24).
-        let raw_now = input.now_mono_ms.0;
+        let raw_now = input.now_mono_ms;
         let now = match self.last_now_mono_ms {
             Some(prev) if raw_now < prev => {
                 extra_log.push(log_at(
@@ -148,7 +150,7 @@ impl Session {
         for ev in input.events {
             // Events must be in at_mono_ms ascending order. Not re-sorted: an out-of-order
             // event is clamped to the previous value and clock_regression is recorded.
-            let raw_at = ev.at_mono_ms.0;
+            let raw_at = ev.at_mono_ms;
             let at = match prev_at {
                 Some(p) if raw_at < p => {
                     extra_log.push(log_at(
@@ -206,7 +208,7 @@ impl Session {
             voice_cmds: Vec::new(),
             ui_cmds: fx.ui_cmds,
             planner_cmds: fx.planner_cmds,
-            next_wake_mono_ms: self.planner.next_wake().map(U64Str),
+            next_wake_mono_ms: self.planner.next_wake(),
             log,
         }
     }
@@ -244,7 +246,7 @@ impl Session {
 
 fn log_at(at: u64, what: &str, detail: Option<String>) -> LogEvent {
     LogEvent {
-        at_mono_ms: U64Str(at),
+        at_mono_ms: at,
         what: what.to_owned(),
         req_id: None,
         detail,

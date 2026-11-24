@@ -97,15 +97,89 @@ fn timeout_engine_stuck_keeps_slot_until_native_returns() {
     let (s, o, max_running) = run("gate7-timeout-engine-stuck.json");
     assert_eq!(max_running, 1);
     // deadline = started_at(1000) + 10_000 → wake requested at 11000
-    assert_eq!(o[1].next_wake_mono_ms.map(|m| m.0), Some(11_000));
+    assert_eq!(o[1].next_wake_mono_ms, Some(11_000));
+    // Rust detects the deadline from now_mono_ms (no timeout event from Kotlin)
     assert!(whats(&o[2]).contains(&"engine_stuck"));
+    assert_eq!(o[2].ui_cmds, vec![UiCmd::ShowCheckingRoute]);
     assert!(o[2].planner_cmds.is_empty());
+    assert_eq!(
+        o[2].next_wake_mono_ms, None,
+        "stuck: only search_finished frees the slot"
+    );
     // engine_reset alone never resumes searching
     assert!(whats(&o[3]).contains(&"engine_reset"));
     assert!(o[3].planner_cmds.is_empty());
-    // native call physically returns → slot freed → r2 starts
-    assert!(matches!(&o[4].planner_cmds[..], [PlannerCmd::Start { req_id, .. }] if req_id == "r2"));
-    assert!(matches!(s.planner().slot(), Slot::Running { .. }));
+    // native call physically returns ok → result discarded, slot freed → r2 starts
+    assert!(whats(&o[4]).contains(&"discarded_after_stuck"));
+    assert!(!whats(&o[4]).contains(&"discarded_late"));
+    assert!(
+        !o[4]
+            .ui_cmds
+            .iter()
+            .any(|u| matches!(u, UiCmd::SearchResultReady { .. })),
+        "no r1-derived display"
+    );
+    assert!(
+        matches!(&o[4].planner_cmds[..], [PlannerCmd::Start { req_id, priority: SearchPriority::Reroute, .. }] if req_id == "r2")
+    );
+    assert_eq!(o[4].next_wake_mono_ms, Some(14_900 + 10_000));
+    // r2 adopted
+    assert_eq!(
+        o[5].ui_cmds,
+        vec![UiCmd::SearchResultReady {
+            req_id: "r2".into(),
+            comparison_ref: Some("cmp-r2".into())
+        }]
+    );
+    assert_eq!(*s.planner().slot(), Slot::Idle);
+}
+
+#[test]
+fn ok_after_stuck_without_cancel_is_discarded_after_stuck() {
+    let mut s = Session::new(SessionConfig::default());
+    let rk = serde_json::json!({"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"});
+    s.set_current_route_key(serde_json::from_value(rk.clone()).unwrap());
+    s.request_search(0, SearchPriority::Reroute).unwrap();
+    let o = s.tick(serde_json::from_value(serde_json::json!({"now_mono_ms":9_999})).unwrap());
+    assert!(!whats(&o).contains(&"engine_stuck"));
+    let o = s.tick(serde_json::from_value(serde_json::json!({"now_mono_ms":10_000})).unwrap());
+    assert!(whats(&o).contains(&"engine_stuck"));
+    assert!(matches!(
+        s.planner().slot(),
+        Slot::EngineStuck {
+            cancel_sent: false,
+            ..
+        }
+    ));
+    let o = s.tick(serde_json::from_value(serde_json::json!({"now_mono_ms":12_000,"events":[
+        {"at_mono_ms":11_000,"kind":"search_finished","req_id":"r1","route_key":rk,"graph_version":"g","outcome":"ok","engine_ms":11_000}]})).unwrap());
+    assert!(whats(&o).contains(&"discarded_after_stuck"));
+    assert!(o.ui_cmds.is_empty());
+    assert_eq!(*s.planner().slot(), Slot::Idle);
+}
+
+#[test]
+fn reroute_while_stuck_sends_one_cancel_and_waits_for_real_return() {
+    let mut s = Session::new(SessionConfig::default());
+    let rk = serde_json::json!({"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"});
+    s.set_current_route_key(serde_json::from_value(rk.clone()).unwrap());
+    s.request_search(0, SearchPriority::AvoidChip).unwrap();
+    s.tick(serde_json::from_value(serde_json::json!({"now_mono_ms":10_000})).unwrap());
+    let o = s.request_search(10_100, SearchPriority::Reroute).unwrap();
+    assert_eq!(
+        o.planner_cmds,
+        vec![PlannerCmd::Cancel {
+            req_id: "r1".into()
+        }]
+    );
+    // a second reroute request does not repeat the cancel nor start anything
+    let o = s.request_search(10_200, SearchPriority::Reroute).unwrap();
+    assert!(o.planner_cmds.is_empty());
+    let o = s.tick(serde_json::from_value(serde_json::json!({"now_mono_ms":13_000,"events":[
+        {"at_mono_ms":12_900,"kind":"search_finished","req_id":"r1","route_key":rk,"graph_version":"g","outcome":"cancelled","engine_ms":12_900}]})).unwrap());
+    assert!(
+        matches!(&o.planner_cmds[..], [PlannerCmd::Start { req_id, priority: SearchPriority::Reroute, .. }] if req_id == "r2")
+    );
 }
 
 #[test]
@@ -135,8 +209,8 @@ fn ok_for_stale_route_key_is_not_adopted() {
     s.set_current_route_key(rk("1"));
     s.request_search(0, SearchPriority::Reroute).unwrap();
     s.set_current_route_key(rk("2")); // route changed meanwhile
-    let t: TickInput = serde_json::from_value(serde_json::json!({"now_mono_ms":"10","events":[
-        {"at_mono_ms":"9","kind":"search_finished","req_id":"r1","route_key":rk("1"),"graph_version":"g","outcome":"ok","engine_ms":1}]})).unwrap();
+    let t: TickInput = serde_json::from_value(serde_json::json!({"now_mono_ms":10,"events":[
+        {"at_mono_ms":9,"kind":"search_finished","req_id":"r1","route_key":rk("1"),"graph_version":"g","outcome":"ok","engine_ms":1}]})).unwrap();
     let o = s.tick(t);
     assert!(o.ui_cmds.is_empty());
     assert!(whats(&o).contains(&"discarded_stale_route_key"));
@@ -166,7 +240,7 @@ fn unknown_req_and_lower_priority_do_not_start_second_search() {
         .is_empty());
     let o = s.tick(
         serde_json::from_str(
-            r#"{"now_mono_ms":"5","events":[{"at_mono_ms":"5","kind":"engine_reset"}]}"#,
+            r#"{"now_mono_ms":5,"events":[{"at_mono_ms":5,"kind":"engine_reset"}]}"#,
         )
         .unwrap(),
     );

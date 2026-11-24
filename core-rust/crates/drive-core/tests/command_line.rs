@@ -32,10 +32,41 @@ fn grammar_language() -> Vec<String> {
     out
 }
 
+/// The grammar the parser is checked against: the canonical `schema/slm/override.gbnf`
+/// if it exists, otherwise the provisional copy of docs 03 §4.1.
+/// TODO(gbnf): drop the fallback once schema/slm/override.gbnf is on the branch.
+fn gbnf_source() -> (String, &'static str) {
+    let canonical =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../schema/slm/override.gbnf");
+    match std::fs::read_to_string(&canonical) {
+        Ok(g) => (g, "schema/slm/override.gbnf"),
+        Err(_) => (
+            include_str!("fixtures/command_line.provisional.gbnf").to_owned(),
+            "provisional copy",
+        ),
+    }
+}
+
 #[test]
-fn provisional_gbnf_copy_is_present() {
-    let g = include_str!("fixtures/command_line.provisional.gbnf");
-    assert!(g.contains("detour   ::= \"T\" | \"S\""));
+fn gbnf_matches_the_shape_the_parser_implements() {
+    let (g, src) = gbnf_source();
+    let norm: String = g
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        r#"cmd ::= override | "CXL" | "WHY" | "BMK" | "YES" | "NO" | "NOOP""#,
+        r#"override ::= "OVR" ( rc nr? mg? dt? jp? | nr mg? dt? jp? | mg dt? jp? | dt jp? | jp )"#,
+        r#"dt ::= " dt=" ("T" | "S")"#,
+        r#"jp ::= " jp=" ("last" | "next")"#,
+        r#"level ::= "L" | "N" | "H""#,
+    ] {
+        assert!(norm.contains(needle), "{src}: missing {needle}");
+    }
 }
 
 #[test]

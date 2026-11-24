@@ -45,17 +45,76 @@ fn all_v2_event_kinds_parse() {
         r#"{"kind":"engine_reset"}"#.into(),
     ];
     for e in &events {
-        let with_at = format!(r#"{{"at_mono_ms":"5",{}"#, &e[1..]);
+        let with_at = format!(r#"{{"at_mono_ms":5,{}"#, &e[1..]);
         let ev: Event = serde_json::from_str(&with_at).unwrap_or_else(|err| panic!("{e}: {err}"));
-        assert_eq!(ev.at_mono_ms, U64Str(5));
+        assert_eq!(ev.at_mono_ms, 5);
     }
+}
+
+#[test]
+fn mono_ms_is_a_json_number_not_a_string() {
+    assert!(serde_json::from_str::<TickInput>(r#"{"now_mono_ms":"1"}"#).is_err());
+    assert!(serde_json::from_str::<TickInput>(r#"{"now_mono_ms":-1}"#).is_err());
+    assert!(serde_json::from_str::<TickInput>(r#"{"now_mono_ms":1.5}"#).is_err());
+    let t: TickInput = serde_json::from_str(r#"{"now_mono_ms":18446744073709551615}"#).unwrap();
+    assert_eq!(t.now_mono_ms, u64::MAX);
+    let out = TickOutput {
+        next_wake_mono_ms: Some(42),
+        ..Default::default()
+    };
+    let v = serde_json::to_value(&out).unwrap();
+    assert_eq!(v["next_wake_mono_ms"], serde_json::json!(42));
+    assert_eq!(
+        serde_json::to_value(TickOutput::default()).unwrap()["next_wake_mono_ms"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn search_finished_has_no_timeout_outcome() {
+    let rk = r#"{"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"}"#;
+    for (outcome, ok) in [
+        ("ok", true),
+        ("cancelled", true),
+        ("error", true),
+        ("timeout", false),
+    ] {
+        let s = format!(
+            r#"{{"at_mono_ms":1,"kind":"search_finished","req_id":"r1","route_key":{rk},"graph_version":"g","outcome":"{outcome}","engine_ms":1}}"#
+        );
+        assert_eq!(serde_json::from_str::<Event>(&s).is_ok(), ok, "{outcome}");
+    }
+}
+
+#[test]
+fn enums_are_snake_case_on_the_wire() {
+    let v = serde_json::to_value(PlannerCmd::Start {
+        req_id: "r1".into(),
+        priority: SearchPriority::AvoidChip,
+        route_key: serde_json::from_str(
+            r#"{"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"}"#,
+        )
+        .unwrap(),
+        graph_version: "g".into(),
+    })
+    .unwrap();
+    assert_eq!(v["cmd"], "start");
+    assert_eq!(v["priority"], "avoid_chip");
+    assert_eq!(
+        serde_json::to_value(UiCmd::ShowCheckingRoute).unwrap()["ui"],
+        "show_checking_route"
+    );
+    assert_eq!(
+        serde_json::to_value(ThermalStatus::Critical).unwrap(),
+        "critical"
+    );
 }
 
 #[test]
 fn abolished_terminal_events_are_rejected() {
     // v2: reroute_result / search_cancelled are replaced by search_finished.
     for k in ["reroute_result", "search_cancelled"] {
-        let s = format!(r#"{{"at_mono_ms":"1","kind":"{k}","req_id":"r1"}}"#);
+        let s = format!(r#"{{"at_mono_ms":1,"kind":"{k}","req_id":"r1"}}"#);
         assert!(serde_json::from_str::<Event>(&s).is_err(), "{k}");
     }
 }
@@ -63,7 +122,7 @@ fn abolished_terminal_events_are_rejected() {
 #[test]
 fn tick_input_requires_now_and_rejects_unknown_fields() {
     assert!(serde_json::from_str::<TickInput>(r#"{"events":[]}"#).is_err());
-    assert!(serde_json::from_str::<TickInput>(r#"{"now_mono_ms":"1","extra":1}"#).is_err());
-    let t: TickInput = serde_json::from_str(r#"{"now_mono_ms":"1"}"#).unwrap();
+    assert!(serde_json::from_str::<TickInput>(r#"{"now_mono_ms":1,"extra":1}"#).is_err());
+    let t: TickInput = serde_json::from_str(r#"{"now_mono_ms":1}"#).unwrap();
     assert!(t.events.is_empty() && t.fix.is_none());
 }

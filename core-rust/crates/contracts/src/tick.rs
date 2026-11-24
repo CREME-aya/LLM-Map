@@ -1,10 +1,13 @@
-//! `dc_tick` v2 contract (devteam #44, terminal event per #41/#54/#56).
+//! `dc_tick` v2 contract. Canonical: docs v1.2 ADR-0008 (decision 2/3/6), 03 §3.1.
 //!
 //! ```text
 //! TickInput  = { now_mono_ms, fix?: Fix, events: [Event] }   // events in at_mono_ms ascending order
-//! TickOutput = { horizon?, voice_cmds, ui_cmds, planner_cmds, next_wake_mono_ms, log }
+//! TickOutput = { horizon?, voice_cmds, ui_cmds, planner_cmds, next_wake_mono_ms: u64 | null, log }
 //! ```
-//! `reroute_result` / `search_cancelled` are abolished: one `search_finished` per search.
+//! - `*_mono_ms` (`MonoMs`) are JSON numbers; enum values are snake_case.
+//! - `reroute_result` / `search_cancelled` are abolished: one `search_finished` per search.
+//! - There is no `timeout` outcome: the watchdog deadline is detected in Rust from
+//!   `now_mono_ms` (→ `engine_stuck`); Kotlin only calls `dc_tick` by `next_wake_mono_ms`.
 use crate::common::{MonoMs, RouteKey};
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +79,8 @@ pub enum EventBody {
         confirm_screen_id: String,
     },
     /// Only taps come from Kotlin as consent; dict "yes" consent is produced inside Rust.
+    /// `target_id` = `AvoidOffer.offer_id` (avoid chip) | `override_id` | `confirm_screen_id`
+    /// (ADR-0008, 03 §4.2). Re-validated on confirm; never carried over to a replaced offer.
     UserTap {
         target_id: String,
         action: TapAction,
@@ -105,7 +110,8 @@ pub enum EventBody {
         /// Wall time of the Valhalla call (measurement only, never used for decisions).
         engine_ms: u64,
     },
-    /// Kotlin re-created the Valhalla actor. Does NOT by itself resume searching (#54).
+    /// Kotlin re-created the Valhalla actor. Does NOT by itself resume searching
+    /// (03 §3.1: the slot is freed only by the real `search_finished`).
     EngineReset,
 }
 
@@ -151,7 +157,6 @@ pub enum SearchOutcome {
     Ok,
     Cancelled,
     Error,
-    Timeout,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -163,12 +168,14 @@ pub struct TickOutput {
     pub voice_cmds: Vec<serde_json::Value>,
     pub ui_cmds: Vec<UiCmd>,
     pub planner_cmds: Vec<PlannerCmd>,
-    /// When Kotlin should call dc_tick next. TODO(abi-v1): `null` when no wake is needed is provisional.
+    /// Earliest mono time at which the output may change without new input, including the
+    /// search watchdog deadline. Kotlin calls dc_tick by then (earlier is fine).
+    /// `null` = nothing to wait for (tick on each Fix only). ADR-0008 decision 3.
     pub next_wake_mono_ms: Option<MonoMs>,
     pub log: Vec<LogEvent>,
 }
 
-/// `planner_cmds: start{req_id, priority, route_key, graph_version} | cancel{req_id}` (#41).
+/// `planner_cmds: start{req_id, priority, route_key, graph_version} | cancel{req_id}` (03 §3.1).
 /// TODO(abi-v1): tag field name `cmd` is provisional.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -184,8 +191,9 @@ pub enum PlannerCmd {
     },
 }
 
-/// Single priority queue order (higher wins). Values from the #41 common test data.
-/// TODO(abi-v1): full priority list (initial plan, trip-level alternates, ...) not specified.
+/// Single priority queue order (higher wins). Values from the Gate 7 common test data.
+/// TODO(abi-v1): 03 §3.1 has 4 levels (逸脱再探索 > 明示計画 > 回避チップ > 比較探索);
+/// JSON names for 明示計画 / 比較探索 are not specified, so only these two exist yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchPriority {
@@ -197,7 +205,7 @@ pub enum SearchPriority {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "ui", rename_all = "snake_case")]
 pub enum UiCmd {
-    /// "経路を確認中" (#41 t1, engine_stuck).
+    /// "経路を確認中" (Gate 7 t1, engine_stuck).
     ShowCheckingRoute,
     /// Adopted search result; Kotlin performs the atomic commit via dc_route_commit.
     SearchResultReady {

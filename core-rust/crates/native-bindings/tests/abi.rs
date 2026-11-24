@@ -31,22 +31,28 @@ fn session_lifecycle_and_tick() {
         assert_eq!(v, serde_json::json!({"ok": true, "data": {}}));
         assert!(!s.is_null());
         // input is NOT NUL-terminated: pass a slice of a larger buffer
-        let buf = br#"{"now_mono_ms":"42"}garbage"#;
+        let buf = br#"{"now_mono_ms":42}garbage"#;
         let v = take(dc_tick(
             s,
             DcIn {
                 ptr: buf.as_ptr(),
-                len: 20,
+                len: 18,
             },
         ));
         assert_eq!(v["ok"], true, "{v}");
         assert_eq!(v["data"]["planner_cmds"], serde_json::json!([]));
         assert_eq!(v["data"]["next_wake_mono_ms"], Value::Null);
-        let v = take(dc_validate_override(s, din(br#"{"code_line":"OVR rc=H rc=L","contract":{},"utterance_mono_ms":"1","ref_frame_seq":"1"}"#)));
+        let v = take(dc_validate_override(s, din(br#"{"code_line":"OVR rc=H rc=L","contract":{},"utterance_id":"u1","utterance_mono_ms":1,"ref_frame_seq":1}"#)));
         assert_eq!(
             v["data"],
             serde_json::json!({"result":"rejected","code":"SYNTAX"})
         );
+        // utterance_id is required (02 §2.1 / 03 §4.2)
+        let v = take(dc_validate_override(
+            s,
+            din(br#"{"code_line":"YES","contract":{},"utterance_mono_ms":1,"ref_frame_seq":1}"#),
+        ));
+        assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
         dc_session_free(s);
     }
 }
@@ -66,15 +72,15 @@ fn session_new_failure_sets_null() {
 #[test]
 fn null_handle_and_bad_json() {
     unsafe {
-        let v = take(dc_tick(ptr::null_mut(), din(br#"{"now_mono_ms":"1"}"#)));
+        let v = take(dc_tick(ptr::null_mut(), din(br#"{"now_mono_ms":1}"#)));
         assert_eq!(v["error"]["code"], "E_INVALID_HANDLE");
         let mut s = ptr::null_mut();
         take(dc_session_new(din(b"{}"), &mut s));
         for bad in [
             &b""[..],
             b"{",
-            br#"{"now_mono_ms":1}"#,
-            br#"{"now_mono_ms":"1","events":[{"at_mono_ms":"1","kind":"search_cancelled"}]}"#,
+            br#"{"now_mono_ms":"1"}"#,
+            br#"{"now_mono_ms":1,"events":[{"at_mono_ms":1,"kind":"search_cancelled"}]}"#,
         ] {
             let v = take(dc_tick(s, din(bad)));
             assert_eq!(
@@ -130,7 +136,7 @@ fn same_input_same_bytes() {
     unsafe fn run() -> Vec<u8> {
         let mut s = ptr::null_mut();
         take(dc_session_new(din(b"{}"), &mut s));
-        let o = dc_tick(s, din(br#"{"now_mono_ms":"7","events":[{"at_mono_ms":"5","kind":"thermal","status":"critical"}]}"#));
+        let o = dc_tick(s, din(br#"{"now_mono_ms":7,"events":[{"at_mono_ms":5,"kind":"thermal","status":"critical"}]}"#));
         let v = std::slice::from_raw_parts(o.ptr, o.len).to_vec();
         dc_buf_free(o);
         dc_session_free(s);

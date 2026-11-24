@@ -132,3 +132,19 @@ fn rust_mirror_agrees_on_personal_routing_override() {
         }
     }
 }
+
+#[test]
+fn rust_mirror_agrees_on_avoid_offer() {
+    use contracts::horizon::AvoidOffer;
+    let dir = schema_dir().join("fixtures");
+    let valid = load(&dir.join("valid/maneuver-horizon.min.json"));
+    let raw = valid["upcoming"][0]["avoid_offer"].clone();
+    let typed: AvoidOffer = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(typed.offer_id, "o1");
+    assert_eq!(serde_json::to_value(&typed).unwrap(), raw);
+    let invalid = load(&dir.join("invalid/maneuver-horizon.avoid-offer-without-offer-id.json"));
+    assert!(
+        serde_json::from_value::<AvoidOffer>(invalid["upcoming"][0]["avoid_offer"].clone())
+            .is_err()
+    );
+}
