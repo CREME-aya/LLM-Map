@@ -602,3 +602,101 @@ fn roundabout_exit_still_has_a_p1_deadline_after_entrance_passage() {
         Some(41_000 + u64::from(exit_eta) - 8_000)
     );
 }
+
+/// (crossing, approach_signal, right_turn_protection), all confirmed.
+type JunctionEvidence = (&'static str, &'static str, &'static str);
+
+/// 04 §2 / 03 §4.1: `refs` point at difficult junctions (難所) only. Docs define no
+/// junction kind for ordinary intersections, so passing or approaching them creates no
+/// `JunctionRef` / `PassedRef`; they still carry the P1 guidance deadline (04 §3).
+/// Main difficult kinds (unsignalled right across oncoming, narrow, merge) are not part
+/// of this test.
+#[test]
+fn ordinary_junctions_create_no_refs_but_keep_p1_deadlines() {
+    let ev = |value: &str| -> contracts::horizon::Evidence {
+        serde_json::from_value(
+            serde_json::json!({"kind":"confirmed","value":value,"source_ref":"test"}),
+        )
+        .unwrap()
+    };
+    let cases: Vec<(&str, Arrow, Option<JunctionEvidence>)> = vec![
+        ("left", Arrow::Left, None),
+        ("slight_left", Arrow::SlightLeft, None),
+        ("keep_left", Arrow::KeepLeft, None),
+        ("fork_right", Arrow::ForkRight, None),
+        ("straight_decision", Arrow::StraightDecision, None),
+        (
+            "roundabout",
+            Arrow::Roundabout {
+                exit_number: Some(2),
+            },
+            None,
+        ),
+        (
+            "right_no_crossing",
+            Arrow::Right,
+            Some(("no_crossing", "absent", "unprotected")),
+        ),
+        (
+            "right_signalled_protected",
+            Arrow::Right,
+            Some(("across_oncoming", "present", "protected")),
+        ),
+    ];
+    for (name, arrow, evidence) in cases {
+        let mut b = main_line();
+        for m in &mut b.legs[0].maneuvers[..3] {
+            m.arrow = arrow;
+            if let Some((c, sig, p)) = evidence {
+                m.crossing = ev(c);
+                m.approach_signal = ev(sig);
+                m.right_turn_protection = ev(p);
+            }
+        }
+        let mut s = Session::new(SessionConfig {
+            fix_stale_ms: 200_000,
+            ..Default::default()
+        });
+        s.route_commit(&RouteCommitRequest {
+            expected_route_key: None,
+            bundle: b.clone(),
+        })
+        .unwrap();
+        let mut seen = 0;
+        for (t, x) in [(1_000, 140_000), (2_000, 150_100), (3_000, 150_200)] {
+            if let Some(h) = tick(&mut s, t, Some(fix_xy(&b, t, x, 0))).horizon {
+                seen += 1;
+                assert_eq!(h.status, HorizonStatus::Tracking, "{name}");
+                assert_eq!(h.refs.next, None, "{name}");
+                assert_eq!(h.refs.last, None, "{name}: passing is not a PassedRef");
+                assert!(h.next_p1_deadline_monotonic_ms.is_some(), "{name}");
+                assert_eq!(h.next_complex_window, None, "{name}");
+            }
+        }
+        assert!(seen > 0, "{name}");
+    }
+}
+
+/// 04 §2 / 05 §6.2: `next_complex_window` has no start / end rule in the docs, so it is
+/// not produced in any status (TODO in horizon.rs) — never a made-up window that would
+/// block or allow the P3 history commentary.
+#[test]
+fn complex_window_is_not_produced_without_a_documented_rule() {
+    let (mut s, b) = committed();
+    let mut frames = vec![tick(&mut s, 0, None).horizon.unwrap()]; // uncertain
+    frames.push(
+        tick(&mut s, 1_000, Some(fix_xy(&b, 1_000, 10_000, 0)))
+            .horizon
+            .unwrap(),
+    ); // tracking
+    for t in [2_000u64, 3_000, 4_000] {
+        if let Some(h) = tick(&mut s, t, Some(fix_xy(&b, t, 10_000, 100_000))).horizon {
+            frames.push(h); // off_route / rerouting
+        }
+    }
+    let statuses: Vec<_> = frames.iter().map(|h| h.status).collect();
+    assert!(statuses.contains(&HorizonStatus::Uncertain));
+    assert!(statuses.contains(&HorizonStatus::Tracking));
+    assert!(statuses.contains(&HorizonStatus::Rerouting));
+    assert!(frames.iter().all(|h| h.next_complex_window.is_none()));
+}

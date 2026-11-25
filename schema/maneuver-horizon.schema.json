@@ -57,6 +57,7 @@
       "$ref": "common.schema.json#/$defs/MonoMs"
     },
     "next_complex_window": {
+      "description": "04 §2 / 05 §6.2: P3 history commentary starts only outside this window; available time = min(next P1 deadline, start) - TTS preparation - 5 s. TODO(04 §2): docs do not define which maneuvers form the window nor its start / end; drive-core does not produce it yet.",
       "type": "object",
       "additionalProperties": false,
       "required": [

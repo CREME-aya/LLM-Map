@@ -13,10 +13,20 @@
 //! TODO(04 §2): the bundle carries a single edge timeline. Until the producer supplies
 //! independent bounds, all three ETAs describe that one deterministic projection.
 //! TODO(04 §2.1): a stop within a leg has no marker in the bundle.
-//! TODO(04 §2, §4.3): general junction kinds and their decision deadlines are unspecified.
-//! Only identify documented, evidenced difficult junctions. A known avoidance decision
-//! deadline can supply the next reference; P1 speech time is a separate deadline.
-//! TODO(04 §2): complex-window start/end rules are unspecified.
+//! Junction kinds (04 §2 `JunctionRef.kind`): `refs` point at difficult junctions only
+//! (03 §4.1 `jp=next` / `jp=last` = 難所). Docs name no kind for ordinary intersections
+//! (left turns, keep / fork, straight decisions, roundabouts, right turns without an
+//! oncoming crossing or with a confirmed protected phase), so none is made up: they never
+//! become a `JunctionRef` / `PassedRef`. Their only deadline is the P1 guidance deadline
+//! (`next_p1_deadline_monotonic_ms`, 04 §3), which every maneuver anchor has.
+//! TODO(04 §2 / §4.1 / §4.3, schema-v1): the `kind` enum; narrow / merge kinds; whether
+//! signalled-unprotected or unconfirmed right turns (03 §3.2 counts them) are 難所; and a
+//! `JunctionRef` deadline without an `AvoidOffer` (only the avoid-chip decision deadline,
+//! 20 s before the branch, is documented).
+//! TODO(04 §2 / 05 §6.2): `next_complex_window` is not produced. Docs give its shape
+//! `{start_monotonic_ms, end_monotonic_ms?}` and its use (P3 history starts only outside
+//! it; available time = min(next P1 deadline, window start) - TTS preparation - 5 s), but
+//! not which maneuvers form a complex window nor how its start / end are derived.
 #![deny(clippy::float_arithmetic, clippy::cast_precision_loss)]
 
 use crate::route::LoadedRoute;
@@ -245,6 +255,7 @@ impl HorizonFrames {
             matched_progress_cm,
             upcoming,
             next_p1_deadline_monotonic_ms,
+            // TODO(04 §2 / 05 §6.2): no documented start / end rule (see module docs).
             next_complex_window: None,
             refs,
         };
