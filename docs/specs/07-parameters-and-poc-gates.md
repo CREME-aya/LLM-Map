@@ -21,6 +21,8 @@
 | **個人プロファイル** | `jp=last` の対象範囲 | 通過後 180 秒以内 かつ 1.5 km 以内の直近難所 | 経路は変えず `profile_proposals` へ。該当なしはエラーにせず提案を作らない（[03 §4.1](03-routing-and-two-layer-control.md)） |
 | **速度・モード切替** | 走行中ソフトモード突入 / 解除 | 突入: `>= 8 km/h` を 3〜5 秒連続<br>解除: `<= 3 km/h` を 10〜30 秒連続（信号待ち除外） | [01-product-and-ux](01-product-and-ux.md), [04-maneuver-horizon](04-maneuver-horizon-and-hmi.md) |
 | **位置・鮮度** | 測位鮮度上限 | 2.5 秒 | 超過時は `uncertain` |
+| **位置・鮮度** | 経路から外れたと判定する閾値（横方向の許容 / 進行方向の許容 / 確定に要る連続 Fix 数） | 未決（仮の初期値を Gate 7 前に決める） | 方針値として `dc_session_new` の設定で渡す。経路ごとには持たない（[04 §3.1](04-maneuver-horizon-and-hmi.md)） |
+| **位置・鮮度** | 経路形状のチャンク長（基準点ごとの区間） | 目安 20 km | 暫定。チャンクごとに `origin_e7` と整数の換算係数を持つ（[04 §3.1](04-maneuver-horizon-and-hmi.md)）。縮尺誤差が外れ判定に影響しないかは Gate 0 の長距離リプレイで確認 |
 | **3 手先 HMI** | 連続分岐グルーピング閾値 | 都市 `120 m` / 高速 `200 m` / 最早 ETA 差 `12 秒`（先頭 2 操作） | 音声は `HorizonEntry.group_id` のみ参照（[04 §2.1](04-maneuver-horizon-and-hmi.md)） |
 | **3 手先 HMI** | 強調タイミング（準備 / まもなく） | 一般道: 30 秒前 / 8 秒前<br>高速道路: 60 秒前 / 20 秒前 | 距離丸め・UI 更新 1 Hz 上限 |
 | **3 手先 HMI** | 回避チップ締切 / 上限 / 地図復帰 | 分岐 20 秒前締切 / 1 走行予告最大 5 回 / パン復帰 10 秒 / ドロワー閉 15 秒 | タップ領域 76 dp 以上 |
@@ -116,6 +118,8 @@ t3 の「原子コミット」は Rust の commit{r2, route_key} → Kotlin の 
 - 直前の計画は `short` だったが、逸脱後に残り ETA が失効 → `long`（旧区分を引き継がない）
 
 `commit` の版ずれ：`commit{r2, route_key}` を出した後、`dc_route_commit` を呼ぶ前に経路が差し替わる → `dc_route_commit` は `E_STALE`、遅れた経路由来の `horizon` 更新・発話 **0**
+
+経路上の位置合わせ（[04 §3.1](04-maneuver-horizon-and-hmi.md)）の最初の確認ケース：長距離のチャンク境界（累積距離の連続）・並行道路（絞れないときは `uncertain`）・トンネル復帰（再捕捉）。通常走行と再捕捉を分けて、照合した線分数と `dc_tick` の p95・最大時間を記録する。
 
 ### 2.5 Gate 4 / 7 共通: 提案差し替え系テスト（`pending_offer`）
 

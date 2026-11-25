@@ -20,7 +20,7 @@ U64Str      = u64          // JSON では十進文字列。OSM / Valhalla 由来
 
 RouteKey    = { trip_id, trip_revision: U64Str, route_revision: U64Str, graph_version }
 ManeuverId  = { route_key, leg_index: u32, ordinal: u32 }
-RouteAnchor = { leg_index: u32, leg_shape_index: u32, along_route_cm: u64 }
+RouteAnchor = { leg_index: u32, leg_shape_index: u32, along_route_cm: u32 }   // u32 cm で最大約 42,900 km
 
 Evidence<T> = confirmed { value: T, source_ref, observed_at? }
             | inferred  { value: T, rule_id, source_refs[] }
@@ -82,7 +82,7 @@ ManeuverHorizon = {
   sampled_at_monotonic_ms: MonoMs,
   valid_until_monotonic_ms: MonoMs,
   status: tracking | uncertain | off_route | rerouting | finished,
-  matched_progress_cm?: u64,
+  matched_progress_cm?: u32,
   upcoming: [HorizonEntry; 0..3],
   next_p1_deadline_monotonic_ms?: MonoMs,
   next_complex_window?: { start_monotonic_ms: MonoMs, end_monotonic_ms?: MonoMs },
@@ -114,7 +114,16 @@ PassedRef   = { ref, maneuver_id: ManeuverId, passed_at_mono_ms: MonoMs, passed_
 
 ## 3. 現在地整合・再探索・版切替の原子性
 
-Android の単一 `NavigationSession` actor が、GNSS・マップマッチング・経路コミット・音声開始/停止を直列管理し、UI と音声は常に同じ `route_key`・`frame_seq` を参照します。
+Android の単一 `NavigationSession` actor が、GNSS の受け取り・経路コミット・音声開始/停止を直列管理し、UI と音声は常に同じ `route_key`・`frame_seq` を参照します。**経路上の位置合わせは Rust が `dc_tick` の中で行います**（下記 §3.1）。
+
+### 3.1 経路本体 `route_bundle` と経路上の位置合わせ（Rust）
+- **範囲**: Rust が行うのは **確定した経路の上での位置合わせだけ**。道路網全体へのマップマッチングは行わず、タイルや道路網を Rust に持ち込まない（IO を持たない原則）。経路から外れたと判定したら、Rust は現在位置を付けて `reroute` の `start` を出し、道路網を使う探索はこれまでどおり Valhalla（C++）が受け持つ。
+- **経路本体**: `dc_route_commit` で一度だけ渡す。JSON の形の正本は `schema/route-bundle.schema.json`。構造は `legs: [{ leg_index, shape, edges, maneuvers }]`。累積距離は leg ごとの値と経路全体の `along_route_cm`（u32 cm）の両方を持つ。`edges` は `edge_id`（U64Str）・区間・`length_cm`・`cum_time_ms`（u32）・`flags`。`maneuvers` は §2 の `Maneuver` を `$ref` で使い、別の型を作らない（正規化は §2.1 のとおり C++）。残り ETA は `edges.cum_time_ms` と位置合わせで求めた現在位置から計算する。
+- **座標の契約（三角関数を Rust に入れない）**: 形状は **チャンクごと**（目安 20 km、暫定）に基準点 `origin_e7` と **整数の換算係数** `cm_per_e7_lat` / `cm_per_e7_lon`（固定小数点）を持ち、点はそのチャンクの基準点からの **整数 cm** で表す。係数は経路を作る側の C++ が `cos` を使って一度だけ計算する。`TickInput.fix` の緯度経度は **e7 の整数**（Kotlin が `Location` の double を一度だけ丸める）で、Rust は基準点を引いて係数を掛けるだけで平面に直す（整数の四則演算だけなので x86 と arm64 で同じ結果）。チャンクの境目では Rust が両隣のチャンクで変換して近い方を採る（判断はすべて Rust）。固定小数点の桁数・中間値の型（i64）・丸め方向・各チャンクの有効範囲は `route-bundle.schema.json` と一緒に固定する（未決）。区間境界で累積距離が連続することをテストで確認する。
+- **位置合わせの手順**: 通常は前回の進捗の周辺の線分だけを調べる。トンネル復帰などで見失ったときは、経路の線分の空間索引から候補を引いて再捕捉する。並行道路などで候補を絞れないときは、進捗と残り ETA を **未確認** とし（`status=uncertain`）、3 手先の新規提案・P2/P3 を抑え、計画の外の探索の距離区分は `long` になる（[03 §3.1](../specs/03-routing-and-two-layer-control.md)）。
+- **外れ判定の閾値**（横方向の許容・進行方向の許容・確定に要る連続 Fix 数）は経路ごとではなく方針値として [07 §1](07-parameters-and-poc-gates.md) に置き、`dc_session_new` の設定で渡す。
+- **大きさ（根拠：合成データでの概算、sol6.2さん）**: 5,000 点・1,000 辺・100 操作で約 0.26 MB、20,000 点・5,000 辺・400 操作で約 1.20 MB。実機での転送時間・メモリは未計測。C++ 生成・JNI 転送・Rust の解析と索引構築・確定までを、採点入力の 300 ms 目安とは別に測る。長距離の結果が出るまでは JSON で進める。
+- **浮動小数点の決定論**（推測）: `cos` などの標準ライブラリ関数は実装により最後の桁がずれ得るため、Rust では使わない。実機と PC のリプレイ結果が一致するかは Gate 0 で確認する。
 
 - **操作通過条件**: 単純な円形半径や GPS 速度だけで通過判定せず、**精度・進行方向・連続性を満たす次の辺上の高信頼マッチ（例：2 サンプル連続）** で通過確定。短い後方ジッタで過去操作を復活させない。
 - **状態ごとの抑制ルール**:
