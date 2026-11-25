@@ -85,7 +85,7 @@ ManeuverHorizon = {
   matched_progress_cm?: u32,
   upcoming: [HorizonEntry; 0..3],
   next_p1_deadline_monotonic_ms?: MonoMs,
-  next_complex_window?: { start_monotonic_ms: MonoMs, end_monotonic_ms?: MonoMs },
+  next_complex_window?: { start_monotonic_ms: MonoMs, end_monotonic_ms?: MonoMs },   // 決め方は §2.2
   refs: { next?: JunctionRef, last?: PassedRef }   // frame_seq と同じ版。ref_table の正本
 }
 
@@ -111,6 +111,14 @@ PassedRef   = { ref, maneuver_id: ManeuverId, passed_at_mono_ms: MonoMs, passed_
    - **画面と音声**: 画面では **別の操作として 3 枠内の枠を消費させ（2 手目まで見える安心感を維持）**、1 つ先カード下段に `└ すぐ左 ↰` の連結バッジを添え、音声スケジューラも必要に応じて「約 200m 先を左折、そのすぐ先 80m を右折」と結合発話する。音声側は **`HorizonEntry.group_id` のみを参照** し、距離・秒数の閾値を独自に持たない（[05 §5](05-inference-tier-and-audio.md)）。終了間際は最大 3 枠、到着時は 1 枠。
 
 ---
+
+### 2.2 交差点の分類と `next_complex_window`
+- **分類は新しい列挙を作らず、`Maneuver` の根拠（`crossing` / `approach_signal` / `right_turn_protection` / 幅の `Evidence`）から Rust の関数で求める**（同じ事実を 2 か所に持たない）。分類名は `CandidateFacts.counts` に合わせる：`right_unprotected` / `right_signal_unknown_protection` / `right_signal_unknown` / `right_protected` / `right_entry` / `merge` / `narrow`。
+- 判定は使い道で 2 つに分ける：
+  - **複雑窓のきっかけ**（運転者の注意が要る場面。危険かどうかとは別）：同じ `group_id` に 2 つ以上の操作がある / 対向横断のある操作（`right_protected` と `right_entry` も含む）/ 合流 / 狭路への進入。
+  - **回避チップの対象**（§4.3）：`right_unprotected`・`right_signal_unknown_protection`・`right_signal_unknown`・`narrow`。`merge` は回避が Phase 2 なので含めない。
+- **`next_complex_window`**：`start = 最初の操作の eta_range.earliest − 準備時刻`、`end = 最後の操作の eta_range.latest + 5 s`（5 s は暫定）。準備時刻は §4.1 の「準備」強調時刻（一般道 30 s / 高速 60 s）をそのまま使い、新しい値を作らない。高速かどうかは、その操作に入る直前の edge の `flags` の高速ビットで決める。早めの見込み（`earliest`）と遅めの見込み（`latest`）で安全側に倒す。回避チップの締切（分岐の 20 s 前）とは別の値。
+- P3（歴史解説）を始めてよいかは [05 §6.2](05-inference-tier-and-audio.md) の `利用可能時間` の式だけで判定する（条件を 2 か所に書かない）。
 
 ## 3. 現在地整合・再探索・版切替の原子性
 
@@ -205,7 +213,7 @@ Android の単一 `NavigationSession` actor が、GNSS の受け取り・経路�
 
 ### 4.3 3 手先連動の「運転しやすさ回避チップ」と強制ロックなし干渉防止
 - **回避チップの発火と締め切り**:
-  1. 3 手先（または到達約 120 秒前）に `信号なし右折` / `狭路` が入ると、裏で決定論 L1/L2 によりその操作を回避する迂回経路を計算。計算予算は **1.5 秒** とし、**締切（回避分岐の 20 秒前）＋計算予算 以上手前** のときだけ計算を開始する。探索は RoutePlanner の単一優先度キュー（[03 §3.1](03-routing-and-two-layer-control.md)）に載り、優先順は 逸脱再探索 > 明示計画 > **回避チップ** > 比較探索 の **3 番目**。
+  1. 3 手先（または到達約 120 秒前）に回避チップの対象（§2.2：信号なし右折・信号や保護が確かめられない右折・狭路）が入ると、裏で決定論 L1/L2 によりその操作を回避する迂回経路を計算。計算予算は **1.5 秒** とし、**締切（回避分岐の 20 秒前）＋計算予算 以上手前** のときだけ計算を開始する。探索は RoutePlanner の単一優先度キュー（[03 §3.1](03-routing-and-two-layer-control.md)）に載り、優先順は 逸脱再探索 > 明示計画 > **回避チップ** > 比較探索 の **3 番目**。
   2. 増加時間が迂回上限（[03 §3.2](03-routing-and-two-layer-control.md) の式。走行中は `base_eta` = **残り ETA**）以内かつ **締切より手前** なら、対象カードに `[回避 +2分]` を提示し、到達約 60 秒前に 1 回だけ音声予告。
   3. 1 タップ（76 dp 以上、`user_tap{target_id: offer_id, action: avoid}`）または音声「回避」でクロスフェード切替（5 秒以内の「戻して」で取消可。L3 命令コードでは `CXL`、[03 §4.1](03-routing-and-two-layer-control.md)）。締切経過後は即座に消す。音声「回避」で確定するのは **Rust 辞書照合で一致した `dict_norm`** の場合のみで、確定入口はこれと `user_tap` の 2 つだけ（SLM の出力では確定しない。[ADR-0007](../adr/0007-l3-one-line-command-and-confirm-separation.md)）。
   4. 出発前比較でユーザーが承知して選んだ箇所への回避提案は出さず（バッジのみ表示）、音声予告は **1 走行最大 5 回** に制限。
