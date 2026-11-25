@@ -78,6 +78,7 @@ L3 の出力は **L2 本表（`profile_weights` / `avoidance_nodes_edges`）へ�
 | Rust → Kotlin | `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version}` | 探索開始。`priority` は上表の JSON 名、`distance_class` は下記 |
 | Rust → Kotlin | `planner_cmds: cancel{req_id}` | 実行中探索の取消要求 |
 | Rust → Kotlin | `planner_cmds: commit{req_id, route_key, undo_req_id?}` | 逸脱再探索の結果を確定する指示。Kotlin が `dc_route_commit` を呼ぶ（回避チップは **同意の前には出さない**。同意後に出す） |
+| Rust → Kotlin | `planner_cmds: cancel_commit{req_id}` | 出した `commit` の取り消し（経路が入る前に「戻して」が来たとき）。Kotlin は経路本体を捨て、`dc_route_commit` を呼ばない。探索の取り消し `cancel{req_id}` とは別 |
 | Rust → Kotlin | `planner_cmds: evaluate_offer{req_id, facts_ref, base_facts_ref}` | 回避チップの探索が `ok` で戻ったときの評価指示。Kotlin が `dc_avoid_offer_eval` を呼ぶ `base_facts_ref` は、回避チップの探索の `search_finished` に任意で付けて返す（Kotlin が代わりの経路と同時に作る） |
 | Rust → Kotlin | `planner_cmds: rank{plan_request_id, facts_refs: [string], reason: all_done\|budget_expired}` | 計画の採点指示。Kotlin が `dc_rank` を呼んで比較結果を表示する |
 | Kotlin → Rust | `search_finished{req_id, route_key, graph_version, outcome: ok\|cancelled\|error, facts_ref?, engine_ms}` | **唯一の終端イベント。1 探索につき必ず 1 回**。旧 `reroute_result` / `search_cancelled` は廃止 |
@@ -112,7 +113,7 @@ engine_stuck ──search_finished{req_id}──▶ Idle
     - 戻すときは、保留中の再探索結果を捨て、位置合わせを新しい経路でやり直す。
     - 戻すときに使う ID は、同意して出す `commit` の `undo_req_id`（`"undo-<req_id>"`）で Kotlin に知らせる。`CXL` で戻すと決めたときの `dc_validate_override` の結果は `Undone { req_id }`。
     - 5 秒を過ぎた `undo` / `CXL` は `NO_PENDING_TARGET`。`tracking` でないときは `NO_EFFECT`。戻せなかったときは `speak{template_id: undo_unavailable, priority: p2}`。
-    - **同意して `commit` を出したが、回避した経路がまだ入っていない（`dc_route_commit` 前）ときの `undo`**（案）：`NO_EFFECT` にせず、出した `commit` を取り消す。Rust はその `req_id` を待つのをやめ、遅れて届いた `dc_route_commit` は `E_STALE` で断る。経路は変わらないので「戻せた」と同じ扱い。
+    - **同意して `commit` を出したが、回避した経路がまだ入っていない（`dc_route_commit` 前）ときの `undo`**：`NO_EFFECT` にせず、出した `commit` を取り消す。Rust は `planner_cmds: cancel_commit{req_id}` を出してその `req_id` を待つのをやめ、Kotlin は保持していた回避した経路の本体を捨てて `dc_route_commit` を呼ばない。それでも同じ `req_id` で呼ばれたら `E_STALE` で断る。経路は変わらないので「戻せた」と同じ扱い。呼び出しは actor 1 本が順に行うので、`dc_route_commit` と `undo` のどちらが先かは必ず 1 つに決まる（先なら通常の「戻して」、後なら取り消し。Gate 7 で両方の順番を確認）。
     - 戻した経路と回避した経路が分かれる地点（分岐）をすでに過ぎていたら戻さない（`NO_EFFECT`）。回避チップは分岐の 20 秒前（早い見込み）までにしか同意できないので、5 秒以内なら通常は分岐の手前にいるが、ETA の見込み外れに備えて Rust が位置で確かめる。分岐点は **回避した経路を入れる `dc_route_commit` のときに 1 回だけ** 求めて持っておく（「戻して」のときに計算し直さない。その時点なら Rust は今の経路と新しい経路の本体を両方持っており、`dc_avoid_offer_eval` の入力（`CandidateFacts`）に edge 列を足さずに済む。「戻して」は commit の後にしか起きないので、提案を作るときに求めても結果は同じ）。探索開始時の位置は `AvoidOffer` に記録しておく。求め方：
       1. 回避した経路の最初の edge（探索開始時の位置で、途中から始まる）を、元の経路の edge 列のうち **探索開始時の位置より先** の部分から探す（「今の位置」ではない。探索中も車は進んでいるため）。
       2. 見つかった場所から、2 本の列を向き付き edge ID で前に向かって比べ、最初に違うところを分岐点とし、**回避した後の経路の** `along_route_cm` で持つ。
