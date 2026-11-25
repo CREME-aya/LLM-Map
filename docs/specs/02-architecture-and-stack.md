@@ -76,7 +76,7 @@ Round 5〜6 の 3 者協議により、「1 人＋AI コーディングでの完
 | 8 | `dc_trip_score` | ルート確定時に旅判定スコアを計算する（旅モード C01 を提示するかの判定。到着後の評価ではない。[05 §6.1](05-inference-tier-and-audio.md)） |
 | 9 | `dc_route_commit(s, {expected_route_key: RouteKey \| null, bundle})` | 確定経路（`route_bundle`、[04 §3.1](04-maneuver-horizon-and-hmi.md)）を読み込む。`expected_route_key` は今の経路の版で、一致しなければ `E_STALE`。`null` を許すのは今の経路がまだないとき（最初の経路）だけで、経路があるのに `null` なら `E_STALE`。`bundle.route_key.route_revision` は Kotlin が `"0"`（未確定）で渡し、それ以外なら `E_SCHEMA`。**版は Rust が付ける**（今の版 + 1、最初の経路は 1）。`bundle` 内で `route_key` を持つ場所（`ManeuverId` を含む）はすべて新しい版にそろえ、付けた `route_key` を結果として返す。`trip_id`・`trip_revision`・`graph_version` が今の経路と一致しなければ `E_STALE`（走行中は旧版にピン留めするため、旅の途中でグラフの版は変わらない。[06 §3](06-japan-data-packs-and-web.md)）。戻り値は付けた `route_key` と、読み込んだ legs・segments・maneuvers の件数。**旅の途中の再計画（経由地や目的地の変更で `trip_revision` が変わる場合）にこの入口からどう経路を入れるかは未決** |
 | 10 | `dc_tick` | 時刻とイベントから Horizon・音声・画面・探索指示を出す唯一のイベント入口（[ADR-0008](../adr/0008-dc-tick-single-event-entry.md)） |
-| 11 | `dc_avoid_offer_eval` | 走行中の回避チップ判定（`dc_rank` と同じ迂回上限関数を使用） |
+| 11 | `dc_avoid_offer_eval(s, {req_id, facts})` | 走行中の回避チップ判定（`dc_rank` と同じ迂回上限関数を使用）。迂回上限に収まれば `AvoidOffer` を作って Horizon に載せる。`offer_id` = `avoid-<req_id>`、`alt_route_id` = `req_id`、音声の `template_id` = `avoid_chip`（暫定）。**呼ぶきっかけは `planner_cmds: evaluate_offer{req_id, facts_ref}`**（案。`rank` と同じく、Rust が `CandidateFacts` を持たないため Kotlin に呼ばせる） |
 | 12 | `dc_exchange_validate` | `exchange-v1` 受信データの検証（[06 §4.2](06-japan-data-packs-and-web.md)） |
 
 *(用途の正本は C ヘッダ `dc_core.h` のコメント。本表はその要約です。)*

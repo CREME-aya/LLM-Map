@@ -78,6 +78,7 @@ L3 の出力は **L2 本表（`profile_weights` / `avoidance_nodes_edges`）へ�
 | Rust → Kotlin | `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version}` | 探索開始。`priority` は上表の JSON 名、`distance_class` は下記 |
 | Rust → Kotlin | `planner_cmds: cancel{req_id}` | 実行中探索の取消要求 |
 | Rust → Kotlin | `planner_cmds: commit{req_id, route_key}` | 逸脱再探索の結果を確定する指示。Kotlin が `dc_route_commit` を呼ぶ（回避チップは **同意の前には出さない**。同意後に出す） |
+| Rust → Kotlin | `planner_cmds: evaluate_offer{req_id, facts_ref}` | 回避チップの探索が `ok` で戻ったときの評価指示。Kotlin が `dc_avoid_offer_eval` を呼ぶ（案） |
 | Rust → Kotlin | `planner_cmds: rank{plan_request_id, facts_refs: [string], reason: all_done\|budget_expired}` | 計画の採点指示。Kotlin が `dc_rank` を呼んで比較結果を表示する |
 | Kotlin → Rust | `search_finished{req_id, route_key, graph_version, outcome: ok\|cancelled\|error, facts_ref?, engine_ms}` | **唯一の終端イベント。1 探索につき必ず 1 回**。旧 `reroute_result` / `search_cancelled` は廃止 |
 
