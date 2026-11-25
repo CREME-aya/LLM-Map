@@ -21,7 +21,8 @@
 | **個人プロファイル** | `jp=last` の対象範囲 | 通過後 180 秒以内 かつ 1.5 km 以内の直近難所 | 経路は変えず `profile_proposals` へ。該当なしはエラーにせず提案を作らない（[03 §4.1](03-routing-and-two-layer-control.md)） |
 | **速度・モード切替** | 走行中ソフトモード突入 / 解除 | 突入: `>= 8 km/h` を 3〜5 秒連続<br>解除: `<= 3 km/h` を 10〜30 秒連続（信号待ち除外） | [01-product-and-ux](01-product-and-ux.md), [04-maneuver-horizon](04-maneuver-horizon-and-hmi.md) |
 | **位置・鮮度** | 測位鮮度上限 | 2.5 秒 | 超過時は `uncertain` |
-| **位置・鮮度** | 経路から外れたと判定する閾値（横方向の許容 / 進行方向の許容 / 確定に要る連続 Fix 数） | `lateral_tol_cm` 3000（30 m） / `heading_tol_deg` 60（速度 1.4 m/s 未満では方位を使わない） / `confirm_fixes` 3 | 暫定（根拠なし、推測）。30 m が並行道路の間隔と両立するかは sol6.2さん確認中。Gate 0・7 で校正。 方針値として `dc_session_new` の設定で渡す。経路ごとには持たない（[04 §3.1](04-maneuver-horizon-and-hmi.md)） |
+| **位置・鮮度** | 経路から外れたと判定する閾値（横方向の許容 / 進行方向の許容 / 確定に要る連続 Fix 数） | `lateral_tol_cm` 3000（30 m） / `heading_tol_deg` 60（速度 1.4 m/s 未満では方位を使わない） / `confirm_fixes` 3 | 暫定（根拠なし、推測）。経路の上だけで位置合わせをするため、**近くを並行する道路（側道など、間隔が許容幅より狭い道）では逸脱の検出が遅れることがある**（仕様上の制約。分岐後に離れていけば `confirm_fixes` で検出する）。Gate 0・7 で校正。 方針値として `dc_session_new` の設定で渡す。経路ごとには持たない（[04 §3.1](04-maneuver-horizon-and-hmi.md)） |
+| **位置・鮮度** | 位置合わせに使う測位精度の上限 `max_acc_cm` | 3000（30 m、`lateral_tol_cm` と同じ） | 暫定。`acc_cm`（68% 信頼水準の推定値）がこれより大きい Fix は逸脱の連続カウントに数えない（増やしも戻しもしない）。そういう Fix が `confirm_fixes` 回続いたら `status=uncertain`。`SessionConfig` で渡す（[04 §3.1](04-maneuver-horizon-and-hmi.md)） |
 | **位置・鮮度** | 経路形状のチャンク長（基準点ごとの区間） | 目安 20 km | 暫定。チャンクごとに `origin_e7` と整数の換算係数を持つ（[04 §3.1](04-maneuver-horizon-and-hmi.md)）。縮尺誤差が外れ判定に影響しないかは Gate 0 の長距離リプレイで確認 |
 | **3 手先 HMI** | 連続分岐グルーピング閾値 | 都市 `120 m` / 高速 `200 m` / 最早 ETA 差 `12 秒`（先頭 2 操作） | 音声は `HorizonEntry.group_id` のみ参照（[04 §2.1](04-maneuver-horizon-and-hmi.md)） |
 | **3 手先 HMI** | 強調タイミング（準備 / まもなく） | 一般道: 30 秒前 / 8 秒前<br>高速道路: 60 秒前 / 20 秒前 | 距離丸め・UI 更新 1 Hz 上限 |
@@ -120,6 +121,13 @@ t3 の「原子コミット」は Rust の commit{r2, route_key} → Kotlin の 
 `commit` の版ずれ：`commit{r2, route_key}` を出した後、`dc_route_commit` を呼ぶ前に経路が差し替わる → `dc_route_commit` は `E_STALE`、遅れた経路由来の `horizon` 更新・発話 **0**
 
 経路上の位置合わせ（[04 §3.1](04-maneuver-horizon-and-hmi.md)）の最初の確認ケース：長距離のチャンク境界（累積距離の連続）・並行道路（絞れないときは `uncertain`）・トンネル復帰（再捕捉）。通常走行と再捕捉を分けて、照合した線分数と `dc_tick` の p95・最大時間を記録する。
+
+逸脱検出と並行道路のケース：
+1. 本線から 20 m 離れて同じ向きに続く側道 → すぐには検出できないことを仕様どおりの動きとして記録する
+2. 横のずれがちょうど 30 m（`lateral_tol_cm`）の境界値
+3. 分岐した後 40 m まで離れていく側道 → 検出までにかかった Fix の回数を記録する
+4. 本線の上で測位だけがぶれる（`acc_cm` が `max_acc_cm` を超える Fix を含む）→ 誤検出 **0**
+5. 方位 359.996°（Kotlin の丸めで 0）と、範囲外の 36000（`E_SCHEMA` で拒否）
 
 ### 2.5 Gate 4 / 7 共通: 提案差し替え系テスト（`pending_offer`）
 
