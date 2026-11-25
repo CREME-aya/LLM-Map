@@ -114,6 +114,9 @@ PassedRef   = { ref, maneuver_id: ManeuverId, passed_at_mono_ms: MonoMs, passed_
 
 ### 2.2 交差点の分類と `next_complex_window`
 - **分類は新しい列挙を作らず、`Maneuver` の根拠（`crossing` / `approach_signal` / `right_turn_protection` / 幅の `Evidence`）から Rust の関数で求める**（同じ事実を 2 か所に持たない）。分類名は `CandidateFacts.counts` に合わせる：`right_unprotected` / `right_signal_unknown_protection` / `right_signal_unknown` / `right_protected` / `right_entry` / `merge` / `narrow`。
+- **使う入力**: 根拠のフィールドに加えて `arrow` も使う（合流と目的地への進入は根拠だけでは判定できないため。`arrow` も C++ が正規化した `Maneuver` の一部なので、正本は 1 つのまま）。`right_entry` は「目的地に着く操作のうち対向横断のあるもの」。対向横断が分からない右の矢印は「横切る」と扱う。
+- **確定（`confirmed`）と推定（`inferred`）の使い方は非対称**：推定は **危険な側に倒すときだけ** 使い、安全な側の推定は `unknown` と同じに扱う。例：推定で「対向横断あり」なら横切る扱い、推定で「横断なし」は分からない扱い（＝横切る）。信号と保護は確定だけを使い、推定は「確かめられない」側に倒す（[03 §3.2](../specs/03-routing-and-two-layer-control.md) の「無タグ信号は保護不明、信号＋右折レーンだけで保護を断定しない」と同じ考え方）。幅は推定で 4.0 m 未満なら狭路とし、推定で 4.0 m 以上は分からない扱い（`lanes` から幅の数値を作らない、は 03 §3.2 のまま）。
+- **狭路の判定に使う幅**: 操作のあとに進む道の幅（`departure_width_mm`）だけを使う（狭い道に入るときが注意の要る場面のため）。幅が分からない場合をどう扱うか（生活道路なら狭路寄りにするか）は未決。`edges.flags` に道路種別が無いため、今は狭路としない。
 - 判定は使い道で 2 つに分ける：
   - **複雑窓のきっかけ**（運転者の注意が要る場面。危険かどうかとは別）：同じ `group_id` に 2 つ以上の操作がある / 対向横断のある操作（`right_protected` と `right_entry` も含む）/ 合流 / 狭路への進入。
   - **回避チップの対象**（§4.3）：`right_unprotected`・`right_signal_unknown_protection`・`right_signal_unknown`・`narrow`。`merge` は回避が Phase 2 なので含めない。
