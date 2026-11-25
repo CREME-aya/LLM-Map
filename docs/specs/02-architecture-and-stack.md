@@ -74,7 +74,7 @@ Round 5〜6 の 3 者協議により、「1 人＋AI コーディングでの完
 | 6 | `dc_rank` | 候補の事実を L1/L2 で採点し、迂回上限で絞って比較表を作る（迂回上限は `dc_avoid_offer_eval` と同じ関数。[03 §3.2](03-routing-and-two-layer-control.md)） |
 | 7 | `dc_validate_override` | 1 行命令コードを解析・検証・展開し `Applied` / `Rejected` を返す（下記・[03 §4.1・§4.2](03-routing-and-two-layer-control.md)） |
 | 8 | `dc_trip_score` | ルート確定時に旅判定スコアを計算する（旅モード C01 を提示するかの判定。到着後の評価ではない。[05 §6.1](05-inference-tier-and-audio.md)） |
-| 9 | `dc_route_commit(s, {expected_route_key: RouteKey \| null, bundle})` | 確定経路（`route_bundle`、[04 §3.1](04-maneuver-horizon-and-hmi.md)）を読み込む。`expected_route_key` は今の経路の版で、一致しなければ `E_STALE`。`null` を許すのは今の経路がまだないとき（最初の経路）だけで、経路があるのに `null` なら `E_STALE` |
+| 9 | `dc_route_commit(s, {expected_route_key: RouteKey \| null, bundle})` | 確定経路（`route_bundle`、[04 §3.1](04-maneuver-horizon-and-hmi.md)）を読み込む。`expected_route_key` は今の経路の版で、一致しなければ `E_STALE`。`null` を許すのは今の経路がまだないとき（最初の経路）だけで、経路があるのに `null` なら `E_STALE`。`bundle.route_key.route_revision` は Kotlin が `"0"`（未確定）で渡し、それ以外なら `E_SCHEMA`。**版は Rust が付ける**（今の版 + 1、最初の経路は 1）。`bundle` 内で `route_key` を持つ場所（`ManeuverId` を含む）はすべて新しい版にそろえ、付けた `route_key` を結果として返す。`trip_revision` と `graph_version` が今の経路と一致しなければ `E_STALE`（走行中は旧版にピン留めするため、旅の途中でグラフの版は変わらない。[06 §3](06-japan-data-packs-and-web.md)） |
 | 10 | `dc_tick` | 時刻とイベントから Horizon・音声・画面・探索指示を出す唯一のイベント入口（[ADR-0008](../adr/0008-dc-tick-single-event-entry.md)） |
 | 11 | `dc_avoid_offer_eval` | 走行中の回避チップ判定（`dc_rank` と同じ迂回上限関数を使用） |
 | 12 | `dc_exchange_validate` | `exchange-v1` 受信データの検証（[06 §4.2](06-japan-data-packs-and-web.md)） |
