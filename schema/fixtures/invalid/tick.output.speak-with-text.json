@@ -1,0 +1,1 @@
+{"voice_cmds": [{"voice": "speak", "token": "t", "priority": "p1", "template_id": "x", "params": {}, "text": "右折です"}], "ui_cmds": [], "planner_cmds": [], "next_wake_mono_ms": null, "log": []}

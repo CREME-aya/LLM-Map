@@ -35,17 +35,61 @@ pub struct Fix {
 }
 
 /// `Event = { at_mono_ms } & (kind-specific fields)`.
-/// NOTE: `#[serde(flatten)]` prevents `deny_unknown_fields` on the outer struct;
-/// variants still reject unknown `kind` values. TODO(abi-v1): decide strictness.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+///
+/// Unknown fields are rejected like `additionalProperties: false` in tick.schema.json.
+/// serde cannot combine `#[serde(flatten)]` with `deny_unknown_fields`, so `Deserialize`
+/// is hand-written: it reads the object once (duplicate keys rejected), takes
+/// `at_mono_ms`, and hands the rest to `EventBody`, whose variants each reject unknown
+/// fields (`deny_unknown_fields` on the internally tagged enum; field-less kinds are
+/// `{}` struct variants because unit variants would silently ignore extra fields).
+/// `Serialize` still uses `flatten` (only deserialization has the restriction).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Event {
     pub at_mono_ms: MonoMs,
     #[serde(flatten)]
     pub body: EventBody,
 }
 
+impl<'de> Deserialize<'de> for Event {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let mut obj = d.deserialize_map(StrictObject)?;
+        let at = obj
+            .remove("at_mono_ms")
+            .ok_or_else(|| D::Error::missing_field("at_mono_ms"))?;
+        let at_mono_ms = MonoMs::deserialize(at).map_err(D::Error::custom)?;
+        let body =
+            EventBody::deserialize(serde_json::Value::Object(obj)).map_err(D::Error::custom)?;
+        Ok(Event { at_mono_ms, body })
+    }
+}
+
+/// JSON object reader that rejects duplicate keys (derived structs do the same; a plain
+/// `serde_json::Map` would keep the last value silently).
+struct StrictObject;
+
+impl<'de> serde::de::Visitor<'de> for StrictObject {
+    type Value = serde_json::Map<String, serde_json::Value>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an event object")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<Self::Value, A::Error> {
+        let mut out = serde_json::Map::new();
+        while let Some(k) = m.next_key::<String>()? {
+            if out.contains_key(&k) {
+                return Err(serde::de::Error::custom(format!("duplicate field `{k}`")));
+            }
+            let v: serde_json::Value = m.next_value()?;
+            out.insert(k, v);
+        }
+        Ok(out)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EventBody {
     // TODO(abi-v1): token / utterance_id / tier / reason value types are not specified (strings/u8 provisional).
     TtsStarted {
@@ -88,14 +132,14 @@ pub enum EventBody {
     Thermal {
         status: ThermalStatus,
     },
-    LowMemory,
+    LowMemory {},
     InferenceDown {
         reason: String,
     },
     InferenceUp {
         tier: u8,
     },
-    AudioFocusLost,
+    AudioFocusLost {},
     CallState {
         active: bool,
     },
@@ -105,14 +149,17 @@ pub enum EventBody {
         route_key: RouteKey,
         graph_version: String,
         outcome: SearchOutcome,
+        /// Reference to the CandidateFacts JSON C++ produced once for this search (Kotlin
+        /// keeps the bytes; Rust only collects the refs and hands them back in `rank`).
+        /// Renamed from `comparison_ref` (team decision 2026-11-25; docs still say comparison_ref).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        comparison_ref: Option<String>,
+        facts_ref: Option<String>,
         /// Wall time of the Valhalla call (measurement only, never used for decisions).
         engine_ms: u64,
     },
     /// Kotlin re-created the Valhalla actor. Does NOT by itself resume searching
     /// (03 §3.1: the slot is freed only by the real `search_finished`).
-    EngineReset,
+    EngineReset {},
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -160,12 +207,13 @@ pub enum SearchOutcome {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TickOutput {
     /// Only present when frame_seq changed. TODO(abi-v1): typed ManeuverHorizon (schema/maneuver-horizon.schema.json).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub horizon: Option<serde_json::Value>,
-    /// TODO(abi-v1): VoiceCmd shape not specified.
-    pub voice_cmds: Vec<serde_json::Value>,
+    /// Instructions to Kotlin's single TTS queue (05 §5). Nothing emits them yet.
+    pub voice_cmds: Vec<VoiceCmd>,
     pub ui_cmds: Vec<UiCmd>,
     pub planner_cmds: Vec<PlannerCmd>,
     /// Earliest mono time at which the output may change without new input, including the
@@ -177,20 +225,51 @@ pub struct TickOutput {
     pub log: Vec<LogEvent>,
 }
 
-/// `planner_cmds: start{req_id, priority, route_key, graph_version} | cancel{req_id}` (03 §3.1).
+/// `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version,
+/// candidate_id?} | cancel{req_id} | rank{plan_request_id, facts_refs, reason}` (03 §3.1;
+/// `rank` and `candidate_id` are team decisions 2026-11-25, not in docs yet).
+/// `distance_class` is required: the class the Planner fixed for the plan before searching
+/// (searches outside any plan take the latest plan's class, or `long` if there was none).
 /// TODO(abi-v1): tag field name `cmd` is provisional.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "cmd", rename_all = "snake_case")]
+#[serde(tag = "cmd", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlannerCmd {
     Start {
         req_id: String,
         priority: SearchPriority,
+        distance_class: DistanceClass,
         route_key: RouteKey,
         graph_version: String,
+        /// Which `CandidateRequest` of the current plan to run (`Session::plan_candidates`
+        /// output). Absent for searches outside a plan (reroute / avoid chip).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<String>,
     },
     Cancel {
         req_id: String,
     },
+    /// Rank the plan's completed candidates now: Kotlin calls `dc_rank` with the
+    /// CandidateFacts behind `facts_refs` (the `facts_ref` of every search of this plan that
+    /// returned `ok`, in request order; may be empty). After `rank` the plan is over: no
+    /// more `start` for it, and its late `search_finished` only frees the slot
+    /// (`discarded_late`). Emitted even when `facts_refs` is empty.
+    /// Team decision 2026-11-25 (not in docs yet).
+    Rank {
+        plan_request_id: String,
+        facts_refs: Vec<String>,
+        reason: RankReason,
+    },
+}
+
+/// Why `rank` was emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RankReason {
+    /// Every candidate search of the plan has returned.
+    AllDone,
+    /// The comparison budget (03 §3.1 item 3: short 3 s / long 8 s from the plan start)
+    /// passed first: remaining queued candidates are dropped, a running one is cancelled.
+    BudgetExpired,
 }
 
 /// Single priority queue order (03 §3.1 table; team decision 2026-11-24 for the JSON names).
@@ -231,21 +310,93 @@ impl DistanceClass {
     }
 }
 
-/// TODO(abi-v1): UiCmd catalogue not specified; only what the planner needs today.
+/// Minimal UI catalogue: only what docs v1.2 names. Drawing state that already lives in
+/// `ManeuverHorizon` (3-ahead cards, `HorizonEntry.avoid_offer` chip) is NOT repeated here:
+/// the horizon is the single source (04 §1, ADR-0005), returned as `TickOutput.horizon`.
+/// TODO(abi-v1): tag field name `ui` is provisional; see core-rust/README.md for the items
+/// docs do not define yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "ui", rename_all = "snake_case")]
+#[serde(tag = "ui", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiCmd {
-    /// "経路を確認中" (Gate 7 t1, engine_stuck).
-    ShowCheckingRoute,
+    /// "経路を確認中" (03 §3.1 engine_stuck, 04 §3 off_route / rerouting, Gate 7 t1).
+    /// `{}` variant: a unit variant would silently accept unknown fields.
+    ShowCheckingRoute {},
     /// Adopted search result; Kotlin performs the atomic commit via dc_route_commit.
     SearchResultReady {
         req_id: String,
-        comparison_ref: Option<String>,
+        facts_ref: Option<String>,
     },
+    /// Present a validated override on the confirm screen Kotlin opened (05 §3.2: only
+    /// while `route_key` matches and that screen is still valid; ADR-0007: confirmation
+    /// itself only comes from dict `yes` or `user_tap`). `expires_at_mono_ms` is the
+    /// `Applied.expires_at_mono_ms` of dc_validate_override (03 §4.2 item 4: ≤ 30 s).
+    ShowConfirm {
+        confirm_screen_id: String,
+        override_id: String,
+        expires_at_mono_ms: MonoMs,
+    },
+    /// Remove a shown offer / confirmation at once. `target_id` uses the `user_tap`
+    /// namespace: `AvoidOffer.offer_id` | `override_id` | `confirm_screen_id` (ADR-0008).
+    Dismiss {
+        target_id: String,
+        reason: DismissReason,
+    },
+}
+
+/// Why a shown item is removed; only the cases docs v1.2 name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DismissReason {
+    /// Deadline / expiry passed (04 §4.3 item 3 "締切経過後は即座に消す", 05 §3.2 期限切れ).
+    Expired,
+    /// Cancelled (05 §3.2 取消, 03 §4.1 `CXL`).
+    Cancelled,
+    /// The route changed meanwhile (05 §3.2 経路更新後, Gate 4/7 "承認直前に逸脱").
+    RouteChanged,
+    /// Replaced by a newer proposal; consent never carries over (ADR-0007 decision 7).
+    Superseded,
+}
+
+/// Voice command for Kotlin's single TTS queue (05 §5). The text is never in the command:
+/// Kotlin renders `template_id` + numeric `params` with its templates, the same wording as
+/// the screen (04 §2 `AvoidOffer.summary`, ADR-0007 decision 8). No raw text crosses the
+/// boundary (and so none reaches the log, ADR-0008 decision 7).
+/// TODO(abi-v1): tag field name `voice` is provisional.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "voice", rename_all = "snake_case", deny_unknown_fields)]
+pub enum VoiceCmd {
+    /// Start an utterance. Kotlin reports `tts_started` / `tts_done` / `tts_stopped` with
+    /// the same `token`; callbacks of older generations are ignored (05 §5).
+    Speak {
+        token: String,
+        priority: VoicePriority,
+        template_id: String,
+        /// Numbers only (ids are in `token` / `template_id`). Sorted keys: deterministic.
+        params: std::collections::BTreeMap<String, i64>,
+    },
+    /// Silence the utterance now (P3 on P0/P1 / call / off-route / stop operation, 05 §5).
+    /// Kotlin must not wait for `onStop` before the next P1 (05 §5 TTS safety rule).
+    Stop { token: String },
+}
+
+/// `P0 > P1 > P2 > P3` (05 §5). `Ord` follows it (higher wins); variant order below is
+/// therefore lowest → highest. JSON names are snake_case `p0`..`p3`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoicePriority {
+    /// 長距離同意済みの歴史・地名解説.
+    P3,
+    /// 許可済み音声コマンド応答・回避提案予告.
+    P2,
+    /// 右左折・分岐・再探索案内 (ManeuverHorizon 連動).
+    P1,
+    /// 案内継続に必要な緊急状態・危険注意.
+    P0,
 }
 
 /// Structured, privacy-safe log (no raw utterance text).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogEvent {
     pub at_mono_ms: MonoMs,
     pub what: String,

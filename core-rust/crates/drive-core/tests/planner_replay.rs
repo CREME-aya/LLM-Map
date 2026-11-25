@@ -51,6 +51,27 @@ fn run(name: &str) -> (Session, Vec<TickOutput>, usize) {
             .filter(|c| matches!(c, PlannerCmd::Start { .. }))
             .count();
         max_running = max_running.max(running);
+        // Every start carries the class the planner fixed (fixture `expect_starts`).
+        let got: Vec<Value> = out
+            .planner_cmds
+            .iter()
+            .filter_map(|c| match c {
+                PlannerCmd::Start {
+                    req_id,
+                    priority,
+                    distance_class,
+                    ..
+                } => Some(serde_json::json!({
+                    "req_id": req_id, "priority": priority, "distance_class": distance_class
+                })),
+                PlannerCmd::Cancel { .. } | PlannerCmd::Rank { .. } => None,
+            })
+            .collect();
+        let want = step["expect_starts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(got, want, "{name}: step {step}");
         outs.push(out);
     }
     (s, outs, max_running)
@@ -75,7 +96,7 @@ fn cancel_then_reroute() {
             req_id: "r1".into()
         }]
     );
-    assert_eq!(o[1].ui_cmds, vec![UiCmd::ShowCheckingRoute]);
+    assert_eq!(o[1].ui_cmds, vec![UiCmd::ShowCheckingRoute {}]);
     // t2: r1 ok after cancel → discarded, slot freed → start r2
     assert!(whats(&o[2]).contains(&"discarded_late"));
     assert!(
@@ -93,7 +114,7 @@ fn cancel_then_reroute() {
         o[3].ui_cmds,
         vec![UiCmd::SearchResultReady {
             req_id: "r2".into(),
-            comparison_ref: Some("cmp-r2".into())
+            facts_ref: Some("facts-r2".into())
         }]
     );
     assert_eq!(*s.planner().slot(), Slot::Idle);
@@ -108,7 +129,7 @@ fn timeout_engine_stuck_keeps_slot_until_native_returns() {
     assert_eq!(o[1].next_wake_mono_ms, Some(11_000));
     // Rust detects the deadline from now_mono_ms (no timeout event from Kotlin)
     assert!(whats(&o[2]).contains(&"engine_stuck"));
-    assert_eq!(o[2].ui_cmds, vec![UiCmd::ShowCheckingRoute]);
+    assert_eq!(o[2].ui_cmds, vec![UiCmd::ShowCheckingRoute {}]);
     assert!(o[2].planner_cmds.is_empty());
     assert_eq!(
         o[2].next_wake_mono_ms, None,
@@ -136,7 +157,7 @@ fn timeout_engine_stuck_keeps_slot_until_native_returns() {
         o[5].ui_cmds,
         vec![UiCmd::SearchResultReady {
             req_id: "r2".into(),
-            comparison_ref: Some("cmp-r2".into())
+            facts_ref: Some("facts-r2".into())
         }]
     );
     assert_eq!(*s.planner().slot(), Slot::Idle);
@@ -416,5 +437,5 @@ fn priority_order_reroute_explicit_plan_avoid_chip_comparison() {
             req_id: "r1".into()
         }]
     );
-    assert_eq!(o.ui_cmds, vec![UiCmd::ShowCheckingRoute]);
+    assert_eq!(o.ui_cmds, vec![UiCmd::ShowCheckingRoute {}]);
 }

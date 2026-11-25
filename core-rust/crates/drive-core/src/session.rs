@@ -1,8 +1,9 @@
 //! `dc_session` state. Single-threaded: called only from the NavigationSession actor.
 
 use crate::command_line::{self, Command, JpRef};
-use crate::planner::{Effects, SearchLimits, SearchPlanner};
+use crate::planner::{Effects, PlanSearch, SearchLimits, SearchPlanner};
 use contracts::override_types::{RejectCode, ValidateOverrideRequest, ValidateOverrideResult};
+use contracts::plan::{PlanCandidates, TripPlanSnapshot};
 use contracts::tick::{
     DistanceClass, EventBody, LogEvent, SearchPriority, ThermalStatus, TickInput, TickOutput,
 };
@@ -122,9 +123,60 @@ impl Session {
         self.current_route_key = Some(key);
     }
 
-    /// Planner hook: fix the distance class of a plan_request before its candidate
-    /// searches are requested (team decision 2026-11-24). Same id → class kept.
-    /// TODO(drive-core): driven by dc_plan_candidates / TripPlanSnapshot once implemented.
+    /// `dc_plan_candidates` body (team decision 2026-11-25): fixes the plan's distance
+    /// class (`begin_plan`), builds the ordered `CandidateRequest[]`, queues their searches
+    /// and returns the first `start` (one search at a time; the rest start from `dc_tick`
+    /// as each `search_finished` arrives). The plan ends with one `rank` in `planner_cmds`.
+    /// Candidate searches use `route_key {trip_id, trip_revision, route_revision: 0,
+    /// graph_version}` from the snapshot.
+    /// TODO(abi-v1): dc_plan_candidates(dc_in) takes no session today; the ABI change to
+    /// pass the session (decided, separate work before Gate 0) will just call this.
+    /// TODO(abi-v1): route_revision 0 for a plan without a committed route is provisional;
+    /// `budget.deadline_ms` is not used (its relation to the comparison budget is unspecified).
+    pub fn plan_candidates(
+        &mut self,
+        now_mono_ms: u64,
+        eta_estimate_s: Option<u64>,
+        snapshot: &TripPlanSnapshot,
+    ) -> PlanCandidates {
+        let mut fx = Effects::default();
+        let mut extra_log = Vec::new();
+        let now = self.clamp_now(now_mono_ms, &mut extra_log);
+        let candidates = crate::candidates::candidate_requests(snapshot);
+        let route_key = RouteKey {
+            trip_id: snapshot.trip_id.clone(),
+            trip_revision: snapshot.trip_revision,
+            route_revision: contracts::U64Str(0),
+            graph_version: snapshot.graph_version.clone(),
+        };
+        let searches = candidates
+            .iter()
+            .map(|c| PlanSearch {
+                candidate_id: c.candidate_id.clone(),
+                priority: c.priority,
+            })
+            .collect();
+        let distance_class = self.planner.begin_plan_with(
+            now,
+            &snapshot.plan_request_id,
+            eta_estimate_s,
+            Some(route_key),
+            searches,
+            &mut fx,
+        );
+        let out = self.finish(fx, extra_log);
+        PlanCandidates {
+            plan_request_id: snapshot.plan_request_id.clone(),
+            distance_class,
+            candidates,
+            planner_cmds: out.planner_cmds,
+            next_wake_mono_ms: out.next_wake_mono_ms,
+            log: out.log,
+        }
+    }
+
+    /// Planner hook: fix the distance class of a plan_request without queueing candidate
+    /// searches (replay tests drive the searches themselves). Same id → class kept.
     pub fn begin_plan(
         &mut self,
         now_mono_ms: u64,
@@ -163,19 +215,7 @@ impl Session {
 
         // Time never goes backwards inside the core: clamp to the previous value and
         // record clock_regression (02 §2.1 / team decision 2026-11-24).
-        let raw_now = input.now_mono_ms;
-        let now = match self.last_now_mono_ms {
-            Some(prev) if raw_now < prev => {
-                extra_log.push(log_at(
-                    prev,
-                    "clock_regression",
-                    Some(format!("now_mono_ms {raw_now}<{prev}")),
-                ));
-                prev
-            }
-            _ => raw_now,
-        };
-        self.last_now_mono_ms = Some(now);
+        let now = self.clamp_now(input.now_mono_ms, &mut extra_log);
 
         let mut prev_at: Option<u64> = None;
         for ev in input.events {
@@ -200,7 +240,7 @@ impl Session {
                     req_id,
                     route_key,
                     outcome,
-                    comparison_ref,
+                    facts_ref,
                     ..
                 } => {
                     self.planner.on_search_finished(
@@ -208,12 +248,12 @@ impl Session {
                         &req_id,
                         &route_key,
                         outcome,
-                        comparison_ref.as_deref(),
+                        facts_ref.as_deref(),
                         self.current_route_key.as_ref(),
                         &mut fx,
                     );
                 }
-                EventBody::EngineReset => self.planner.on_engine_reset(at, &mut fx),
+                EventBody::EngineReset {} => self.planner.on_engine_reset(at, &mut fx),
                 EventBody::Thermal { status } => {
                     let lvl = ThermalLevel::from(status);
                     if lvl != self.thermal {
@@ -228,6 +268,23 @@ impl Session {
         }
         self.planner.on_now(now, &mut fx);
         self.finish(fx, extra_log)
+    }
+
+    /// Clamp `now_mono_ms` to the previous value (time never goes backwards in the core).
+    fn clamp_now(&mut self, raw_now: u64, extra_log: &mut Vec<LogEvent>) -> u64 {
+        let now = match self.last_now_mono_ms {
+            Some(prev) if raw_now < prev => {
+                extra_log.push(log_at(
+                    prev,
+                    "clock_regression",
+                    Some(format!("now_mono_ms {raw_now}<{prev}")),
+                ));
+                prev
+            }
+            _ => raw_now,
+        };
+        self.last_now_mono_ms = Some(now);
+        now
     }
 
     fn finish(&self, fx: Effects, mut extra_log: Vec<LogEvent>) -> TickOutput {

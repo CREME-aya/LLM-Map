@@ -18,10 +18,22 @@
 //!   pre-search ETA estimate (`< 1800 s` → short; `>= 1800 s` or none → long) for every
 //!   candidate search of that plan_request. It selects the comparison budget (short 3 s /
 //!   long 8 s from the plan start) and the watchdog limit (short 5 s / long 10 s from each
-//!   `start`). Searches requested outside any plan are `long`.
+//!   `start`). Searches requested outside any plan take the latest plan's class (`long`
+//!   when there was none).
+//! - Plan queue (team decision 2026-11-25): `begin_plan_with` queues the plan's candidate
+//!   searches (baseline `explicit_plan`, the rest `comparison`); they share the single slot
+//!   with ad-hoc requests and start one at a time. The plan ends with exactly one
+//!   `rank{plan_request_id, facts_refs, reason}` (Kotlin then calls `dc_rank`):
+//!   `all_done` once every queued search returned, or `budget_expired` when the comparison
+//!   budget passes first. On expiry the queued searches are dropped (never started) and a
+//!   running one of the plan gets `cancel`; it keeps the slot until its `search_finished`
+//!   (an `ok` then is `discarded_late`). No `start` is emitted for an ended plan.
 
-use contracts::tick::{DistanceClass, LogEvent, PlannerCmd, SearchOutcome, SearchPriority, UiCmd};
+use contracts::tick::{
+    DistanceClass, LogEvent, PlannerCmd, RankReason, SearchOutcome, SearchPriority, UiCmd,
+};
 use contracts::RouteKey;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchReq {
@@ -30,6 +42,9 @@ pub struct SearchReq {
     pub route_key: RouteKey,
     pub distance_class: DistanceClass,
     pub started_at_mono_ms: u64,
+    /// Set for a candidate search of a plan.
+    pub plan_request_id: Option<String>,
+    pub candidate_id: Option<String>,
 }
 
 /// Time limits per distance class (03 §3.1, 07 §1; provisional initial values).
@@ -77,8 +92,21 @@ pub struct Plan {
     pub plan_request_id: String,
     pub distance_class: DistanceClass,
     pub started_at_mono_ms: u64,
-    /// Set once the comparison budget has passed (logged once).
-    pub budget_expired: bool,
+    /// Key every candidate search of the plan is started with.
+    pub route_key: Option<RouteKey>,
+    /// Candidate searches not started yet, in request order.
+    pub queue: VecDeque<PlanSearch>,
+    /// `facts_ref` of each candidate search that returned `ok`, in request order.
+    pub facts_refs: Vec<String>,
+    /// Set once `rank` was emitted (or the plan was superseded): nothing more starts.
+    pub ended: bool,
+}
+
+/// A queued candidate search of a plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanSearch {
+    pub candidate_id: String,
+    pub priority: SearchPriority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +171,8 @@ impl SearchPlanner {
     /// Start (or continue) a plan_request and fix its distance class before searching.
     /// Calling again with the same `plan_request_id` keeps the class and start time that
     /// were fixed first (a later ETA estimate never reclassifies the same plan).
+    /// Queues no candidate search (used by tests and by callers that request searches
+    /// themselves); see `begin_plan_with`.
     pub fn begin_plan(
         &mut self,
         now: u64,
@@ -150,9 +180,30 @@ impl SearchPlanner {
         eta_estimate_s: Option<u64>,
         fx: &mut Effects,
     ) -> DistanceClass {
+        self.begin_plan_with(now, plan_request_id, eta_estimate_s, None, Vec::new(), fx)
+    }
+
+    /// `begin_plan` plus the plan's candidate searches, queued in order and started one at
+    /// a time with `route_key`. Same id as the current plan → nothing changes (no re-queue).
+    /// A different id supersedes the current plan: its queue is dropped and its running
+    /// search is cancelled (no `rank` for a superseded plan).
+    pub fn begin_plan_with(
+        &mut self,
+        now: u64,
+        plan_request_id: &str,
+        eta_estimate_s: Option<u64>,
+        route_key: Option<RouteKey>,
+        searches: Vec<PlanSearch>,
+        fx: &mut Effects,
+    ) -> DistanceClass {
         if let Some(p) = &self.plan {
             if p.plan_request_id == plan_request_id {
                 return p.distance_class;
+            }
+            if !p.ended {
+                let detail = format!("plan_request_id={}", p.plan_request_id);
+                log(fx, now, "plan_superseded", None, Some(detail));
+                self.end_plan(now, fx);
             }
         }
         let distance_class = DistanceClass::from_eta_estimate_s(eta_estimate_s);
@@ -166,18 +217,88 @@ impl SearchPlanner {
                 class_name(distance_class)
             )),
         );
+        let head = searches.first().map(|s| s.priority);
         self.plan = Some(Plan {
             plan_request_id: plan_request_id.to_owned(),
             distance_class,
             started_at_mono_ms: now,
-            budget_expired: false,
+            route_key,
+            queue: searches.into(),
+            facts_refs: Vec::new(),
+            ended: false,
         });
+        if let Some(priority) = head {
+            self.preempt_or_start(now, priority, fx);
+        }
         distance_class
+    }
+
+    /// Ends the current plan: drops its queued searches and cancels its running one.
+    fn end_plan(&mut self, now: u64, fx: &mut Effects) {
+        let Some(plan) = self.plan.as_mut() else {
+            return;
+        };
+        plan.ended = true;
+        for s in plan.queue.drain(..) {
+            log(
+                fx,
+                now,
+                "plan_search_dropped",
+                None,
+                Some(format!("candidate_id={}", s.candidate_id)),
+            );
+        }
+        let id = plan.plan_request_id.clone();
+        let of_plan = |r: &SearchReq| r.plan_request_id.as_deref() == Some(id.as_str());
+        match &self.slot {
+            Slot::Running { req } if of_plan(req) => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, false, fx);
+                self.slot = Slot::CancelRequested { req };
+            }
+            Slot::EngineStuck {
+                req,
+                cancel_sent: false,
+            } if of_plan(req) => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, false, fx);
+                self.slot = Slot::EngineStuck {
+                    req,
+                    cancel_sent: true,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    /// Emits the plan's single `rank` and ends it.
+    fn rank(&mut self, now: u64, reason: RankReason, fx: &mut Effects) {
+        let Some(plan) = self.plan.as_ref().filter(|p| !p.ended) else {
+            return;
+        };
+        fx.planner_cmds.push(PlannerCmd::Rank {
+            plan_request_id: plan.plan_request_id.clone(),
+            facts_refs: plan.facts_refs.clone(),
+            reason,
+        });
+        let detail = format!(
+            "plan_request_id={} reason={reason:?} facts={}",
+            plan.plan_request_id,
+            plan.facts_refs.len()
+        );
+        log(fx, now, "plan_ranked", None, Some(detail));
+        self.end_plan(now, fx);
+    }
+
+    fn active_plan(&self, plan_request_id: &str) -> bool {
+        self.plan
+            .as_ref()
+            .is_some_and(|p| !p.ended && p.plan_request_id == plan_request_id)
     }
 
     /// Comparison budget deadline of the current plan (None once expired / no plan).
     pub fn comparison_deadline(&self) -> Option<u64> {
-        self.plan.as_ref().filter(|p| !p.budget_expired).map(|p| {
+        self.plan.as_ref().filter(|p| !p.ended).map(|p| {
             p.started_at_mono_ms
                 .saturating_add(self.limits.comparison_budget_ms(p.distance_class))
         })
@@ -196,44 +317,46 @@ impl SearchPlanner {
             .plan
             .as_ref()
             .map_or(DistanceClass::Long, |p| p.distance_class);
-        let new = Pending {
+        self.keep_higher(Pending {
             priority,
             route_key,
             distance_class,
-        };
+        });
+        self.preempt_or_start(now, priority, fx);
+    }
+
+    /// A search of `priority` is waiting: start it if the slot is free, or cancel a
+    /// lower-priority running search (it keeps the slot until its `search_finished`).
+    fn preempt_or_start(&mut self, now: u64, priority: SearchPriority, fx: &mut Effects) {
+        let reroute = priority == SearchPriority::Reroute;
         match &self.slot {
-            Slot::Idle => {
-                self.pending = Some(new);
-                self.start_pending(now, fx);
-            }
+            Slot::Idle => self.start_next(now, fx),
             Slot::Running { req } if req.priority < priority => {
                 let req = req.clone();
-                Self::send_cancel(now, &req, priority, fx);
+                Self::send_cancel(now, &req, reroute, fx);
                 self.slot = Slot::CancelRequested { req };
-                self.keep_higher(new);
             }
             Slot::EngineStuck {
                 req,
                 cancel_sent: false,
             } if req.priority < priority => {
                 let req = req.clone();
-                Self::send_cancel(now, &req, priority, fx);
+                Self::send_cancel(now, &req, reroute, fx);
                 self.slot = Slot::EngineStuck {
                     req,
                     cancel_sent: true,
                 };
-                self.keep_higher(new);
             }
-            _ => self.keep_higher(new),
+            _ => {}
         }
     }
 
-    fn send_cancel(now: u64, req: &SearchReq, by: SearchPriority, fx: &mut Effects) {
+    fn send_cancel(now: u64, req: &SearchReq, checking_route: bool, fx: &mut Effects) {
         fx.planner_cmds.push(PlannerCmd::Cancel {
             req_id: req.req_id.clone(),
         });
-        if by == SearchPriority::Reroute {
-            fx.ui_cmds.push(UiCmd::ShowCheckingRoute);
+        if checking_route {
+            fx.ui_cmds.push(UiCmd::ShowCheckingRoute {});
         }
         log(fx, now, "search_cancel_requested", Some(&req.req_id), None);
     }
@@ -247,30 +370,61 @@ impl SearchPlanner {
         }
     }
 
-    fn start_pending(&mut self, now: u64, fx: &mut Effects) {
-        let Some(p) = self.pending.take() else { return };
+    /// Starts the highest waiting search (ad-hoc pending or the plan's next candidate; on a
+    /// tie the ad-hoc one, which can only be reroute / avoid chip / explicit request).
+    fn start_next(&mut self, now: u64, fx: &mut Effects) {
+        if self.slot != Slot::Idle {
+            return;
+        }
+        let plan_head = self
+            .plan
+            .as_ref()
+            .filter(|p| !p.ended && p.route_key.is_some())
+            .and_then(|p| p.queue.front())
+            .map(|s| s.priority);
+        let take_plan = match (&self.pending, plan_head) {
+            (Some(p), Some(h)) => h > p.priority,
+            (None, Some(_)) => true,
+            (_, None) => false,
+        };
+        let (priority, route_key, distance_class, plan_request_id, candidate_id) = if take_plan {
+            let plan = self.plan.as_mut().expect("plan head implies plan");
+            let s = plan.queue.pop_front().expect("plan head");
+            (
+                s.priority,
+                plan.route_key.clone().expect("checked above"),
+                plan.distance_class,
+                Some(plan.plan_request_id.clone()),
+                Some(s.candidate_id),
+            )
+        } else {
+            let Some(p) = self.pending.take() else { return };
+            (p.priority, p.route_key, p.distance_class, None, None)
+        };
         let req_id = format!("r{}", self.next_req_seq); // TODO(abi-v1): req_id format provisional
         self.next_req_seq += 1;
         fx.planner_cmds.push(PlannerCmd::Start {
             req_id: req_id.clone(),
-            priority: p.priority,
-            graph_version: p.route_key.graph_version.clone(),
-            route_key: p.route_key.clone(),
+            priority,
+            distance_class,
+            graph_version: route_key.graph_version.clone(),
+            route_key: route_key.clone(),
+            candidate_id: candidate_id.clone(),
         });
-        log(
-            fx,
-            now,
-            "search_started",
-            Some(&req_id),
-            Some(format!("distance_class={}", class_name(p.distance_class))),
-        );
+        let mut detail = format!("distance_class={}", class_name(distance_class));
+        if let Some(c) = &candidate_id {
+            detail.push_str(&format!(" candidate_id={c}"));
+        }
+        log(fx, now, "search_started", Some(&req_id), Some(detail));
         self.slot = Slot::Running {
             req: SearchReq {
                 req_id,
-                priority: p.priority,
-                route_key: p.route_key,
-                distance_class: p.distance_class,
+                priority,
+                route_key,
+                distance_class,
                 started_at_mono_ms: now,
+                plan_request_id,
+                candidate_id,
             },
         };
     }
@@ -283,7 +437,7 @@ impl SearchPlanner {
         req_id: &str,
         route_key: &RouteKey,
         outcome: SearchOutcome,
-        comparison_ref: Option<&str>,
+        facts_ref: Option<&str>,
         current_route_key: Option<&RouteKey>,
         fx: &mut Effects,
     ) {
@@ -296,19 +450,38 @@ impl SearchPlanner {
                 return;
             }
         };
+        let plan_id = req.plan_request_id.as_deref();
+        let in_active_plan = plan_id.is_some_and(|id| self.active_plan(id));
         match outcome {
             // engine_stuck wins over an earlier cancel (03 §3.1 state machine).
             SearchOutcome::Ok if stuck => log(fx, at, "discarded_after_stuck", Some(req_id), None),
             SearchOutcome::Ok if cancelled => log(fx, at, "discarded_late", Some(req_id), None),
-            SearchOutcome::Ok
-                if Some(route_key) != current_route_key || *route_key != req.route_key =>
-            {
+            // A search of a plan that already ranked (or was superseded) only frees the slot.
+            SearchOutcome::Ok if plan_id.is_some() && !in_active_plan => {
+                log(fx, at, "discarded_late", Some(req_id), None)
+            }
+            SearchOutcome::Ok if *route_key != req.route_key => {
+                log(fx, at, "discarded_stale_route_key", Some(req_id), None)
+            }
+            // Candidate search: collected for `rank`, never displayed on its own.
+            SearchOutcome::Ok if in_active_plan => {
+                let plan = self.plan.as_mut().expect("active plan");
+                match facts_ref {
+                    Some(f) => {
+                        plan.facts_refs.push(f.to_owned());
+                        log(fx, at, "candidate_collected", Some(req_id), None);
+                    }
+                    // TODO(abi-v1): an ok without facts_ref is not specified; not ranked.
+                    None => log(fx, at, "candidate_without_facts", Some(req_id), None),
+                }
+            }
+            SearchOutcome::Ok if Some(route_key) != current_route_key => {
                 log(fx, at, "discarded_stale_route_key", Some(req_id), None)
             }
             SearchOutcome::Ok => {
                 fx.ui_cmds.push(UiCmd::SearchResultReady {
                     req_id: req_id.to_owned(),
-                    comparison_ref: comparison_ref.map(str::to_owned),
+                    facts_ref: facts_ref.map(str::to_owned),
                 });
                 log(fx, at, "search_adopted", Some(req_id), None);
             }
@@ -321,7 +494,10 @@ impl SearchPlanner {
             ),
         }
         self.slot = Slot::Idle;
-        self.start_pending(at, fx);
+        if in_active_plan && self.plan.as_ref().is_some_and(|p| p.queue.is_empty()) {
+            self.rank(at, RankReason::AllDone, fx);
+        }
+        self.start_next(at, fx);
     }
 
     pub fn on_engine_reset(&mut self, at: u64, fx: &mut Effects) {
@@ -335,12 +511,12 @@ impl SearchPlanner {
     pub fn on_now(&mut self, now: u64, fx: &mut Effects) {
         if let Some(budget) = self.comparison_deadline() {
             if now >= budget {
-                let plan = self.plan.as_mut().expect("deadline implies plan");
-                plan.budget_expired = true;
-                // TODO(drive-core): return the comparison from the candidates completed so
-                // far (dc_rank) and drop this plan's queued comparison searches.
+                let plan = self.plan.as_ref().expect("deadline implies plan");
                 let detail = format!("plan_request_id={}", plan.plan_request_id);
                 log(fx, now, "comparison_budget_expired", None, Some(detail));
+                // Return what is complete so far; queued searches are dropped and a running
+                // one is cancelled (it keeps the slot until its search_finished).
+                self.rank(now, RankReason::BudgetExpired, fx);
             }
         }
         let Some(deadline) = self.watchdog_deadline() else {
@@ -354,7 +530,7 @@ impl SearchPlanner {
             Slot::CancelRequested { req } => (req.clone(), true),
             _ => return,
         };
-        fx.ui_cmds.push(UiCmd::ShowCheckingRoute);
+        fx.ui_cmds.push(UiCmd::ShowCheckingRoute {});
         log(fx, now, "engine_stuck", Some(&req.req_id), None);
         self.slot = Slot::EngineStuck { req, cancel_sent };
     }

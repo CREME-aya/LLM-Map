@@ -1,14 +1,14 @@
 {
-  "description": "Gate 7 common test data (07 §2 / ADR-0008 re-evaluation): t0 start{r1, avoid_chip}; t1 off-route -> cancel{r1} + 'checking route'; t2 search_finished{r1, ok} -> discarded_late, slot freed -> start{r2, reroute}; t3 search_finished{r2, ok} -> adopted. MonoMs are JSON numbers. 'request' steps stand in for triggers not wired into dc_tick yet (TODO).",
+  "description": "Gate 7 common test data (07 §2 / ADR-0008 re-evaluation): t0 start{r1, avoid_chip, long}; t1 off-route -> cancel{r1} + 'checking route'; t2 search_finished{r1, ok} -> discarded_late, slot freed -> start{r2, reroute, long}; t3 search_finished{r2, ok} -> adopted. MonoMs are JSON numbers. 'request' steps stand in for triggers not wired into dc_tick yet (TODO). 'expect_starts' lists the planner_cmds start{req_id, priority, distance_class} each step must emit (none if absent); outside any plan the class is long.",
   "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"},
   "steps": [
-    { "step": "request", "now_mono_ms": 1000, "priority": "avoid_chip" },
+    { "expect_starts": [{"req_id": "r1", "priority": "avoid_chip", "distance_class": "long"}], "step": "request", "now_mono_ms": 1000, "priority": "avoid_chip" },
     { "step": "request", "now_mono_ms": 2000, "priority": "reroute" },
-    { "step": "tick", "input": { "now_mono_ms": 2600, "events": [
+    { "expect_starts": [{"req_id": "r2", "priority": "reroute", "distance_class": "long"}], "step": "tick", "input": { "now_mono_ms": 2600, "events": [
       { "at_mono_ms": 2500, "kind": "search_finished", "req_id": "r1", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"},
-        "graph_version": "jp-2026.11.0", "outcome": "ok", "comparison_ref": "cmp-r1", "engine_ms": 1500 } ] } },
+        "graph_version": "jp-2026.11.0", "outcome": "ok", "facts_ref": "facts-r1", "engine_ms": 1500 } ] } },
     { "step": "tick", "input": { "now_mono_ms": 4100, "events": [
       { "at_mono_ms": 4000, "kind": "search_finished", "req_id": "r2", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"},
-        "graph_version": "jp-2026.11.0", "outcome": "ok", "comparison_ref": "cmp-r2", "engine_ms": 1500 } ] } }
+        "graph_version": "jp-2026.11.0", "outcome": "ok", "facts_ref": "facts-r2", "engine_ms": 1500 } ] } }
   ]
 }

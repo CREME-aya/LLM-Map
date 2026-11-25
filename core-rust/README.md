@@ -19,7 +19,7 @@ core-rust/
 | 2 | `dc_buf_free(dc_out)` | Frees a `dc_out` allocated by Rust, exactly once. `{NULL,0}` is a no-op | Implemented |
 | 3 | `dc_session_new(config, **out)` | Creates the session state (search slot, deadlines, etc.) from config JSON. On failure sets `*out=NULL` and returns an error envelope | Implemented (config: optional `watchdog_{short,long}_ms` 5 s / 10 s and `comparison_budget_{short,long}_ms` 3 s / 8 s; distance class `short|long` fixed per plan from the pre-search ETA, < 1800 s → short) |
 | 4 | `dc_session_free(s)` | Frees the session when the actor explicitly closes it. NULL is safe; double free is undefined | Implemented |
-| 5 | `dc_plan_candidates(snapshot)` | Builds the candidate search requests `CandidateRequest[]` from a `TripPlanSnapshot` | `E_UNIMPLEMENTED` |
+| 5 | `dc_plan_candidates(snapshot)` | Builds the candidate search requests `CandidateRequest[]` from a `TripPlanSnapshot` | `E_UNIMPLEMENTED` (not wired: the body `Session::plan_candidates(now, eta?, snapshot)` exists and needs the session; the signature change comes first) |
 | 6 | `dc_rank(req)` | Applies L1/L2 3-axis scoring and the detour cap (shared with #11) to `{facts[], policy, profile}` and returns a `RouteComparison` | `E_UNIMPLEMENTED` |
 | 7 | `dc_validate_override(s, req)` | Parses and validates the SLM's 1-line command code in Rust and returns `Applied` or `Rejected{code}` | SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only; everything else `E_UNIMPLEMENTED` |
 | 8 | `dc_trip_score(summary)` | Computes the trip score (long-distance/trip detection) from a trip summary | `E_UNIMPLEMENTED` |
@@ -31,6 +31,32 @@ core-rust/
 JSON conventions (docs v1.2 ADR-0008): `*_mono_ms` are JSON numbers; only Web-reachable u64 IDs / revisions
 (`trip_revision`, `route_revision`, edge ids) are decimal strings; enum values are snake_case;
 `dc_validate_override` returns `{"result":"applied"|"rejected", ...}`. `search_finished.outcome` is `ok|cancelled|error`.
+`planner_cmds.start` carries the required `distance_class: short|long` fixed by the Planner,
+and `candidate_id` for a plan's candidate search. A plan ends with exactly one
+`rank{plan_request_id, facts_refs, reason: all_done|budget_expired}`: Kotlin then calls
+`dc_rank` with the CandidateFacts behind `facts_refs` (`search_finished.facts_ref`,
+formerly `comparison_ref`). On budget expiry queued candidates are dropped and a running one
+is cancelled; it keeps the slot until its `search_finished`.
+Unknown fields are rejected with `E_SCHEMA` wherever the schema says `additionalProperties: false`
+(TickInput, Fix, every Event kind, PlannerCmd, VoiceCmd, UiCmd, TickOutput, LogEvent) and in the schema-less
+`dc_validate_override` request and `dc_session_new` config.
+
+`voice_cmds` / `ui_cmds` (types only; nothing emits voice / confirm / dismiss yet) hold only
+what docs v1.2 names:
+- `voice_cmds`: `speak{token, priority: p0|p1|p2|p3, template_id, params{name: integer}}` |
+  `stop{token}` (05 §5; no text crosses the boundary, Kotlin renders the template).
+- `ui_cmds`: `show_checking_route` | `search_result_ready{req_id, facts_ref}` |
+  `show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}` (05 §3.2, ADR-0007) |
+  `dismiss{target_id, reason: expired|cancelled|route_changed|superseded}` (04 §4.3, 05 §3.2, ADR-0007).
+
+Not defined because docs do not (TODO, needs a docs decision first):
+- `show_avoid_offer` / `horizon_update`: the chip (`HorizonEntry.avoid_offer`) and the 3-ahead
+  cards come from `TickOutput.horizon`, the single source (04 §1); a separate UiCmd would duplicate it.
+- The 5 s undo window after an avoid switch ("戻して", 04 §4.3 item 3) and the crossfade switch itself.
+- "あとで見る" save of an interrupted P3 commentary (05 §6, ADR-0006).
+- Thermal / low-memory degradation notices (05 §3.1), Tier 0 fallback chips after an SLM timeout (05 §3.2).
+- The `utterance_token {route_key, event_id, generation}` encoding (string today, same as `tts_*{token}`),
+  the template id catalogue and the param names.
 
 Rules: `dc_in` is owned by the caller and valid until the function returns (not NUL-terminated). `dc_out` is allocated by Rust and released with `dc_buf_free`.
 Every return value is `{ok, data | error{code,msg}}`. Panics become `E_PANIC`. Calls come only from the NavigationSession actor.

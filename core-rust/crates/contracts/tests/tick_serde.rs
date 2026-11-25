@@ -91,23 +91,52 @@ fn enums_are_snake_case_on_the_wire() {
     let v = serde_json::to_value(PlannerCmd::Start {
         req_id: "r1".into(),
         priority: SearchPriority::AvoidChip,
+        distance_class: DistanceClass::Short,
         route_key: serde_json::from_str(
             r#"{"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"}"#,
         )
         .unwrap(),
         graph_version: "g".into(),
+        candidate_id: None,
     })
     .unwrap();
     assert_eq!(v["cmd"], "start");
+    assert!(v.get("candidate_id").is_none(), "absent, not null");
     assert_eq!(v["priority"], "avoid_chip");
+    assert_eq!(v["distance_class"], "short");
     assert_eq!(
-        serde_json::to_value(UiCmd::ShowCheckingRoute).unwrap()["ui"],
+        serde_json::to_value(UiCmd::ShowCheckingRoute {}).unwrap()["ui"],
         "show_checking_route"
     );
     assert_eq!(
         serde_json::to_value(ThermalStatus::Critical).unwrap(),
         "critical"
     );
+}
+
+#[test]
+fn fieldless_event_kinds_reject_extra_fields() {
+    // unit-like kinds are `{}` variants so extra fields are not silently ignored
+    for k in ["low_memory", "audio_focus_lost", "engine_reset"] {
+        let ok = format!(r#"{{"at_mono_ms":1,"kind":"{k}"}}"#);
+        let bad = format!(r#"{{"at_mono_ms":1,"kind":"{k}","x":0}}"#);
+        assert!(serde_json::from_str::<Event>(&ok).is_ok(), "{k}");
+        assert!(serde_json::from_str::<Event>(&bad).is_err(), "{k}");
+        assert_eq!(
+            serde_json::to_string(&serde_json::from_str::<Event>(&ok).unwrap()).unwrap(),
+            ok
+        );
+    }
+    // missing / duplicate at_mono_ms, missing kind
+    for bad in [
+        r#"{"kind":"low_memory"}"#,
+        r#"{"at_mono_ms":1,"at_mono_ms":2,"kind":"low_memory"}"#,
+        r#"{"at_mono_ms":1}"#,
+        r#"{"at_mono_ms":1,"kind":"tts_done","token":"a","token":"b"}"#,
+        r#"[1,"low_memory"]"#,
+    ] {
+        assert!(serde_json::from_str::<Event>(bad).is_err(), "{bad}");
+    }
 }
 
 #[test]

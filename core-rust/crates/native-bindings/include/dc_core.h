@@ -36,6 +36,10 @@ typedef struct dc_session dc_session;
                                                          * Called on explicit actor close, never from a GC finalizer. */
 
 /* 5  */ dc_out   dc_plan_candidates(dc_in trip_plan_snapshot_json);           /* -> CandidateRequest[]   (TODO: E_UNIMPLEMENTED) */
+         /* TODO(abi-v1): not wired. The body is Session::plan_candidates(now_mono_ms, eta_estimate_s?,
+          * TripPlanSnapshot) -> {plan_request_id, distance_class, candidates[], planner_cmds[],
+          * next_wake_mono_ms, log[]}; it needs the session, so the signature change
+          * (dc_plan_candidates(s, ...), decided, separate work before Gate 0) comes first. */
 /* 6  */ dc_out   dc_rank(dc_in rank_req_json);         /* {facts[], policy, profile} -> RouteComparison (TODO: E_UNIMPLEMENTED) */
 /* 7  */ dc_out   dc_validate_override(dc_session* s, dc_in req_json);
          /* req: {code_line, contract, utterance_id (required), utterance_mono_ms, ref_frame_seq, pending_offer_id?}
@@ -59,13 +63,23 @@ typedef struct dc_session dc_session;
           *       | low_memory | inference_down{reason} | inference_up{tier}
           *       | audio_focus_lost | call_state{active}
           *       | search_finished{req_id, route_key, graph_version, outcome: ok|cancelled|error,
-          *                         comparison_ref?, engine_ms}     // exactly one per search
+          *                         facts_ref?, engine_ms}     // exactly one per search
           *             // no timeout outcome: Rust detects the watchdog deadline from now_mono_ms
           *             // (-> engine_stuck); an ok returned after cancel is discarded_late,
           *             // after engine_stuck discarded_after_stuck
           *       | engine_reset }
-          * out: {horizon? (only when frame_seq changed), voice_cmds[], ui_cmds[],
-          *       planner_cmds[start{req_id, priority, route_key, graph_version} | cancel{req_id}],
+          * out: {horizon? (only when frame_seq changed),
+          *       voice_cmds[speak{token, priority: p0|p1|p2|p3, template_id, params{name: int}}
+          *                 | stop{token}],
+          *       ui_cmds[show_checking_route | search_result_ready{req_id, facts_ref}
+          *              | show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}
+          *              | dismiss{target_id, reason: expired|cancelled|route_changed|superseded}],
+          *       planner_cmds[start{req_id, priority, distance_class: short|long, route_key,
+          *                    graph_version, candidate_id?} | cancel{req_id}
+          *                  | rank{plan_request_id, facts_refs[], reason: all_done|budget_expired}],
+          *   rank: once per plan; Kotlin calls dc_rank with the CandidateFacts behind facts_refs
+          *   (may be empty). The plan is over: no more start for it, a late search_finished
+          *   only frees the slot (discarded_late).
           *       next_wake_mono_ms: u64|null, log[]}
           *   next_wake_mono_ms: earliest time the output may change without new input (includes the
           *   search watchdog deadline). Kotlin calls dc_tick by then; null = tick on each Fix only. */
