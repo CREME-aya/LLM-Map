@@ -2,7 +2,7 @@
 
 use crate::align::{AlignConfig, AlignStats, Aligner, FixResult, Mode};
 use crate::command_line::{self, Command, JpRef};
-use crate::horizon::{arrived, HorizonFrames};
+use crate::horizon::{arrived, EtaFactors, HorizonFrames};
 use crate::planner::{CommitGate, Effects, PlanSearch, SearchLimits, SearchPlanner};
 use crate::route::LoadedRoute;
 use contracts::horizon::{HorizonStatus, ManeuverHorizon};
@@ -44,12 +44,17 @@ pub struct SessionConfig {
     /// How long a reroute / explicit-plan ok returned while `uncertain` is held for a
     /// later commit (ms; 10 s, provisional: 04 §3 leaves it to Gate 7).
     pub commit_hold_ms: u64,
+    /// `eta_range_ms` factors in per-mille of the remaining time (04 §2.2, provisional:
+    /// earliest 850 = × 0.85, latest 1250 = × 1.25; no basis yet, Gate 2 / 3 calibrate).
+    pub eta_earliest_permille: u32,
+    pub eta_latest_permille: u32,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
         let l = SearchLimits::default();
         let a = AlignConfig::default();
+        let e = EtaFactors::default();
         Self {
             watchdog_short_ms: l.watchdog_short_ms,
             watchdog_long_ms: l.watchdog_long_ms,
@@ -62,6 +67,8 @@ impl Default for SessionConfig {
             max_acc_cm: None,
             fix_stale_ms: a.fix_stale_ms,
             commit_hold_ms: l.commit_hold_ms,
+            eta_earliest_permille: e.earliest_permille,
+            eta_latest_permille: e.latest_permille,
         }
     }
 }
@@ -85,7 +92,17 @@ impl SessionConfig {
         if self.heading_tol_deg > 180 {
             return Err("heading_tol_deg must be <= 180".into());
         }
+        if self.eta_earliest_permille > 1_000 || self.eta_latest_permille < 1_000 {
+            return Err("eta factors need earliest_permille <= 1000 <= latest_permille".into());
+        }
         Ok(())
+    }
+
+    pub fn eta_factors(&self) -> EtaFactors {
+        EtaFactors {
+            earliest_permille: self.eta_earliest_permille,
+            latest_permille: self.eta_latest_permille,
+        }
     }
 
     fn limits(&self) -> SearchLimits {
@@ -166,7 +183,7 @@ impl Session {
             route: None,
             aligner: Aligner::new(align_cfg),
             finished: false,
-            frames: HorizonFrames::default(),
+            frames: HorizonFrames::new(config.eta_factors()),
             last_fix_at: None,
         }
     }

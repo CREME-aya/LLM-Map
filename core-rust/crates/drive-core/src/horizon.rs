@@ -10,8 +10,16 @@
 //!   `frame_seq`, `sampled_at_monotonic_ms` and `valid_until_monotonic_ms`).
 //!
 //! Passage requires two consecutive confident projections at or beyond an anchor.
-//! TODO(04 §2): the bundle carries a single edge timeline. Until the producer supplies
-//! independent bounds, all three ETAs describe that one deterministic projection.
+//!
+//! `eta_range_ms` (04 §2.2, provisional): durations from the current position. `typical`
+//! is the remaining time to the maneuver (difference of `edges.cum_time_ms` between the
+//! anchor and the matched position); `earliest = typical × 0.85` (rounded down) and
+//! `latest = typical × 1.25` (rounded up), in integer per-mille (`EtaFactors`, set through
+//! `SessionConfig`; 0.85 / 1.25 have no basis yet, Gate 2 / 3 calibrate them). The factors
+//! apply to the remaining time, never to the time from the route start. `earliest` decides
+//! deadlines and window starts (avoid-chip deadline and start condition,
+//! `next_complex_window.start`), `latest` the window end; `typical` is for the emphasis
+//! times and distances shown.
 //! TODO(04 §2.1): a stop within a leg has no marker in the bundle.
 //! Junction kinds (04 §2 `JunctionRef.kind`): `refs` point at difficult junctions only
 //! (03 §4.1 `jp=next` / `jp=last` = 難所). The class comes from `junction::classify`
@@ -51,15 +59,47 @@ pub const COMPLEX_END_MARGIN_MS: u64 = 5_000;
 /// Safety margin of the P3 available time (05 §6.2: 5 s).
 pub const P3_SAFETY_MARGIN_MS: u64 = 5_000;
 
-/// ETA range from the current position (`current` = route time at the progress) to
-/// `along_cm`. TODO(04 §2): one deterministic projection, so earliest = typical = latest.
-fn eta_range(route: &LoadedRoute, along_cm: u32, current: u32) -> EtaRange {
-    let typical = route.time_at(along_cm).saturating_sub(current);
-    EtaRange {
-        earliest: typical,
-        typical,
-        latest: typical,
+/// Per-mille factors of `eta_range_ms` (04 §2.2, provisional: 850 / 1250).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EtaFactors {
+    /// `earliest = typical × earliest_permille / 1000`, rounded down (<= 1000).
+    pub earliest_permille: u32,
+    /// `latest = typical × latest_permille / 1000`, rounded up (>= 1000).
+    pub latest_permille: u32,
+}
+
+impl Default for EtaFactors {
+    fn default() -> Self {
+        Self {
+            earliest_permille: 850,
+            latest_permille: 1_250,
+        }
     }
+}
+
+impl EtaFactors {
+    /// The range around a remaining time `typical` (ms).
+    pub fn range(&self, typical: u32) -> EtaRange {
+        let t = u64::from(typical);
+        let earliest = t * u64::from(self.earliest_permille) / 1_000;
+        let latest = (t * u64::from(self.latest_permille)).div_ceil(1_000);
+        EtaRange {
+            earliest: u32::try_from(earliest).unwrap_or(u32::MAX),
+            typical,
+            latest: u32::try_from(latest).unwrap_or(u32::MAX),
+        }
+    }
+}
+
+/// ETA range from the current position (`current` = route time at the progress) to
+/// `along_cm` (see module docs).
+pub(crate) fn eta_range(
+    route: &LoadedRoute,
+    along_cm: u32,
+    current: u32,
+    factors: EtaFactors,
+) -> EtaRange {
+    factors.range(route.time_at(along_cm).saturating_sub(current))
 }
 
 /// The next complex window ahead of `progress_cm` (see module docs) and the index of its
@@ -69,6 +109,7 @@ fn complex_window(
     passed_cm: Option<u32>,
     progress_cm: u32,
     sampled_at_mono_ms: u64,
+    factors: EtaFactors,
 ) -> Option<(ComplexWindow, usize)> {
     let first = unpassed_index(route, passed_cm);
     let current = route.time_at(progress_cm);
@@ -82,10 +123,14 @@ fn complex_window(
         COMPLEX_PREP_CITY_MS
     };
     let start = sampled_at_mono_ms
-        .saturating_add(u64::from(eta_range(route, along(i), current).earliest))
+        .saturating_add(u64::from(
+            eta_range(route, along(i), current, factors).earliest,
+        ))
         .saturating_sub(prep);
     let end = sampled_at_mono_ms
-        .saturating_add(u64::from(eta_range(route, along(last), current).latest))
+        .saturating_add(u64::from(
+            eta_range(route, along(last), current, factors).latest,
+        ))
         .saturating_add(COMPLEX_END_MARGIN_MS);
     Some((
         ComplexWindow {
@@ -137,6 +182,7 @@ fn upcoming(
     route: &LoadedRoute,
     progress_cm: Option<u32>,
     passed_cm: Option<u32>,
+    factors: EtaFactors,
 ) -> Vec<HorizonEntry> {
     let from = progress_cm.unwrap_or(0);
     let mut prev_along: Option<u32> = None;
@@ -160,7 +206,7 @@ fn upcoming(
                 group_id: route.group_head(index).map(|head| head.id.clone()),
                 from_vehicle_m,
                 seg_from_prev_m,
-                eta_range_ms: current_time.map(|current| eta_range(route, a, current)),
+                eta_range_ms: current_time.map(|current| eta_range(route, a, current, factors)),
                 // All Arrow values are actions; information items (SA/PA, passed IC) are
                 // not modelled yet.
                 action_required: true,
@@ -224,9 +270,21 @@ pub struct HorizonFrames {
     /// Last content (frame fields zeroed) and the last tracking `upcoming`.
     last: Option<ManeuverHorizon>,
     frozen: Option<Vec<HorizonEntry>>,
+    eta: EtaFactors,
 }
 
 impl HorizonFrames {
+    pub fn new(eta: EtaFactors) -> Self {
+        Self {
+            eta,
+            ..Self::default()
+        }
+    }
+
+    pub fn eta_factors(&self) -> EtaFactors {
+        self.eta
+    }
+
     pub fn frame_seq(&self) -> u64 {
         self.frame_seq
     }
@@ -308,7 +366,13 @@ impl HorizonFrames {
             }
         }
         self.window_kept = false;
-        self.window = complex_window(route, self.passed_cm, progress_cm, sampled_at_mono_ms);
+        self.window = complex_window(
+            route,
+            self.passed_cm,
+            progress_cm,
+            sampled_at_mono_ms,
+            self.eta,
+        );
         self.window.map(|(w, _)| w)
     }
 
@@ -324,7 +388,7 @@ impl HorizonFrames {
     ) -> Option<ManeuverHorizon> {
         let (matched_progress_cm, upcoming) = match status {
             HorizonStatus::Tracking => {
-                let u = upcoming(route, progress_cm, self.passed_cm);
+                let u = upcoming(route, progress_cm, self.passed_cm, self.eta);
                 self.frozen = Some(
                     u.iter()
                         .cloned()
@@ -340,7 +404,7 @@ impl HorizonFrames {
                 None,
                 self.frozen
                     .clone()
-                    .unwrap_or_else(|| upcoming(route, None, self.passed_cm)),
+                    .unwrap_or_else(|| upcoming(route, None, self.passed_cm, self.eta)),
             ),
             HorizonStatus::OffRoute | HorizonStatus::Rerouting | HorizonStatus::Finished => {
                 (None, Vec::new())

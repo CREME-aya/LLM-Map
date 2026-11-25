@@ -429,11 +429,103 @@ fn window_on_an_ordinary_road() {
         .unwrap();
     let w = expected(&h, 0, 0, 30_000);
     assert_eq!(h.next_complex_window, Some(w));
-    // numbers: 1.5 km - 0.1 km at 15 m/s = 93.3 s
-    let eta = u64::from(h.upcoming[0].eta_range_ms.unwrap().earliest);
-    assert!((93_000..93_700).contains(&eta), "{eta}");
-    assert_eq!(w.start_monotonic_ms, 1_000 + eta - 30_000);
-    assert_eq!(w.end_monotonic_ms, Some(1_000 + eta + 5_000));
+    // numbers: 1.5 km - 0.1 km at 15 m/s = 93.3 s typical; start from earliest (× 0.85),
+    // end from latest (× 1.25)
+    let r = h.upcoming[0].eta_range_ms.unwrap();
+    let typical = u64::from(r.typical);
+    assert!((93_000..93_700).contains(&typical), "{typical}");
+    assert_eq!(u64::from(r.earliest), typical * 850 / 1_000);
+    assert_eq!(u64::from(r.latest), (typical * 1_250).div_ceil(1_000));
+    assert_eq!(w.start_monotonic_ms, 1_000 + typical * 850 / 1_000 - 30_000);
+    assert_eq!(
+        w.end_monotonic_ms,
+        Some(1_000 + (typical * 1_250).div_ceil(1_000) + 5_000)
+    );
+}
+
+/// `eta_range_ms` is a band around the remaining time (04 §2.2, provisional 0.85 / 1.25 in
+/// per-mille, set through SessionConfig); the factors apply to the remaining time from the
+/// current position, not to `cum_time_ms` from the route start. The window follows the band.
+#[test]
+fn eta_range_is_a_band_on_the_remaining_time() {
+    let b = grouped_line(12_000); // 2 ms per cm
+    let mut s = session(&b);
+    // at ~500 m: 1000 m (200 s) and 1120 m (224 s) from the route start, ~100 s / ~124 s
+    // left; the factors multiply what is left
+    let h = tick(&mut s, 50_000, Some(fix_x(&b, 50_000, 50_000)))
+        .horizon
+        .unwrap();
+    let band = |t: u32| {
+        let t = u64::from(t);
+        ((t * 850 / 1_000) as u32, (t * 1_250).div_ceil(1_000) as u32)
+    };
+    let r0 = h.upcoming[0].eta_range_ms.unwrap();
+    let r1 = h.upcoming[1].eta_range_ms.unwrap();
+    assert!((99_990..100_010).contains(&r0.typical), "{r0:?}");
+    assert_eq!(r1.typical - r0.typical, 24_000);
+    assert_eq!((r0.earliest, r0.latest), band(r0.typical));
+    assert_eq!((r1.earliest, r1.latest), band(r1.typical));
+    assert!(r0.earliest < r0.typical && r0.typical < r0.latest);
+    let w = h.next_complex_window.unwrap();
+    assert_eq!(
+        w.start_monotonic_ms,
+        50_000 + u64::from(r0.earliest) - 30_000
+    );
+    assert_eq!(
+        w.end_monotonic_ms,
+        Some(50_000 + u64::from(r1.latest) + 5_000)
+    );
+    // other factors from the config; rounding: earliest down, latest up
+    let mut s = Session::new(SessionConfig {
+        fix_stale_ms: 1_000_000,
+        eta_earliest_permille: 901,
+        eta_latest_permille: 1_001,
+        ..Default::default()
+    });
+    s.route_commit(&RouteCommitRequest {
+        expected_route_key: None,
+        bundle: b.clone(),
+    })
+    .unwrap();
+    let h = tick(&mut s, 50_000, Some(fix_x(&b, 50_000, 50_000)))
+        .horizon
+        .unwrap();
+    let r = h.upcoming[0].eta_range_ms.unwrap();
+    let t = u64::from(r.typical);
+    assert_eq!(u64::from(r.earliest), t * 901 / 1_000);
+    assert_eq!(u64::from(r.latest), (t * 1_001).div_ceil(1_000));
+    if t % 1_000 != 0 {
+        assert!(u64::from(r.latest) * 1_000 > t * 1_001, "rounded up");
+    }
+    let w = h.next_complex_window.unwrap();
+    assert_eq!(
+        w.start_monotonic_ms,
+        50_000 + u64::from(r.earliest) - 30_000
+    );
+    // factors 1000 / 1000: one value
+    let mut s = Session::new(SessionConfig {
+        fix_stale_ms: 1_000_000,
+        eta_earliest_permille: 1_000,
+        eta_latest_permille: 1_000,
+        ..Default::default()
+    });
+    s.route_commit(&RouteCommitRequest {
+        expected_route_key: None,
+        bundle: b.clone(),
+    })
+    .unwrap();
+    let h = tick(&mut s, 50_000, Some(fix_x(&b, 50_000, 50_000)))
+        .horizon
+        .unwrap();
+    let r0 = h.upcoming[0].eta_range_ms.unwrap();
+    assert_eq!((r0.earliest, r0.latest), (r0.typical, r0.typical));
+    // factors on the wrong side of 1000 are rejected
+    for cfg in [
+        r#"{"eta_earliest_permille": 1001}"#,
+        r#"{"eta_latest_permille": 999}"#,
+    ] {
+        assert!(Session::from_json(cfg.as_bytes()).is_err(), "{cfg}");
+    }
 }
 
 /// Motorway (approach edge with the motorway flag): the lead is 60 s. Only the edge that
@@ -537,7 +629,9 @@ fn window_stays_until_its_end_after_passage() {
         .horizon
         .unwrap();
     let w0 = h.next_complex_window.unwrap();
-    assert_eq!(w0.end_monotonic_ms, Some(50_000 + 224_000 + 5_000));
+    // typical 224 s to the second anchor; the end uses latest = 224 s × 1.25 = 280 s
+    assert_eq!(h.upcoming[1].eta_range_ms.unwrap().typical, 224_000);
+    assert_eq!(w0.end_monotonic_ms, Some(50_000 + 280_000 + 5_000));
     // beyond the second anchor (1120 m) once: not passed yet, the window follows the ETA
     let h = tick(&mut s, 100_000, Some(fix_x(&b, 100_000, 113_000)))
         .horizon
