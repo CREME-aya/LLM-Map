@@ -23,8 +23,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// `E_STALE` and nothing is replaced. `bundle.route_key` (and every `ManeuverId.route_key` in
 /// the bundle) carries `route_revision` "0" (`E_SCHEMA` otherwise): Rust assigns the
 /// revision (current + 1, the first route: 1) and returns the new key in
-/// `RouteCommitResult.route_key`. While a route is current, the bundle's `trip_revision` /
-/// `graph_version` must equal it (`E_STALE` otherwise). Team decision 2026-11-26.
+/// `RouteCommitResult.route_key`. While a route is current, the bundle's `trip_id` /
+/// `trip_revision` / `graph_version` must equal it (`E_STALE` otherwise). Team decision 2026-11-26.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteCommitRequest {

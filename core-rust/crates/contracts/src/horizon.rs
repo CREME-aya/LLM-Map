@@ -74,8 +74,13 @@ pub enum UnknownReason {
     VersionMismatch,
 }
 
-/// `Evidence<T>` in the flattened form of common.schema.json (`unknown` has `reason` and no
-/// `value`; the others have `value`). Rust passes it through: `value` is kept as JSON.
+/// `Evidence<T>` (04 §2) in the flattened form of common.schema.json, tagged by `kind`:
+/// - `confirmed { value, source_ref, observed_at? }`
+/// - `inferred  { value, rule_id, source_refs[] }`
+/// - `unknown   { reason }`
+///
+/// Each kind takes exactly its own fields (others are rejected). Rust passes it through:
+/// `value` (and `observed_at`, whose type 04 §2 does not define yet) is kept as JSON.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Evidence {
     pub kind: EvidenceKind,
@@ -84,7 +89,11 @@ pub struct Evidence {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_refs: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<UnknownReason>,
 }
@@ -100,25 +109,46 @@ impl<'de> Deserialize<'de> for Evidence {
             #[serde(default)]
             source_ref: Option<String>,
             #[serde(default)]
+            observed_at: Option<serde_json::Value>,
+            #[serde(default)]
             rule_id: Option<String>,
+            #[serde(default)]
+            source_refs: Option<Vec<String>>,
             #[serde(default)]
             reason: Option<UnknownReason>,
         }
         let r = Raw::deserialize(d)?;
+        let has_value = r.value.is_some();
+        let confirmed_fields = r.source_ref.is_some() || r.observed_at.is_some();
+        let inferred_fields = r.rule_id.is_some() || r.source_refs.is_some();
         let ok = match r.kind {
-            EvidenceKind::Unknown => r.reason.is_some() && r.value.is_none(),
-            _ => r.value.is_some(),
+            EvidenceKind::Confirmed => {
+                has_value && r.source_ref.is_some() && !inferred_fields && r.reason.is_none()
+            }
+            EvidenceKind::Inferred => {
+                has_value
+                    && r.rule_id.is_some()
+                    && r.source_refs.is_some()
+                    && !confirmed_fields
+                    && r.reason.is_none()
+            }
+            EvidenceKind::Unknown => {
+                r.reason.is_some() && !has_value && !confirmed_fields && !inferred_fields
+            }
         };
         if !ok {
             return Err(serde::de::Error::custom(
-                "Evidence: unknown needs reason and no value; confirmed / inferred need value",
+                "Evidence: confirmed needs {value, source_ref, observed_at?}; \
+                 inferred needs {value, rule_id, source_refs}; unknown needs {reason} only",
             ));
         }
         Ok(Evidence {
             kind: r.kind,
             value: r.value,
             source_ref: r.source_ref,
+            observed_at: r.observed_at,
             rule_id: r.rule_id,
+            source_refs: r.source_refs,
             reason: r.reason,
         })
     }

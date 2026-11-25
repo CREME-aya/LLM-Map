@@ -32,7 +32,7 @@
     },
     "EvidenceKind": { "enum": ["confirmed", "inferred", "unknown"] },
     "Evidence": {
-      "description": "Evidence<T> flattened form from draft #13. value type is constrained by the referencing schema. TODO(schema-v1): 04 §2 has richer per-variant fields (observed_at, source_refs[]); reconcile.",
+      "description": "Evidence<T> (04 §2), flattened and tagged by kind: confirmed {value, source_ref, observed_at?} | inferred {value, rule_id, source_refs[]} | unknown {reason}. Each kind takes only its own fields. value type is constrained by the referencing schema. TODO(schema-v1): observed_at type is not defined in 04 §2 (left unconstrained).",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind"],
@@ -40,13 +40,21 @@
         "kind": { "$ref": "#/$defs/EvidenceKind" },
         "value": {},
         "source_ref": { "type": "string" },
+        "observed_at": {},
         "rule_id": { "type": "string" },
+        "source_refs": { "type": "array", "items": { "type": "string" } },
         "reason": { "enum": ["missing", "conflict", "direction_unclear", "version_mismatch"] }
       },
-      "allOf": [
-        { "if": { "properties": { "kind": { "const": "unknown" } } },
-          "then": { "required": ["reason"], "not": { "required": ["value"] } },
-          "else": { "required": ["value"] } }
+      "oneOf": [
+        { "properties": { "kind": { "const": "confirmed" } },
+          "required": ["value", "source_ref"],
+          "not": { "anyOf": [ { "required": ["rule_id"] }, { "required": ["source_refs"] }, { "required": ["reason"] } ] } },
+        { "properties": { "kind": { "const": "inferred" } },
+          "required": ["value", "rule_id", "source_refs"],
+          "not": { "anyOf": [ { "required": ["source_ref"] }, { "required": ["observed_at"] }, { "required": ["reason"] } ] } },
+        { "properties": { "kind": { "const": "unknown" } },
+          "required": ["reason"],
+          "not": { "anyOf": [ { "required": ["value"] }, { "required": ["source_ref"] }, { "required": ["observed_at"] }, { "required": ["rule_id"] }, { "required": ["source_refs"] } ] } }
       ]
     },
     "ErrorCode": {

@@ -311,8 +311,13 @@ fn route_commit_loads_the_bundle() {
             ));
             assert_eq!(v["error"]["code"], "E_SCHEMA", "{rev}: {v}");
         }
-        // right guard, bundle trip_revision / graph_version differing from the current → E_STALE
-        for (field, value) in [("trip_revision", "4"), ("graph_version", "jp-2026.12.0")] {
+        // right guard, bundle trip_id / trip_revision / graph_version differing from the
+        // current → E_STALE
+        for (field, value) in [
+            ("trip_id", "t-other"),
+            ("trip_revision", "4"),
+            ("graph_version", "jp-2026.12.0"),
+        ] {
             let mut other = req.clone();
             other["expected_route_key"] = rk.clone();
             other["bundle"]["route_key"][field] = value.into();

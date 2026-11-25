@@ -288,6 +288,38 @@ fn bundle_trip_revision_or_graph_version_mismatch_is_stale() {
     assert_eq!(k2.route_revision.0, 2);
 }
 
+/// 02 §2.1 #9 (same treatment as trip_revision / graph_version): while a route is current,
+/// a bundle whose trip_id differs from it is E_STALE even with the right guard (nothing
+/// replaced). The first route may carry any trip_id.
+#[test]
+fn bundle_trip_id_mismatch_is_stale() {
+    let mut s = Session::new(SessionConfig::default());
+    let mut first = bundle_rev(0, None, None);
+    first.route_key.trip_id = "trip-a".into();
+    for leg in &mut first.legs {
+        for m in &mut leg.maneuvers {
+            m.id.route_key = first.route_key.clone();
+        }
+    }
+    let k1 = commit_key(&mut s, None, first.clone());
+    assert_eq!(k1.trip_id, "trip-a");
+    let mut other = first.clone();
+    other.route_key.trip_id = "trip-b".into();
+    for leg in &mut other.legs {
+        for m in &mut leg.maneuvers {
+            m.id.route_key = other.route_key.clone();
+        }
+    }
+    assert_eq!(
+        commit(&mut s, Some(k1.clone()), other),
+        Err(ErrorCode::Stale)
+    );
+    assert_eq!(s.route().unwrap().route_key, k1, "nothing replaced");
+    let k2 = commit_key(&mut s, Some(k1), first);
+    assert_eq!(k2.trip_id, "trip-a");
+    assert_eq!(k2.route_revision.0, 2);
+}
+
 /// Order of the checks: guard (E_STALE) before the revision (E_SCHEMA) before trip / graph
 /// (E_STALE) before the body (E_SCHEMA).
 #[test]

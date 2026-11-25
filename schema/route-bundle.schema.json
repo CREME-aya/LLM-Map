@@ -51,7 +51,7 @@
               "const": "0"
             }
           },
-          "description": "Key of this (new) route with route_revision \"0\" (team decision 2026-11-26): Rust assigns current + 1 (the first route of a session: 1), rewrites this key and every ManeuverId.route_key of the bundle to it, and returns it in the dc_route_commit result. Any other revision is E_SCHEMA. While a route is current, trip_revision / graph_version must equal the current route's (E_STALE)."
+          "description": "Key of this (new) route with route_revision \"0\" (team decision 2026-11-26): Rust assigns current + 1 (the first route of a session: 1), rewrites this key and every ManeuverId.route_key of the bundle to it, and returns it in the dc_route_commit result. Any other revision is E_SCHEMA. While a route is current, trip_id / trip_revision / graph_version must equal the current route's (E_STALE)."
         },
         "eta_ms": {
           "$ref": "#/$defs/U32",

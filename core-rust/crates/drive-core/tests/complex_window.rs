@@ -29,7 +29,9 @@ fn ev(kind: &str, value: Value) -> Evidence {
     let v = match kind {
         "unknown" => json!({"kind": "unknown", "reason": "missing"}),
         "confirmed" => json!({"kind": "confirmed", "value": value, "source_ref": "t"}),
-        _ => json!({"kind": "inferred", "value": value, "rule_id": "r"}),
+        _ => {
+            json!({"kind": "inferred", "value": value, "rule_id": "r", "source_refs": ["osm:way/1"]})
+        }
     };
     serde_json::from_value(v).unwrap()
 }

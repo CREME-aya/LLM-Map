@@ -216,6 +216,72 @@ fn rust_mirror_agrees_on_avoid_offer() {
     );
 }
 
+/// `Evidence` (04 §2): every `evidence` in the candidate-facts fixtures and every Evidence
+/// of a Maneuver in the valid fixtures is accepted by serde exactly when the schema accepts
+/// it, and round-trips unchanged. `source_refs` / `observed_at` are carried through.
+#[test]
+fn rust_mirror_agrees_on_evidence() {
+    use contracts::horizon::{Evidence, EvidenceKind};
+    let ev_schema = compile_doc(
+        "Evidence",
+        &serde_json::json!({ "$ref": format!("{BASE}common.schema.json#/$defs/Evidence") }),
+    );
+    let mut checked = 0;
+    for kind in ["valid", "invalid"] {
+        for (_, path) in fixtures(kind) {
+            let f = path.file_name().unwrap().to_string_lossy().to_string();
+            if !f.starts_with("candidate-facts.") {
+                continue;
+            }
+            let v = load(&path);
+            for j in v["junctions"].as_array().unwrap() {
+                let raw = j["evidence"].clone();
+                let schema_ok = ev_schema.is_valid(&raw);
+                let serde = serde_json::from_value::<Evidence>(raw.clone());
+                assert_eq!(serde.is_ok(), schema_ok, "{f}: {raw}");
+                if let Ok(e) = serde {
+                    assert_eq!(serde_json::to_value(&e).unwrap(), raw, "{f}");
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked >= 9, "{checked}");
+
+    let dir = schema_dir().join("fixtures/valid");
+    let bundle = load(&dir.join("route-bundle.min.json"));
+    let m0 = &bundle["legs"][0]["maneuvers"][0];
+    let w: Evidence = serde_json::from_value(m0["approach_width_mm"].clone()).unwrap();
+    assert_eq!(w.kind, EvidenceKind::Inferred);
+    assert_eq!(
+        w.source_refs.as_deref(),
+        Some(&["osm:way/1".to_string()][..])
+    );
+    let horizon = load(&dir.join("maneuver-horizon.min.json"));
+    let raw = horizon["upcoming"][0]["maneuver"]["approach_width_mm"].clone();
+    let typed: Evidence = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&typed).unwrap(), raw);
+
+    let observed: Evidence = serde_json::from_value(serde_json::json!(
+        {"kind":"confirmed","value":"absent","source_ref":"osm:node/2","observed_at":1764115200}))
+    .unwrap();
+    assert_eq!(observed.observed_at, Some(serde_json::json!(1764115200)));
+    for bad in [
+        serde_json::json!({"kind":"unknown","reason":"missing","source_refs":[]}),
+        serde_json::json!({"kind":"unknown","reason":"missing","rule_id":"r"}),
+        serde_json::json!({"kind":"unknown","reason":"missing","observed_at":1}),
+        serde_json::json!({"kind":"confirmed","value":1,"source_ref":"s","reason":"missing"}),
+        serde_json::json!({"kind":"inferred","value":1,"rule_id":"r","source_refs":[],"observed_at":1}),
+        serde_json::json!({"kind":"inferred","value":1,"rule_id":"r","source_refs":[],"extra":1}),
+    ] {
+        assert!(!ev_schema.is_valid(&bad), "schema accepts {bad}");
+        assert!(
+            serde_json::from_value::<Evidence>(bad.clone()).is_err(),
+            "serde accepts {bad}"
+        );
+    }
+}
+
 // ---- tick.schema.json ⇔ contracts::tick ------------------------------------------------
 
 mod tick {

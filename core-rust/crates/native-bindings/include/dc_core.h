@@ -60,7 +60,7 @@ typedef struct dc_session dc_session;
           *      bundle.route_key.route_revision (and every ManeuverId.route_key) must be "0"
           *      -> otherwise E_SCHEMA. Rust assigns current + 1 (the first route: 1) and
           *      rewrites the bundle's route_keys to it. While a route is current, the bundle's
-          *      trip_revision / graph_version must equal it -> otherwise E_STALE.
+          *      trip_id / trip_revision / graph_version must equal it -> otherwise E_STALE.
           *      Nothing is replaced on any error.
           *      bundle = {route_key (new, route_revision "0"), eta_ms, length_cm, legs[{leg_index, along_route_start_cm,
           *      length_cm, chunks[{first_shape_index, origin_e7{lat,lon}, k_lat_q16, k_lon_q16,

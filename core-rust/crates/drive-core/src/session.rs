@@ -292,13 +292,12 @@ impl Session {
     /// current + 1): the bundle always carries `route_revision` "0" (`E_SCHEMA` otherwise)
     /// and Rust assigns current + 1 (the first route of the session: 1). The assigned key
     /// replaces the bundle's `route_key` and every `ManeuverId.route_key` in it, and is
-    /// returned in the result. While a route is current, the bundle's `trip_revision` and
-    /// `graph_version` must equal the current route's (`E_STALE` otherwise; 06 §3: the
-    /// route in progress stays pinned to its graph version). Order of checks: guard
-    /// (`E_STALE`), revision "0" (`E_SCHEMA`), trip / graph (`E_STALE`), bundle body
-    /// (`E_SCHEMA`); nothing is replaced on any error.
-    /// TODO(02 §2.1 / 04 §3): `trip_id` of the bundle is not compared with the current
-    /// route (only the guard compares it); a re-plan with a new `trip_revision` cannot
+    /// returned in the result. While a route is current, the bundle's `trip_id`,
+    /// `trip_revision` and `graph_version` must equal the current route's (`E_STALE`
+    /// otherwise; 06 §3: the route in progress stays pinned to its graph version). Order of
+    /// checks: guard (`E_STALE`), revision "0" (`E_SCHEMA`), trip_id / trip_revision /
+    /// graph_version (`E_STALE`), bundle body (`E_SCHEMA`); nothing is replaced on any error.
+    /// TODO(02 §2.1 / 04 §3): a re-plan with a new `trip_id` / `trip_revision` cannot
     /// replace the current route through this entry.
     pub fn route_commit(
         &mut self,
@@ -318,6 +317,15 @@ impl Session {
         let revision = match &self.current_route_key {
             None => 1,
             Some(cur) => {
+                if bundle_key.trip_id != cur.trip_id {
+                    return Err(CoreError::new(
+                        ErrorCode::Stale,
+                        format!(
+                            "bundle trip_id {} != current {}",
+                            bundle_key.trip_id, cur.trip_id
+                        ),
+                    ));
+                }
                 if bundle_key.trip_revision != cur.trip_revision {
                     return Err(CoreError::new(
                         ErrorCode::Stale,

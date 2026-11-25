@@ -5,7 +5,7 @@
      "crossing":{"kind":"confirmed","value":"across_oncoming","source_ref":"osm:way/1"},
      "approach_signal":{"kind":"unknown","reason":"missing"},
      "right_turn_protection":{"kind":"unknown","reason":"missing"},
-     "approach_width_mm":{"kind":"inferred","value":5500,"rule_id":"w-1"},
+     "approach_width_mm":{"kind":"inferred","value":5500,"rule_id":"w-1","source_refs":["osm:way/1"]},
      "departure_width_mm":{"kind":"unknown","reason":"missing"},"advisory_flags":[]},
    "avoid_offer":{"offer_id":"o1","alt_route_id":"c2","delta_eta_ms":90000,"decision_deadline_monotonic_ms":120000,
      "summary":{"template_id":"avoid.right.v1","delta_eta_ms":90000,"avoided":{"unprotected_right":1,"narrow_m":0}}}},
