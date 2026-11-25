@@ -70,7 +70,7 @@ Round 5〜6 の 3 者協議により、「1 人＋AI コーディングでの完
 | 2 | `dc_buf_free` | Rust が確保した出力 `dc_out` を解放 |
 | 3 | `dc_session_new` | 走行セッションを作成 |
 | 4 | `dc_session_free` | 走行セッションを破棄 |
-| 5 | `dc_plan_candidates` | `TripPlanSnapshot` から探索要求の一覧を作る（[03 §3.1](03-routing-and-two-layer-control.md)）。※ 現状は session を受け取らず、session の計画処理（距離区分の固定・比較探索の待ち行列）へのつなぎ込みは未実装。**`dc_plan_candidates(h, req)` へ ABI を変更中**（12 関数のまま。担当: claudeちゃんコード） |
+| 5 | `dc_plan_candidates(s, req)` | `req = {now_mono_ms, eta_estimate_s?, snapshot: TripPlanSnapshot}`。session の計画処理（`plan_request_id` と距離区分の固定、候補の待ち行列）を始め、探索要求の一覧と `planner_cmds` を返す（[03 §3.1](03-routing-and-two-layer-control.md)） |
 | 6 | `dc_rank` | 候補の事実を L1/L2 で採点し、迂回上限で絞って比較表を作る（迂回上限は `dc_avoid_offer_eval` と同じ関数。[03 §3.2](03-routing-and-two-layer-control.md)） |
 | 7 | `dc_validate_override` | 1 行命令コードを解析・検証・展開し `Applied` / `Rejected` を返す（下記・[03 §4.1・§4.2](03-routing-and-two-layer-control.md)） |
 | 8 | `dc_trip_score` | ルート確定時に旅判定スコアを計算する（旅モード C01 を提示するかの判定。到着後の評価ではない。[05 §6.1](05-inference-tier-and-audio.md)） |
