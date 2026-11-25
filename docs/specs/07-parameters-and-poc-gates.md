@@ -115,6 +115,8 @@ t3 の「原子コミット」は Rust の commit{r2, route_key} → Kotlin の 
 - 30:00 → `long`（10 s）
 - 直前の計画は `short` だったが、逸脱後に残り ETA が失効 → `long`（旧区分を引き継がない）
 
+`commit` の版ずれ：`commit{r2, route_key}` を出した後、`dc_route_commit` を呼ぶ前に経路が差し替わる → `dc_route_commit` は `E_STALE`、遅れた経路由来の `horizon` 更新・発話 **0**
+
 ### 2.5 Gate 4 / 7 共通: 提案差し替え系テスト（`pending_offer`）
 
 確定入口と承認時の `target_id` 再検証は [03 §4.2](03-routing-and-two-layer-control.md)。以下の 3 ケースすべてで **経路変更 0・古い案内発話 0**。
