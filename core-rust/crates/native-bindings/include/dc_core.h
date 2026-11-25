@@ -68,7 +68,12 @@ typedef struct dc_session dc_session;
           *             // (-> engine_stuck); an ok returned after cancel is discarded_late,
           *             // after engine_stuck discarded_after_stuck
           *       | engine_reset }
-          * out: {horizon? (only when frame_seq changed), voice_cmds[], ui_cmds[],
+          * out: {horizon? (only when frame_seq changed),
+          *       voice_cmds[speak{token, priority: p0|p1|p2|p3, template_id, params{name: int}}
+          *                 | stop{token}],
+          *       ui_cmds[show_checking_route | search_result_ready{req_id, facts_ref}
+          *              | show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}
+          *              | dismiss{target_id, reason: expired|cancelled|route_changed|superseded}],
           *       planner_cmds[start{req_id, priority, distance_class: short|long, route_key,
           *                    graph_version, candidate_id?} | cancel{req_id}
           *                  | rank{plan_request_id, facts_refs[], reason: all_done|budget_expired}],

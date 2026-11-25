@@ -96,7 +96,7 @@ fn cancel_then_reroute() {
             req_id: "r1".into()
         }]
     );
-    assert_eq!(o[1].ui_cmds, vec![UiCmd::ShowCheckingRoute]);
+    assert_eq!(o[1].ui_cmds, vec![UiCmd::ShowCheckingRoute {}]);
     // t2: r1 ok after cancel → discarded, slot freed → start r2
     assert!(whats(&o[2]).contains(&"discarded_late"));
     assert!(
@@ -129,7 +129,7 @@ fn timeout_engine_stuck_keeps_slot_until_native_returns() {
     assert_eq!(o[1].next_wake_mono_ms, Some(11_000));
     // Rust detects the deadline from now_mono_ms (no timeout event from Kotlin)
     assert!(whats(&o[2]).contains(&"engine_stuck"));
-    assert_eq!(o[2].ui_cmds, vec![UiCmd::ShowCheckingRoute]);
+    assert_eq!(o[2].ui_cmds, vec![UiCmd::ShowCheckingRoute {}]);
     assert!(o[2].planner_cmds.is_empty());
     assert_eq!(
         o[2].next_wake_mono_ms, None,
@@ -437,5 +437,5 @@ fn priority_order_reroute_explicit_plan_avoid_chip_comparison() {
             req_id: "r1".into()
         }]
     );
-    assert_eq!(o.ui_cmds, vec![UiCmd::ShowCheckingRoute]);
+    assert_eq!(o.ui_cmds, vec![UiCmd::ShowCheckingRoute {}]);
 }

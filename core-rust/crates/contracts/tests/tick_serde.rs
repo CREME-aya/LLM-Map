@@ -105,7 +105,7 @@ fn enums_are_snake_case_on_the_wire() {
     assert_eq!(v["priority"], "avoid_chip");
     assert_eq!(v["distance_class"], "short");
     assert_eq!(
-        serde_json::to_value(UiCmd::ShowCheckingRoute).unwrap()["ui"],
+        serde_json::to_value(UiCmd::ShowCheckingRoute {}).unwrap()["ui"],
         "show_checking_route"
     );
     assert_eq!(

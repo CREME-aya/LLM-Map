@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://slm-map.invalid/schema/tick.schema.json",
   "title": "dc_tick v2 (TickInput / Event / TickOutput)",
-  "description": "dc_tick v2 contract. Canonical: docs v1.2 ADR-0008 (decisions 2/3/6) and 03 §3.1. Mirrors contracts::tick (core-rust). *_mono_ms are JSON integers; enum values snake_case; reroute_result / search_cancelled are abolished (search_finished is the only terminal event); search_finished.outcome has no timeout. The root accepts either a TickInput or a TickOutput; validate against #/$defs/<Name> for a specific type. TODO(schema-v1): token / utterance_id / reason / tier value types, VoiceCmd shape, UiCmd catalogue and the PlannerCmd tag name `cmd` are provisional.",
+  "description": "dc_tick v2 contract. Canonical: docs v1.2 ADR-0008 (decisions 2/3/6) and 03 §3.1. Mirrors contracts::tick (core-rust). *_mono_ms are JSON integers; enum values snake_case; reroute_result / search_cancelled are abolished (search_finished is the only terminal event); search_finished.outcome has no timeout. The root accepts either a TickInput or a TickOutput; validate against #/$defs/<Name> for a specific type. TODO(schema-v1): token / utterance_id / reason / tier value types, the tag names `cmd` / `ui` / `voice` and the VoiceCmd token encoding are provisional; VoiceCmd / UiCmd hold only what docs v1.2 names (05 §5, 04 §4.3, 05 §3.2, ADR-0007).",
   "anyOf": [
     {
       "$ref": "#/$defs/TickInput"
@@ -496,8 +496,9 @@
         },
         "voice_cmds": {
           "type": "array",
-          "items": {},
-          "description": "TODO(schema-v1): VoiceCmd shape not specified."
+          "items": {
+            "$ref": "#/$defs/VoiceCmd"
+          }
         },
         "ui_cmds": {
           "type": "array",
@@ -615,7 +616,7 @@
       ]
     },
     "UiCmd": {
-      "description": "TODO(schema-v1): catalogue not specified; only what the planner emits today.",
+      "description": "Only what docs v1.2 names. Display state already in ManeuverHorizon (3-ahead cards, HorizonEntry.avoid_offer) is not repeated here: TickOutput.horizon is the single source (04 §1). TODO(schema-v1): further items are listed in core-rust/README.md.",
       "oneOf": [
         {
           "type": "object",
@@ -650,7 +651,125 @@
               ]
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ui",
+            "confirm_screen_id",
+            "override_id",
+            "expires_at_mono_ms"
+          ],
+          "description": "Present a validated override on the confirm screen Kotlin opened, only while route_key matches and the screen is valid (05 §3.2). Confirmation itself only comes from dict yes / user_tap (ADR-0007). expires_at_mono_ms = Applied.expires_at_mono_ms (03 §4.2: <= 30 s).",
+          "properties": {
+            "ui": {
+              "const": "show_confirm"
+            },
+            "confirm_screen_id": {
+              "type": "string"
+            },
+            "override_id": {
+              "type": "string"
+            },
+            "expires_at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ui",
+            "target_id",
+            "reason"
+          ],
+          "description": "Remove a shown item now. target_id uses the user_tap namespace: AvoidOffer.offer_id | override_id | confirm_screen_id (ADR-0008).",
+          "properties": {
+            "ui": {
+              "const": "dismiss"
+            },
+            "target_id": {
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/$defs/DismissReason"
+            }
+          }
         }
+      ]
+    },
+    "DismissReason": {
+      "description": "expired = deadline passed (04 §4.3, 05 §3.2); cancelled = 取消 / CXL; route_changed = route updated meanwhile (05 §3.2); superseded = replaced by a newer proposal, consent never carries over (ADR-0007).",
+      "enum": [
+        "expired",
+        "cancelled",
+        "route_changed",
+        "superseded"
+      ]
+    },
+    "VoiceCmd": {
+      "description": "Instruction to Kotlin's single TTS queue (05 §5). No text: Kotlin renders template_id + numeric params with the same template as the screen (04 §2, ADR-0007 decision 8).",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "voice",
+            "token",
+            "priority",
+            "template_id",
+            "params"
+          ],
+          "properties": {
+            "voice": {
+              "const": "speak"
+            },
+            "token": {
+              "type": "string",
+              "description": "Opaque utterance_token {route_key, event_id, generation} (05 §5); tts_* events echo it. TODO(schema-v1): encoding."
+            },
+            "priority": {
+              "$ref": "#/$defs/VoicePriority"
+            },
+            "template_id": {
+              "type": "string"
+            },
+            "params": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "voice",
+            "token"
+          ],
+          "description": "Silence now; Kotlin must not wait for onStop before the next P1 (05 §5).",
+          "properties": {
+            "voice": {
+              "const": "stop"
+            },
+            "token": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "VoicePriority": {
+      "description": "P0 > P1 > P2 > P3, highest first (05 §5).",
+      "enum": [
+        "p0",
+        "p1",
+        "p2",
+        "p3"
       ]
     },
     "LogEvent": {

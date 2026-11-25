@@ -208,8 +208,8 @@ fn rust_mirror_agrees_on_avoid_offer() {
 mod tick {
     use super::*;
     use contracts::tick::{
-        DistanceClass, Event, LogEvent, PlannerCmd, RankReason, SearchPriority, TickInput,
-        TickOutput, UiCmd,
+        DismissReason, DistanceClass, Event, LogEvent, PlannerCmd, RankReason, SearchPriority,
+        TickInput, TickOutput, UiCmd, VoiceCmd, VoicePriority,
     };
 
     fn rk() -> contracts::RouteKey {
@@ -359,9 +359,18 @@ mod tick {
         for (next_wake, horizon) in [(None, None), (Some(u64::MAX), Some(horizon))] {
             let out = TickOutput {
                 horizon,
-                voice_cmds: vec![],
+                voice_cmds: all_voice_cmds(),
                 ui_cmds: vec![
-                    UiCmd::ShowCheckingRoute,
+                    UiCmd::ShowCheckingRoute {},
+                    UiCmd::ShowConfirm {
+                        confirm_screen_id: "s1".into(),
+                        override_id: "ov1".into(),
+                        expires_at_mono_ms: u64::MAX,
+                    },
+                    UiCmd::Dismiss {
+                        target_id: "o1".into(),
+                        reason: DismissReason::Superseded,
+                    },
                     UiCmd::SearchResultReady {
                         req_id: "r2".into(),
                         facts_ref: None,
@@ -447,6 +456,38 @@ mod tick {
             .map(|x| serde_json::from_value(x.clone()).unwrap())
             .collect();
         assert!(order.windows(2).all(|w| w[0] > w[1]), "{order:?}");
+        assert_eq!(
+            names("VoicePriority"),
+            ser([
+                VoicePriority::P0,
+                VoicePriority::P1,
+                VoicePriority::P2,
+                VoicePriority::P3
+            ]
+            .iter()
+            .map(|x| serde_json::to_value(x).unwrap())
+            .collect())
+        );
+        // P0 > P1 > P2 > P3, schema lists highest first
+        let order: Vec<VoicePriority> = doc["$defs"]["VoicePriority"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| serde_json::from_value(x.clone()).unwrap())
+            .collect();
+        assert!(order.windows(2).all(|w| w[0] > w[1]), "{order:?}");
+        assert_eq!(
+            names("DismissReason"),
+            ser([
+                DismissReason::Expired,
+                DismissReason::Cancelled,
+                DismissReason::RouteChanged,
+                DismissReason::Superseded,
+            ]
+            .iter()
+            .map(|x| serde_json::to_value(x).unwrap())
+            .collect())
+        );
         assert_eq!(
             names("SearchOutcome"),
             ser([
@@ -561,6 +602,101 @@ mod tick {
             assert!(!output.is_valid(&bad), "schema should reject {bad}");
             assert!(serde_json::from_value::<TickOutput>(bad).is_err());
         }
+    }
+
+    fn all_voice_cmds() -> Vec<VoiceCmd> {
+        let mut v: Vec<VoiceCmd> = [
+            VoicePriority::P0,
+            VoicePriority::P1,
+            VoicePriority::P2,
+            VoicePriority::P3,
+        ]
+        .into_iter()
+        .map(|priority| VoiceCmd::Speak {
+            token: "t1".into(),
+            priority,
+            template_id: "turn".into(),
+            params: [("distance_m".to_string(), 200), ("delta_eta_ms".into(), -1)]
+                .into_iter()
+                .collect(),
+        })
+        .collect();
+        v.push(VoiceCmd::Stop { token: "t0".into() });
+        v
+    }
+
+    /// Every VoiceCmd / UiCmd variant: serde output passes the schema, the schema's tag
+    /// consts equal serde's, and an unknown field is rejected by both.
+    #[test]
+    fn voice_and_ui_cmds_agree_with_schema() {
+        let doc = load(&schema_dir().join("tick.schema.json"));
+        let tags = |def: &str, tag: &str| -> Vec<String> {
+            let mut v: Vec<String> = doc["$defs"][def]["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["properties"][tag]["const"].as_str().unwrap().to_owned())
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let voice = tick_def("VoiceCmd");
+        let ui = tick_def("UiCmd");
+        let voices: Vec<Value> = all_voice_cmds()
+            .iter()
+            .map(|c| serde_json::to_value(c).unwrap())
+            .collect();
+        let uis: Vec<Value> = [
+            UiCmd::ShowCheckingRoute {},
+            UiCmd::SearchResultReady {
+                req_id: "r1".into(),
+                facts_ref: None,
+            },
+            UiCmd::ShowConfirm {
+                confirm_screen_id: "s".into(),
+                override_id: "o".into(),
+                expires_at_mono_ms: 1,
+            },
+            UiCmd::Dismiss {
+                target_id: "o".into(),
+                reason: DismissReason::Expired,
+            },
+        ]
+        .iter()
+        .map(|c| serde_json::to_value(c).unwrap())
+        .collect();
+        let serde_tags = |vals: &[Value], tag: &str| -> Vec<String> {
+            let mut v: Vec<String> = vals
+                .iter()
+                .map(|x| x[tag].as_str().unwrap().to_owned())
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        assert_eq!(tags("VoiceCmd", "voice"), serde_tags(&voices, "voice"));
+        assert_eq!(tags("UiCmd", "ui"), serde_tags(&uis, "ui"));
+        for v in &voices {
+            assert_eq!(errors(&voice, v), Vec::<String>::new(), "{v}");
+            let mut bad = v.clone();
+            bad["text"] = Value::from("raw text");
+            assert!(!voice.is_valid(&bad), "{bad}");
+            assert!(serde_json::from_value::<VoiceCmd>(bad).is_err());
+        }
+        for v in &uis {
+            assert_eq!(errors(&ui, v), Vec::<String>::new(), "{v}");
+            assert_eq!(
+                &serde_json::to_value(serde_json::from_value::<UiCmd>(v.clone()).unwrap()).unwrap(),
+                v
+            );
+            let mut bad = v.clone();
+            bad["extra"] = Value::from(1);
+            assert!(!ui.is_valid(&bad), "{bad}");
+            assert!(serde_json::from_value::<UiCmd>(bad).is_err(), "{v}");
+        }
+        // show_checking_route stays a bare tag on the wire
+        assert_eq!(uis[0], serde_json::json!({"ui": "show_checking_route"}));
     }
 
     /// `planner_cmds.start` carries a required `distance_class`; every serde Start passes
