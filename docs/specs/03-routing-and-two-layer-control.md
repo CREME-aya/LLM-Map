@@ -100,6 +100,11 @@ engine_stuck ──search_finished{req_id}──▶ Idle
 - **`facts_ref` と `rank`**: `search_finished.facts_ref` は、その探索 1 本で得た **採点前の `CandidateFacts` への参照**（`outcome=ok` のときだけ）。採点には計画の候補がすべて要るため、探索ごとには `dc_rank` を呼ばない（旧名 `comparison_ref` は廃止）。
   - Rust は、計画のすべての探索が終わったとき（`reason: all_done`）、または比較予算を超えたとき（`reason: budget_expired`）に `rank` を 1 回出す。`facts_refs` はその計画で `ok` になった探索の `facts_ref` を **要求した順** に並べたもの。空でも `rank` は出し、Kotlin の `dc_rank` は「有効候補 0 本」を理由付きで返す。
   - 予算超過時は待っている比較探索を取り消し、新しい `start` は出さない。実行中の探索は `search_finished` まで枠を占有したまま。
+  - **計画の中の探索**: Rust（`Session::plan_candidates`）が計画ごとに `plan_request_id` と `distance_class` を固定し、候補を待ち行列に積む。基準経路は `explicit_plan`、追加候補は `comparison` の優先度で、**1 本ずつ** `start` を出す。`start` には任意の `candidate_id`（計画内の `CandidateRequest` を指す。計画の外の探索では付けない）を付ける。
+  - **比較予算** = `min(距離区分の予算 3 s / 8 s, TripPlanSnapshot.budget.deadline_ms)`。`deadline_ms` は呼び出し側が予算を **短くする方向にだけ** 使え、無ければ距離区分の予算をそのまま使う。
+  - **新しい計画が来たら**、古い計画は打ち切り、古い計画の `rank` は出さない（実行中の探索は `search_finished` まで枠を占有し、戻った結果は `discarded_late`）。
+  - 計画の中の探索の `route_key.route_revision` は現状 `"0"` の仮の値（未決。経路確定前の revision の付け方を決めるまで）。
+  - **計画の外の探索（逸脱再探索・回避チップ）の `distance_class`**: 未決。案は「走行中の現経路の残り ETA が 30 分未満なら `short`、不明なら `long`」（現実装は直前の計画の区分を引き継ぎ、計画が無ければ `long`）。
   - `rank` を出した時点で Rust はその計画を **終了** とし、以後その計画の `start` を出さない。完了を知らせるイベントは無い。`rank` 後に同じ計画の `search_finished` が戻ったら `discarded_late` として記録し、枠の解放にだけ使う。
 
 - **結果を採用する条件**: `outcome=ok` **かつ** `route_key` が現行と一致 **かつ** 走行状態が `tracking` のときのみ。それ以外は破棄（表示・発話に使わない）。
