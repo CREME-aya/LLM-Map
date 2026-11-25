@@ -187,7 +187,8 @@ fn reroute_from_fix_then_commit() {
         o.planner_cmds,
         vec![PlannerCmd::Commit {
             req_id: "r1".into(),
-            route_key: b.route_key.clone()
+            route_key: b.route_key.clone(),
+            undo_req_id: None,
         }]
     );
     // slot free, still off: status off_route until the new route is committed
@@ -201,6 +202,7 @@ fn reroute_from_fix_then_commit() {
         o.planner_cmds,
         vec![PlannerCmd::Commit {
             req_id: "r2".into(),
+            undo_req_id: None,
             route_key: b.route_key.clone()
         }]
     );
@@ -232,7 +234,9 @@ fn commit_of(o: &TickOutput) -> Vec<(&str, &RouteKey)> {
     o.planner_cmds
         .iter()
         .filter_map(|c| match c {
-            PlannerCmd::Commit { req_id, route_key } => Some((req_id.as_str(), route_key)),
+            PlannerCmd::Commit {
+                req_id, route_key, ..
+            } => Some((req_id.as_str(), route_key)),
             _ => None,
         })
         .collect()

@@ -51,6 +51,12 @@ pub enum ValidateOverrideResult {
     Rejected {
         code: RejectCode,
     },
+    /// `CXL` taken as "戻して" of an avoid switch confirmed within 5 s (03 §3.1):
+    /// `commit{req_id, route_key: current}` comes with the next `dc_tick`.
+    /// TODO(abi-v1): shape provisional (team decision 2026-11-26 did not name it).
+    Undone {
+        req_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

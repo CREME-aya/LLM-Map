@@ -16,14 +16,24 @@
 //!    the offer's `route_key` still the current one, while `tracking` → `planner_cmds:
 //!    commit{req_id, route_key}` (req_id = the avoid search, route_key = the route when
 //!    it started). The deadline passing removes the offer (`dismiss{expired}`); leaving the
-//!    route removes it (`dismiss{route_changed}`).
+//!    route removes it (`dismiss{route_changed}`). The consent `commit` carries
+//!    `undo_req_id` (`undo-<req_id>`, provisional): Kotlin keeps the previous route body
+//!    under it for 5 s.
+//! 5. "戻して" (03 §3.1; team decision 2026-11-26): the divergence point is computed once,
+//!    in the `dc_route_commit` that loads the consented avoid route (Rust then has both the
+//!    old route and the new bundle), from the position when the search started
+//!    ([`divergence_cm`]); it is kept in the [`UndoWindow`]. `user_tap{offer_id, undo}` or
+//!    `CXL` (`dc_validate_override`): more than 5 s after consent → `NO_PENDING_TARGET`;
+//!    divergence unknown, avoid route not loaded yet, position not `tracking` (e.g.
+//!    `uncertain`), or at / past the divergence point → `NO_EFFECT`; otherwise
+//!    `commit{req_id: undo_req_id, route_key: current}` and any held result is dropped.
+//!    A refusal also speaks [`UNDO_UNAVAILABLE_TEMPLATE_ID`] once.
 //!
 //! Disabled by default: "停止遅延を実測するまでは、走行中の回避チップ先読みは無効（既定）"
 //! (04 §4.3 item 6, 03 §3.1); `SessionConfig::avoid_chip_lookahead` turns it on.
 //!
 //! TODO(04 §4.3): not built yet — consent by the dictionary "はい" (`asr_result.dict_norm`;
-//! the dictionary values are not specified), undo within 5 s ("戻して" / `CXL`; the docs
-//! only have a proposal), the voice preannouncement about 60 s before (max 5 per trip; no
+//! the dictionary values are not specified), the voice preannouncement about 60 s before (max 5 per trip; no
 //! voice scheduler yet), skipping spots accepted in the pre-departure comparison (item 4;
 //! that state is not passed to Rust), cancelling a search that outlives the 1.5 s budget,
 //! checking that the alternative really avoids the target (the bundle has no edge ids per
@@ -104,6 +114,8 @@ pub struct AvoidConfig {
     pub deadline_before_ms: u64,
     /// "到達約 120 秒前" trigger, compared with `earliest`.
     pub trigger_eta_ms: u64,
+    /// "戻して" window after consent (5 s; 04 §4.3 item 3, 03 §3.1).
+    pub undo_window_ms: u64,
 }
 
 impl Default for AvoidConfig {
@@ -113,6 +125,7 @@ impl Default for AvoidConfig {
             budget_ms: 1_500,
             deadline_before_ms: 20_000,
             trigger_eta_ms: 120_000,
+            undo_window_ms: 5_000,
         }
     }
 }
@@ -127,6 +140,86 @@ pub struct AvoidTarget {
     /// Remaining ETA on the current route when the search started (`base_eta`, 03 §3.2).
     pub base_eta_ms: u64,
     pub avoided: Avoided,
+    /// Matched position on the current route when the search started (`along_route_cm`):
+    /// the origin of the divergence search (03 §3.1 "探索開始時の位置").
+    pub start_progress_cm: u32,
+}
+
+/// Consent given (`commit` issued), the avoid route not loaded yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Consent {
+    pub offer_id: String,
+    pub undo_req_id: String,
+    /// The route the avoid search started on (= the consent `commit`'s `route_key`).
+    pub from_route_key: RouteKey,
+    pub start_progress_cm: u32,
+    pub consent_at_mono_ms: u64,
+}
+
+/// The consented avoid route is current; "戻して" is possible until the window ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoWindow {
+    pub offer_id: String,
+    pub undo_req_id: String,
+    /// The avoid route's key (assigned by `dc_route_commit`).
+    pub route_key: RouteKey,
+    pub consent_at_mono_ms: u64,
+    /// Divergence point on the avoid route (`along_route_cm`); `None` = unknown (no undo).
+    pub divergence_cm: Option<u32>,
+}
+
+/// Where the consent stands for "戻して".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UndoState {
+    None,
+    Consented(Consent),
+    Window(UndoWindow),
+}
+
+/// Provisional id of the previous route body Kotlin keeps for the undo (team decision
+/// 2026-11-26).
+pub fn undo_req_id(avoid_req_id: &str) -> String {
+    format!("undo-{avoid_req_id}")
+}
+
+/// Provisional template id of the short phrase spoken when "戻して" is refused
+/// (`NO_EFFECT` / `NO_PENDING_TARGET`; 03 §3.1). TODO(04 §2 / 05 §5): not named in docs.
+pub const UNDO_UNAVAILABLE_TEMPLATE_ID: &str = "undo_unavailable";
+
+/// Divergence point of the avoid route from the original one (03 §3.1 steps 1–3), as
+/// `along_route_cm` on the avoid route. Edges are `(directed edge_id, along_start,
+/// along_end)` in route order ([`crate::route::LoadedRoute::edge_spans`]).
+/// 1. The avoid route's first edge (it starts mid-edge, at the search-start position) is
+///    looked up among the original edges ahead of `start_progress_cm` (an edge ending after
+///    it, so the one the vehicle was on counts; not the current position: the vehicle
+///    moved during the search).
+/// 2. From that match both sequences are compared forward by edge id; the first avoid
+///    edge that differs is the divergence point (its `along_start`). Running past the end
+///    of the original route also counts as a difference.
+/// 3. No match, more than one match (a looping route), or no difference at all → `None`.
+pub fn divergence_cm(
+    original: &[(u64, u32, u32)],
+    avoid: &[(u64, u32, u32)],
+    start_progress_cm: u32,
+) -> Option<u32> {
+    let first = avoid.first()?.0;
+    let mut matches = original
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.2 > start_progress_cm && e.0 == first)
+        .map(|(i, _)| i);
+    let at = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let mut k = 1;
+    loop {
+        let a = avoid.get(k)?;
+        match original.get(at + k) {
+            Some(o) if o.0 == a.0 => k += 1,
+            _ => return Some(a.1),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,5 +334,39 @@ mod tests {
         assert!(p.within(600_000, 780_000, false));
         assert!(!p.within(600_000, 780_001, false));
         assert!(p.within(600_000, 500_000, false));
+    }
+
+    fn spans(ids: &[u64], start: u32, len: u32) -> Vec<(u64, u32, u32)> {
+        ids.iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let i = i as u32;
+                (*id, start + i * len, start + (i + 1) * len)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn divergence_point_rules() {
+        // original A B1 B2 C, edges of 100; search started at 150 (in B1)
+        let orig = spans(&[1, 2, 3, 4], 0, 100);
+        // avoid: B1 (partial 50) B2 D → diverges at its own along 150
+        let avoid = vec![(2, 0, 50), (3, 50, 150), (9, 150, 250)];
+        assert_eq!(divergence_cm(&orig, &avoid, 150), Some(150));
+        // first edge not ahead of the start position (B1 ended at 200 <= 200)
+        assert_eq!(divergence_cm(&orig, &avoid, 200), None);
+        // not found
+        assert_eq!(divergence_cm(&orig, &[(7, 0, 50)], 150), None);
+        // found twice ahead (loop) → unknown
+        let looped = spans(&[1, 2, 3, 2, 5], 0, 100);
+        assert_eq!(divergence_cm(&looped, &avoid, 150), None);
+        // an occurrence behind the start position does not count
+        let behind = spans(&[2, 2, 3, 4], 0, 100);
+        assert_eq!(divergence_cm(&behind, &avoid, 150), Some(150));
+        // identical → unknown; avoid longer than the original → first extra edge
+        assert_eq!(divergence_cm(&orig, &[(2, 0, 50), (3, 50, 150)], 150), None);
+        let longer = vec![(3, 0, 50), (4, 50, 150), (8, 150, 200)];
+        assert_eq!(divergence_cm(&orig, &longer, 250), Some(150));
+        assert_eq!(divergence_cm(&orig, &[], 0), None);
     }
 }

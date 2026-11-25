@@ -51,6 +51,18 @@ and only `user_tap{target_id: offer_id, action: avoid}` before the deadline (whi
 same route_key) issues `commit` (`drive_core::avoid`; look-ahead off by default,
 `avoid_chip_lookahead`, 04 §4.3 item 6). The deadline removes it with `dismiss{expired}`. "経路を確認中" for a search in
 progress is `horizon.status` (`off_route` / `rerouting`), not a per-result UiCmd.
+"戻して" (03 §3.1; team decision 2026-11-26): the consent `commit` carries `undo_req_id`
+(`undo-<req_id>`, provisional) and Kotlin keeps the previous route body under it for 5 s. The
+divergence point is computed once, in the `dc_route_commit` that loads the avoid route (docs
+say at `AvoidOffer` creation; same result since an undo needs that commit first), from the
+position when the avoid search started (`avoid::divergence_cm`; not found / ambiguous →
+unknown). `user_tap{offer_id, undo}` or `CXL` (`dc_validate_override` → `{result: undone,
+req_id}`, commit with the next tick): > 5 s after consent → `NO_PENDING_TARGET`; unknown
+divergence, avoid route not loaded yet, not `tracking` (`uncertain`), or at / past the
+divergence point → `NO_EFFECT`; else `commit{req_id: undo_req_id, route_key: current}` and the
+held result is dropped. Kotlin passes the held body with `route_revision` "0" (Rust: current
++ 1; the revision it carried is `E_SCHEMA`). A refusal speaks `undo_unavailable` (P2, no params;
+template id provisional) once.
 A committable `ok` that returns while `uncertain` is held (one at most; a newer one replaces it,
 `discarded_hold_replaced`) and its `commit` is issued when the status is back to `tracking` /
 `off_route` / `rerouting` and the route_key still matches; after `commit_hold_ms` (config,
@@ -100,7 +112,7 @@ what docs v1.2 names:
 Not defined because docs do not (TODO, needs a docs decision first):
 - `show_avoid_offer` / `horizon_update`: the chip (`HorizonEntry.avoid_offer`) and the 3-ahead
   cards come from `TickOutput.horizon`, the single source (04 §1); a separate UiCmd would duplicate it.
-- The 5 s undo window after an avoid switch ("戻して", 04 §4.3 item 3) and the crossfade switch itself.
+- The crossfade switch of an avoid chip (04 §4.3 item 3).
 - "あとで見る" save of an interrupted P3 commentary (05 §6, ADR-0006).
 - Thermal / low-memory degradation notices (05 §3.1), Tier 0 fallback chips after an SLM timeout (05 §3.2).
 - The `utterance_token {route_key, event_id, generation}` encoding (string today, same as `tts_*{token}`),

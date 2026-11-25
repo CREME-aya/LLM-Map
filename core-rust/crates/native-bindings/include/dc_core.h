@@ -97,7 +97,7 @@ typedef struct dc_session dc_session;
           *       planner_cmds[start{req_id, priority, distance_class: short|long, route_key,
           *                    graph_version, candidate_id?, fix?} | cancel{req_id}
           *                  | rank{plan_request_id, facts_refs[], reason: all_done|budget_expired}
-          *                  | commit{req_id, route_key}],
+          *                  | commit{req_id, route_key, undo_req_id?}],
           *   "経路を確認中" is horizon.status off_route / rerouting (show_checking_route is abolished).
           *   start.fix: for a reroute, the fix that confirmed off-route (Rust aligns the vehicle on
           *   the committed route only; Valhalla searches the road network from that position).
@@ -106,6 +106,12 @@ typedef struct dc_session dc_session;
           *   dc_route_commit with that search's route body (never for plan candidates). For an
           *   avoid_chip search only after consent: user_tap{target_id: offer_id, action: avoid}
           *   before the offer's deadline, while tracking, route_key unchanged (04 §4.3, 03 §3.1).
+          *   That consent commit carries undo_req_id ("undo-<req_id>", provisional): keep the
+          *   route body current until then for 5 s under it. "戻して" (user_tap{offer_id, undo}
+          *   or CXL via dc_validate_override → {result: undone, req_id}) within 5 s and before
+          *   the divergence point → commit{req_id: undo_req_id, route_key: current}: pass the
+          *   held body with route_revision set back to "0". Refused (NO_EFFECT /
+          *   NO_PENDING_TARGET) → one speak{template_id: undo_unavailable}.
           *   rank: once per plan; Kotlin calls dc_rank with the CandidateFacts behind facts_refs
           *   (may be empty). The plan is over: no more start for it, a late search_finished
           *   only frees the slot (discarded_late).

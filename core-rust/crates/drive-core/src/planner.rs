@@ -248,6 +248,20 @@ impl SearchPlanner {
         self.held = new;
     }
 
+    /// Drops a held result (`discarded_hold_<why>`): "戻して" discards pending results
+    /// before going back (03 §3.1).
+    pub fn discard_held(&mut self, at: u64, why: &str, fx: &mut Effects) {
+        if let Some(h) = self.held.take() {
+            log(
+                fx,
+                at,
+                &format!("discarded_hold_{why}"),
+                Some(&h.req_id),
+                None,
+            );
+        }
+    }
+
     /// Called at the end of every tick: drops an expired hold, or issues the held
     /// `commit` once the session may commit again and the route has not changed.
     pub fn release_held(
@@ -285,6 +299,7 @@ impl SearchPlanner {
             fx.planner_cmds.push(PlannerCmd::Commit {
                 req_id: h.req_id.clone(),
                 route_key: h.route_key,
+                undo_req_id: None,
             });
             log(
                 fx,
@@ -746,6 +761,7 @@ impl SearchPlanner {
                 fx.planner_cmds.push(PlannerCmd::Commit {
                     req_id: req_id.to_owned(),
                     route_key: req.route_key.clone(),
+                    undo_req_id: None,
                 });
                 log(fx, at, "commit_issued", Some(req_id), None);
             }

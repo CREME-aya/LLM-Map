@@ -646,6 +646,10 @@
             },
             "route_key": {
               "$ref": "common.schema.json#/$defs/RouteKey"
+            },
+            "undo_req_id": {
+              "type": "string",
+              "description": "Only on the avoid-chip consent commit (provisional id undo-<avoid search req_id>). When Kotlin commits that avoid route it keeps the route body that was current until then for 5 s under this id. An undo (user_tap{offer_id, undo} / CXL) within 5 s of consent emits commit{req_id: undo_req_id, route_key: the current avoid route's key} without undo_req_id; Kotlin sets the held body's route_revision back to \"0\" before dc_route_commit (Rust assigns current + 1). 03 §3.1, team decision 2026-11-26."
             }
           }
         }

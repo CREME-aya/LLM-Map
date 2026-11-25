@@ -75,6 +75,8 @@ pub struct Seg {
 /// Edge timing on the route-wide axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EdgeSpan {
+    /// Directed edge id (`legs[].edges[].edge_id`).
+    edge_id: u64,
     along_start: u32,
     along_end: u32,
     flags: u32,
@@ -248,6 +250,7 @@ impl LoadedRoute {
                     return Err(at("cum_time_ms decreases"));
                 }
                 edges.push(EdgeSpan {
+                    edge_id: e.edge_id.0,
                     along_start: (route_along + u64::from(a0)) as u32,
                     along_end: (route_along + u64::from(a1)) as u32,
                     flags: e.flags,
@@ -334,6 +337,14 @@ impl LoadedRoute {
             m.id.route_key = key.clone();
         }
         self.route_key = key;
+    }
+
+    /// `(edge_id, along_start_cm, along_end_cm)` of every edge in route order.
+    pub fn edge_spans(&self) -> Vec<(u64, u32, u32)> {
+        self.edges
+            .iter()
+            .map(|e| (e.edge_id, e.along_start, e.along_end))
+            .collect()
     }
 
     pub(crate) fn motorway_approach(&self, along: u32) -> bool {

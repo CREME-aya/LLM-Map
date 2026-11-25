@@ -334,9 +334,19 @@ pub enum PlannerCmd {
     /// route's); `dc_route_commit` re-checks it against the current route and returns
     /// `E_STALE` without replacing anything when the route changed meanwhile.
     /// Team decision 2026-11-25 (not in docs yet).
+    ///
+    /// Avoid chip "戻して" (03 §3.1; team decision 2026-11-26): the consent `commit` carries
+    /// `undo_req_id` (provisional `undo-<avoid search req_id>`). Kotlin, when it commits
+    /// that avoid route, keeps the route body that was current until then for 5 s under
+    /// `undo_req_id`. An undo within 5 s of consent is `commit{req_id: undo_req_id,
+    /// route_key: <the current (avoid) route's key>}` without `undo_req_id`; Kotlin sets
+    /// the held body's `route_revision` back to "0" and passes it to `dc_route_commit`
+    /// (Rust assigns current + 1; docs 0aaeee6).
     Commit {
         req_id: String,
         route_key: RouteKey,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        undo_req_id: Option<String>,
     },
 }
 

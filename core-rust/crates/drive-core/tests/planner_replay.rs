@@ -263,6 +263,7 @@ fn cancel_then_reroute() {
         vec![PlannerCmd::Commit {
             req_id: "r2".into(),
             route_key: fixture_route_key("gate7-cancel-then-reroute.json"),
+            undo_req_id: None,
         }]
     );
     assert!(o[3].ui_cmds.is_empty());
@@ -307,6 +308,7 @@ fn timeout_engine_stuck_keeps_slot_until_native_returns() {
         vec![PlannerCmd::Commit {
             req_id: "r2".into(),
             route_key: fixture_route_key("gate7-timeout-engine-stuck.json"),
+            undo_req_id: None,
         }]
     );
     assert!(o[5].ui_cmds.is_empty());
@@ -751,6 +753,7 @@ fn commit_only_for_reroute_and_adhoc_explicit_plan() {
             vec![PlannerCmd::Commit {
                 req_id: "r1".into(),
                 route_key: rk(),
+                undo_req_id: None,
             }]
         } else {
             vec![]

@@ -516,6 +516,7 @@ mod tick {
         planner_cmds.push(PlannerCmd::Commit {
             req_id: "r2".into(),
             route_key: rk(),
+            undo_req_id: None,
         });
         let horizon: contracts::horizon::ManeuverHorizon = serde_json::from_value(load(
             &schema_dir().join("fixtures/valid/maneuver-horizon.min.json"),

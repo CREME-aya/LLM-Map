@@ -115,7 +115,9 @@ fn commits(o: &TickOutput) -> Vec<(String, RouteKey)> {
     o.planner_cmds
         .iter()
         .filter_map(|c| match c {
-            PlannerCmd::Commit { req_id, route_key } => Some((req_id.clone(), route_key.clone())),
+            PlannerCmd::Commit {
+                req_id, route_key, ..
+            } => Some((req_id.clone(), route_key.clone())),
             _ => None,
         })
         .collect()

@@ -27,6 +27,15 @@ import java.io.Closeable
 //   result's route_key (use that key from then on). E_STALE means the route was replaced
 //   meanwhile, or the bundle's trip_revision / graph_version differ from the current route:
 //   drop the result (nothing was replaced). A non-"0" route_revision is E_SCHEMA.
+// - planner_cmds commit{..., undo_req_id} (only the avoid-chip consent commit): when you commit
+//   that avoid route, keep the route body that was current until then for 5 s under
+//   undo_req_id (provisional "undo-<req_id>"). It still carries the route_revision it was
+//   loaded with. "戻して" (user_tap{target_id: offer_id, action: undo}, or CXL through
+//   validateOverride -> {result: "undone", req_id}, the commit then comes with the next tick)
+//   yields commit{req_id: undo_req_id, route_key: the current avoid route's key}: set the held
+//   body's route_revision back to "0" before routeCommit (Rust assigns current + 1; passing the
+//   old revision is E_SCHEMA). Drop the held body after 5 s. A refused undo comes back as one
+//   voice_cmds speak{template_id: "undo_unavailable"} (template provisional).
 // - planner_cmds start{priority: reroute, fix}: Rust decided the vehicle left the route
 //   (on-route alignment is in Rust, docs 04 §3.1); search from that fix.
 // - "経路を確認中" is horizon.status off_route / rerouting; there is no show_checking_route UiCmd.

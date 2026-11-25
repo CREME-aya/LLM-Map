@@ -1,7 +1,9 @@
 //! `dc_session` state. Single-threaded: called only from the NavigationSession actor.
 
 use crate::align::{AlignConfig, AlignStats, Aligner, FixResult, Mode};
-use crate::avoid::{self, AvoidConfig, AvoidState, AvoidTarget, DetourPolicy};
+use crate::avoid::{
+    self, AvoidConfig, AvoidState, AvoidTarget, Consent, DetourPolicy, UndoState, UndoWindow,
+};
 use crate::command_line::{self, Command, JpRef};
 use crate::horizon::{arrived, eta_range, EtaFactors, HorizonFrames};
 use crate::junction::is_avoid_target;
@@ -14,7 +16,7 @@ use contracts::plan::{PlanCandidates, TripPlanSnapshot};
 use contracts::route::{RouteCommitRequest, RouteCommitResult};
 use contracts::tick::{
     DismissReason, DistanceClass, EventBody, Fix, LogEvent, PlannerCmd, SearchPriority, TapAction,
-    ThermalStatus, TickInput, TickOutput, UiCmd,
+    ThermalStatus, TickInput, TickOutput, UiCmd, VoiceCmd, VoicePriority,
 };
 use contracts::{ErrorCode, RouteKey};
 use serde::Deserialize;
@@ -61,6 +63,8 @@ pub struct SessionConfig {
     pub avoid_deadline_before_ms: u64,
     /// "到達約 120 秒前" avoid-chip trigger (ms; 04 §4.3), compared with `earliest`.
     pub avoid_trigger_eta_ms: u64,
+    /// "戻して" window after consent (ms; 04 §4.3 item 3: 5 s).
+    pub avoid_undo_window_ms: u64,
 }
 
 impl Default for SessionConfig {
@@ -87,6 +91,7 @@ impl Default for SessionConfig {
             avoid_budget_ms: v.budget_ms,
             avoid_deadline_before_ms: v.deadline_before_ms,
             avoid_trigger_eta_ms: v.trigger_eta_ms,
+            avoid_undo_window_ms: v.undo_window_ms,
         }
     }
 }
@@ -129,6 +134,7 @@ impl SessionConfig {
             budget_ms: self.avoid_budget_ms,
             deadline_before_ms: self.avoid_deadline_before_ms,
             trigger_eta_ms: self.avoid_trigger_eta_ms,
+            undo_window_ms: self.avoid_undo_window_ms,
         }
     }
 
@@ -201,9 +207,16 @@ pub struct Session {
     avoid: AvoidState,
     /// Maneuvers of the current route an avoid chip was tried for (once each).
     avoid_tried: Vec<ManeuverId>,
+    /// "戻して" state of the last consent (03 §3.1).
+    undo: UndoState,
     /// UiCmds raised outside `dc_tick` (a route commit removing an offer), sent with the
     /// next tick.
     pending_ui: Vec<UiCmd>,
+    /// Voice / planner commands raised outside `dc_tick` (`CXL` through
+    /// `dc_validate_override`), sent with the next tick.
+    pending_voice: Vec<VoiceCmd>,
+    pending_planner: Vec<PlannerCmd>,
+    pending_log: Vec<LogEvent>,
 }
 
 impl Session {
@@ -224,7 +237,11 @@ impl Session {
             detour: DetourPolicy::default(),
             avoid: AvoidState::Idle,
             avoid_tried: Vec::new(),
+            undo: UndoState::None,
             pending_ui: Vec::new(),
+            pending_voice: Vec::new(),
+            pending_planner: Vec::new(),
+            pending_log: Vec::new(),
         }
     }
 
@@ -318,11 +335,17 @@ impl Session {
         self.frames.reset_route();
         self.last_fix_at = None;
         self.reset_avoid();
+        self.undo = UndoState::None;
     }
 
     /// The avoid chip state (04 §4.3).
     pub fn avoid_state(&self) -> &AvoidState {
         &self.avoid
+    }
+
+    /// The "戻して" state of the last consent (03 §3.1).
+    pub fn undo_state(&self) -> &UndoState {
+        &self.undo
     }
 
     /// A new route: the chip of the old one is gone (`dismiss{route_changed}` with the next
@@ -438,6 +461,7 @@ impl Session {
             segments: loaded.segs.len() as u32,
             maneuvers: loaded.maneuvers.len() as u32,
         };
+        let undo = self.undo_window_for(req.expected_route_key.as_ref(), &loaded);
         let now = self.last_now_mono_ms.unwrap_or(0);
         let mut fx = Effects::default();
         self.planner
@@ -450,7 +474,108 @@ impl Session {
         self.frames.reset_route();
         self.last_fix_at = None;
         self.reset_avoid();
+        self.undo = undo;
         Ok(result)
+    }
+
+    /// The undo state after loading `loaded` (03 §3.1, team decision 2026-11-26): when this
+    /// commit loads the consented avoid route (guard = the route the avoid search started
+    /// on), the divergence point is computed once, here, from the old route and the new one
+    /// and kept for "戻して". Any other commit (including the undo itself) ends the window.
+    /// TODO(abi-v1): `dc_route_commit` carries no req_id, so another commit with the same
+    /// guard arriving first (a reroute) would be taken for the avoid route.
+    fn undo_window_for(&self, expected: Option<&RouteKey>, loaded: &LoadedRoute) -> UndoState {
+        let UndoState::Consented(c) = &self.undo else {
+            return UndoState::None;
+        };
+        let (Some(old), Some(exp)) = (self.route.as_ref(), expected) else {
+            return UndoState::None;
+        };
+        if *exp != c.from_route_key {
+            return UndoState::None;
+        }
+        UndoState::Window(UndoWindow {
+            offer_id: c.offer_id.clone(),
+            undo_req_id: c.undo_req_id.clone(),
+            route_key: loaded.route_key.clone(),
+            consent_at_mono_ms: c.consent_at_mono_ms,
+            divergence_cm: avoid::divergence_cm(
+                &old.edge_spans(),
+                &loaded.edge_spans(),
+                c.start_progress_cm,
+            ),
+        })
+    }
+
+    /// "戻して" (`user_tap{offer_id, undo}` at `at`, or `CXL` spoken at `at`), 03 §3.1.
+    /// Ok: `commit{req_id: undo_req_id, route_key: current}` pushed to `cmds` and the held
+    /// result dropped. Err: the reject code; the caller speaks the refusal.
+    fn try_undo(
+        &mut self,
+        now: u64,
+        at: u64,
+        target_id: Option<&str>,
+        cmds: &mut Vec<PlannerCmd>,
+        log: &mut Vec<LogEvent>,
+    ) -> Result<String, RejectCode> {
+        let (offer_id, consent_at) = match &self.undo {
+            UndoState::None => return Err(RejectCode::NoPendingTarget),
+            UndoState::Consented(c) => (&c.offer_id, c.consent_at_mono_ms),
+            UndoState::Window(w) => (&w.offer_id, w.consent_at_mono_ms),
+        };
+        if target_id.is_some_and(|t| t != offer_id) {
+            return Err(RejectCode::NoPendingTarget);
+        }
+        if at.saturating_sub(consent_at) > self.avoid_cfg.undo_window_ms {
+            self.undo = UndoState::None;
+            return Err(RejectCode::NoPendingTarget);
+        }
+        // Consent given but the avoid route is not loaded yet: nothing to go back from.
+        let UndoState::Window(w) = &self.undo else {
+            return Err(RejectCode::NoEffect);
+        };
+        if self.current_route_key.as_ref() != Some(&w.route_key) {
+            return Err(RejectCode::NoPendingTarget);
+        }
+        let Some(divergence) = w.divergence_cm else {
+            return Err(RejectCode::NoEffect);
+        };
+        // uncertain (or off route): whether the divergence was passed is unknown → safe side.
+        if self.horizon_status(now) != Some(HorizonStatus::Tracking) {
+            return Err(RejectCode::NoEffect);
+        }
+        match self.aligner.progress_cm() {
+            Some(p) if p < divergence => {}
+            _ => return Err(RejectCode::NoEffect),
+        }
+        let req_id = w.undo_req_id.clone();
+        let mut fx = Effects::default();
+        self.planner.discard_held(at, "undo", &mut fx);
+        log.append(&mut fx.log);
+        cmds.push(PlannerCmd::Commit {
+            req_id: req_id.clone(),
+            route_key: w.route_key.clone(),
+            undo_req_id: None,
+        });
+        log.push(log_req(at, "avoid_undo_commit", &req_id, &w.offer_id));
+        self.undo = UndoState::None;
+        Ok(req_id)
+    }
+
+    /// The short fixed phrase for a refused "戻して" (03 §3.1).
+    fn undo_refused(&mut self, at: u64, code: RejectCode, log: &mut Vec<LogEvent>) {
+        let code_name = match code {
+            RejectCode::NoEffect => "NO_EFFECT",
+            _ => "NO_PENDING_TARGET",
+        };
+        log.push(log_at(at, "avoid_undo_refused", Some(code_name.to_owned())));
+        // TODO(05 §5): utterance_token encoding is provisional.
+        self.pending_voice.push(VoiceCmd::Speak {
+            token: format!("{}-{at}", avoid::UNDO_UNAVAILABLE_TEMPLATE_ID),
+            priority: VoicePriority::P2,
+            template_id: avoid::UNDO_UNAVAILABLE_TEMPLATE_ID.to_owned(),
+            params: std::collections::BTreeMap::new(),
+        });
     }
 
     /// `dc_plan_candidates` body (team decision 2026-11-25): fixes the plan's distance
@@ -664,6 +789,12 @@ impl Session {
         fx: &mut Effects,
         log: &mut Vec<LogEvent>,
     ) {
+        if action == TapAction::Undo {
+            if let Err(code) = self.try_undo(now, at, Some(target_id), &mut fx.planner_cmds, log) {
+                self.undo_refused(at, code, log);
+            }
+            return;
+        }
         let AvoidState::Offered {
             req_id,
             target,
@@ -676,7 +807,6 @@ impl Session {
             return;
         }
         let refused = if action != TapAction::Avoid {
-            // TODO(04 §4.3 / 03 §3.1): `undo` within 5 s of consent is not built yet.
             Some("action")
         } else if at >= target.deadline_mono_ms {
             Some("deadline_passed")
@@ -691,11 +821,20 @@ impl Session {
             log.push(log_req(at, "avoid_consent_refused", req_id, why));
             return;
         }
+        let undo_req_id = avoid::undo_req_id(req_id);
         fx.planner_cmds.push(PlannerCmd::Commit {
             req_id: req_id.clone(),
             route_key: target.route_key.clone(),
+            undo_req_id: Some(undo_req_id.clone()),
         });
         log.push(log_req(at, "avoid_consent_commit", req_id, &offer.offer_id));
+        self.undo = UndoState::Consented(Consent {
+            offer_id: offer.offer_id.clone(),
+            undo_req_id,
+            from_route_key: target.route_key.clone(),
+            start_progress_cm: target.start_progress_cm,
+            consent_at_mono_ms: at,
+        });
         self.avoid = AvoidState::Idle;
     }
 
@@ -775,6 +914,7 @@ impl Session {
                 deadline_mono_ms: deadline,
                 base_eta_ms: u64::from(route.remaining_ms(progress)),
                 avoided: avoid::avoided(m),
+                start_progress_cm: progress,
             });
             break;
         }
@@ -930,7 +1070,8 @@ impl Session {
     }
 
     fn finish(&mut self, now: u64, fx: Effects, mut extra_log: Vec<LogEvent>) -> TickOutput {
-        let mut log = fx.log;
+        let mut log = std::mem::take(&mut self.pending_log);
+        log.extend(fx.log);
         log.append(&mut extra_log);
         log.sort_by_key(|l| l.at_mono_ms); // stable: deterministic order
         let horizon = self.next_horizon(now);
@@ -938,6 +1079,9 @@ impl Session {
         let stale_at = self.route.as_ref().and_then(|_| self.aligner.stale_at(now));
         let mut ui_cmds = std::mem::take(&mut self.pending_ui);
         ui_cmds.extend(fx.ui_cmds);
+        let voice_cmds = std::mem::take(&mut self.pending_voice);
+        let mut planner_cmds = std::mem::take(&mut self.pending_planner);
+        planner_cmds.extend(fx.planner_cmds);
         let next_wake_mono_ms = [
             self.planner.next_wake(),
             self.avoid.target().map(|t| t.deadline_mono_ms),
@@ -950,9 +1094,9 @@ impl Session {
         .min();
         TickOutput {
             horizon,
-            voice_cmds: Vec::new(),
+            voice_cmds,
             ui_cmds,
-            planner_cmds: fx.planner_cmds,
+            planner_cmds,
             next_wake_mono_ms,
             log,
         }
@@ -988,10 +1132,28 @@ impl Session {
             Err(_) => return rejected(RejectCode::Syntax),
         };
         match cmd {
-            // NO_PENDING_TARGET = YES / NO / CXL without a target (team decision #3).
-            // TODO(drive-core): CXL target can also be a change confirmed within the last 5 s,
-            // and pending offers should come from session state, not only the request field.
-            Command::Yes | Command::No | Command::Cxl if req.pending_offer_id.is_none() => {
+            // CXL without a pending offer: "戻して" of an avoid switch confirmed within 5 s
+            // (03 §3.1). The commit / refusal phrase goes out with the next dc_tick.
+            Command::Cxl if req.pending_offer_id.is_none() => {
+                let at = req.utterance_mono_ms;
+                let now = self.last_now_mono_ms.map_or(at, |p| p.max(at));
+                let mut cmds = Vec::new();
+                let mut log = Vec::new();
+                let r = self.try_undo(now, at, None, &mut cmds, &mut log);
+                if let Err(code) = r {
+                    self.undo_refused(at, code, &mut log);
+                }
+                self.pending_planner.extend(cmds);
+                self.pending_log.extend(log);
+                match r {
+                    Ok(req_id) => Ok(ValidateOverrideResult::Undone { req_id }),
+                    Err(code) => rejected(code),
+                }
+            }
+            // NO_PENDING_TARGET = YES / NO without a target (team decision #3).
+            // TODO(drive-core): pending offers should come from session state, not only the
+            // request field.
+            Command::Yes | Command::No if req.pending_offer_id.is_none() => {
                 rejected(RejectCode::NoPendingTarget)
             }
             // A missing last junction skips only the profile proposal (03 §4.1).
