@@ -113,7 +113,7 @@ pub unsafe extern "C" fn dc_validate_override(s: *mut DcSession, req_json: DcIn)
 pub unsafe extern "C" fn dc_route_commit(s: *mut DcSession, route_bundle_json: DcIn) -> DcOut {
     let inp = input(route_bundle_json);
     DcOut::from_vec(guard(|| {
-        ops::with_session(session(s), |_| ops::unimplemented("dc_route_commit", inp))
+        ops::with_session(session(s), |ss| ops::route_commit(ss, inp))
     }))
 }
 

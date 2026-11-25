@@ -26,7 +26,8 @@ int main(void) {
     fails += expect(dc_validate_override(s, in_str(
         "{\"code_line\":\"YES\",\"contract\":{},\"utterance_id\":\"u1\",\"utterance_mono_ms\":1,\"ref_frame_seq\":1}")),
         "NO_PENDING_TARGET", "validate_override");
-    fails += expect(dc_route_commit(s, in_str("{}")), "E_UNIMPLEMENTED", "route_commit");
+    /* no current route: the commit's route_key is stale */
+    fails += expect(dc_route_commit(s, in_str("{\"route_key\":{\"trip_id\":\"t\",\"trip_revision\":\"1\",\"route_revision\":\"1\",\"graph_version\":\"g\"}}")), "E_STALE", "route_commit");
     fails += expect(dc_avoid_offer_eval(s, in_str("{}")), "E_UNIMPLEMENTED", "avoid_offer_eval");
     fails += expect(dc_plan_candidates(in_str("{}")), "E_UNIMPLEMENTED", "plan_candidates");
     fails += expect(dc_rank(in_str("{}")), "E_UNIMPLEMENTED", "rank");

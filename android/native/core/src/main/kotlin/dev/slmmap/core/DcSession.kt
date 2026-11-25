@@ -11,6 +11,9 @@ import java.io.Closeable
 //   watchdog deadline); null means "tick on each Fix only". Never report a search timeout:
 //   Rust detects it from now_mono_ms and enters engine_stuck. search_finished.outcome is
 //   ok | cancelled | error, sent exactly once when the native call really returns.
+// - planner_cmds commit{req_id, route_key}: call routeCommit() with the route body of search
+//   req_id and that route_key (the route's key when the search started). E_STALE means the
+//   route was replaced meanwhile: drop the result (nothing was replaced).
 //
 // TODO(android): NOT COMPILED (no Gradle/Android SDK yet).
 // TODO(android): JSON parsing of the envelope (kotlinx.serialization?) is not decided;

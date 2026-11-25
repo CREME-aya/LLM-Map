@@ -156,9 +156,7 @@ pub unsafe extern "system" fn Java_dev_slmmap_core_DcNative_routeCommit(
     h: jlong,
     input: jbyteArray,
 ) -> jbyteArray {
-    stateful(env, h, input, |_, b| {
-        ops::unimplemented("dc_route_commit", b)
-    })
+    stateful(env, h, input, ops::route_commit)
 }
 
 #[no_mangle]

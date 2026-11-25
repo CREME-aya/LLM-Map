@@ -27,7 +27,7 @@ public final class JniSmoke {
         check("tick null array", DcNative.tick(h[0], null), "E_SCHEMA");
         check("tick handle 0", DcNative.tick(0L, b("{\"now_mono_ms\":1}")), "E_INVALID_HANDLE");
         check("validateOverride", DcNative.validateOverride(h[0], b("{\"code_line\":\"OVR dt=R\",\"contract\":{},\"utterance_id\":\"u1\",\"utterance_mono_ms\":1,\"ref_frame_seq\":1}")), "SYNTAX");
-        check("routeCommit", DcNative.routeCommit(h[0], b("{}")), "E_UNIMPLEMENTED");
+        check("routeCommit", DcNative.routeCommit(h[0], b("{\"route_key\":{\"trip_id\":\"t\",\"trip_revision\":\"1\",\"route_revision\":\"1\",\"graph_version\":\"g\"}}")), "E_STALE");
         check("avoidOfferEval", DcNative.avoidOfferEval(h[0], b("{}")), "E_UNIMPLEMENTED");
         check("planCandidates", DcNative.planCandidates(b("{}")), "E_UNIMPLEMENTED");
         check("rank", DcNative.rank(b("{}")), "E_UNIMPLEMENTED");

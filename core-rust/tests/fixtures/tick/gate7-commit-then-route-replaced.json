@@ -1,0 +1,13 @@
+{
+  "description": "Gate 7: commit{req_id, route_key} (team decision 2026-11-25). route_key is the current route's key when the search started (rev 7), not the new route's. t0 reroute r1 starts; t1 r1 ok with the current key -> commit{r1, rev 7}; before Kotlin calls dc_route_commit the current route is replaced (rev 8, 'set_route' stands in for another commit); dc_route_commit(rev 7) then re-checks the key and returns E_STALE without replacing anything ('route_commit' step, 'expect_error'), so the late route never reaches horizon / voice_cmds of the next tick. An avoid_chip ok (r2) is never committed (dc_avoid_offer_eval + consent).",
+  "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"},
+  "steps": [
+    {"expect_starts": [{"req_id": "r1", "priority": "reroute", "distance_class": "long"}], "step": "request", "now_mono_ms": 1000, "priority": "reroute"},
+    {"expect_cmds": [{"cmd": "commit", "req_id": "r1", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"}}], "step": "tick", "input": {"now_mono_ms": 2000, "events": [{"at_mono_ms": 2000, "kind": "search_finished", "req_id": "r1", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"}, "graph_version": "jp-2026.11.0", "outcome": "ok", "facts_ref": "facts-r1", "engine_ms": 1000}]}},
+    {"step": "set_route", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"8","graph_version":"jp-2026.11.0"}},
+    {"expect_error": "E_STALE", "step": "route_commit", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"}},
+    {"step": "tick", "input": {"now_mono_ms": 3000, "events": []}},
+    {"expect_starts": [{"req_id": "r2", "priority": "avoid_chip", "distance_class": "long"}], "step": "request", "now_mono_ms": 4000, "priority": "avoid_chip"},
+    {"expect_cmds": [], "step": "tick", "input": {"now_mono_ms": 5000, "events": [{"at_mono_ms": 5000, "kind": "search_finished", "req_id": "r2", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"8","graph_version":"jp-2026.11.0"}, "graph_version": "jp-2026.11.0", "outcome": "ok", "facts_ref": "facts-r2", "engine_ms": 1000}]}}
+  ]
+}

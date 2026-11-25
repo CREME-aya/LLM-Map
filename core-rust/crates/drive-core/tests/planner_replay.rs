@@ -13,6 +13,10 @@ fn fixture(name: &str) -> Value {
     serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap()
 }
 
+fn fixture_route_key(name: &str) -> RouteKey {
+    serde_json::from_value(fixture(name)["route_key"].clone()).unwrap()
+}
+
 /// Runs a fixture and returns (outputs per step, max concurrently running searches).
 fn run(name: &str) -> (Session, Vec<TickOutput>, usize) {
     let fx = fixture(name);
@@ -42,6 +46,19 @@ fn run(name: &str) -> (Session, Vec<TickOutput>, usize) {
                 s.set_remaining_eta(step["remaining_eta_s"].as_u64());
                 TickOutput::default()
             }
+            // The current route is replaced (stands in for another dc_route_commit).
+            "set_route" => {
+                s.set_current_route_key(serde_json::from_value(step["route_key"].clone()).unwrap());
+                TickOutput::default()
+            }
+            // Kotlin's dc_route_commit for a `commit`: only the route_key re-check.
+            "route_commit" => {
+                let key: RouteKey = serde_json::from_value(step["route_key"].clone()).unwrap();
+                let got = s.check_route_commit(&key).err().map(|e| e.code.as_str());
+                let want = step["expect_error"].as_str();
+                assert_eq!(got, want, "{name}: step {step}");
+                TickOutput::default()
+            }
             "tick" => s.tick(serde_json::from_value::<TickInput>(step["input"].clone()).unwrap()),
             o => panic!("{o}"),
         };
@@ -69,7 +86,9 @@ fn run(name: &str) -> (Session, Vec<TickOutput>, usize) {
                 } => Some(serde_json::json!({
                     "req_id": req_id, "priority": priority, "distance_class": distance_class
                 })),
-                PlannerCmd::Cancel { .. } | PlannerCmd::Rank { .. } => None,
+                PlannerCmd::Cancel { .. } | PlannerCmd::Rank { .. } | PlannerCmd::Commit { .. } => {
+                    None
+                }
             })
             .collect();
         let want = step["expect_starts"]
@@ -77,6 +96,11 @@ fn run(name: &str) -> (Session, Vec<TickOutput>, usize) {
             .cloned()
             .unwrap_or_default();
         assert_eq!(got, want, "{name}: step {step}");
+        // Full planner_cmds of the step when the fixture lists them (`expect_cmds`).
+        if let Some(cmds) = step.get("expect_cmds") {
+            let want: Vec<PlannerCmd> = serde_json::from_value(cmds.clone()).unwrap();
+            assert_eq!(out.planner_cmds, want, "{name}: step {step}");
+        }
         outs.push(out);
     }
     (s, outs, max_running)
@@ -106,22 +130,23 @@ fn cancel_then_reroute() {
     assert!(whats(&o[2]).contains(&"discarded_late"));
     assert!(
         !o[2]
-            .ui_cmds
+            .planner_cmds
             .iter()
-            .any(|u| matches!(u, UiCmd::SearchResultReady { .. })),
-        "no r1-derived display"
+            .any(|c| matches!(c, PlannerCmd::Commit { .. })),
+        "no r1-derived commit"
     );
     assert!(
         matches!(&o[2].planner_cmds[..], [PlannerCmd::Start { req_id, priority: SearchPriority::Reroute, .. }] if req_id == "r2")
     );
-    // t3: r2 adopted
+    // t3: r2 (reroute) ok with the current route_key → commit with the start-time key
     assert_eq!(
-        o[3].ui_cmds,
-        vec![UiCmd::SearchResultReady {
+        o[3].planner_cmds,
+        vec![PlannerCmd::Commit {
             req_id: "r2".into(),
-            facts_ref: Some("facts-r2".into())
+            route_key: fixture_route_key("gate7-cancel-then-reroute.json"),
         }]
     );
+    assert!(o[3].ui_cmds.is_empty());
     assert_eq!(*s.planner().slot(), Slot::Idle);
     assert_eq!(o[3].next_wake_mono_ms, None);
 }
@@ -148,23 +173,24 @@ fn timeout_engine_stuck_keeps_slot_until_native_returns() {
     assert!(!whats(&o[4]).contains(&"discarded_late"));
     assert!(
         !o[4]
-            .ui_cmds
+            .planner_cmds
             .iter()
-            .any(|u| matches!(u, UiCmd::SearchResultReady { .. })),
-        "no r1-derived display"
+            .any(|c| matches!(c, PlannerCmd::Commit { .. })),
+        "no r1-derived commit"
     );
     assert!(
         matches!(&o[4].planner_cmds[..], [PlannerCmd::Start { req_id, priority: SearchPriority::Reroute, .. }] if req_id == "r2")
     );
     assert_eq!(o[4].next_wake_mono_ms, Some(14_900 + 10_000));
-    // r2 adopted
+    // r2 (reroute) ok with the current route_key → commit with the start-time key
     assert_eq!(
-        o[5].ui_cmds,
-        vec![UiCmd::SearchResultReady {
+        o[5].planner_cmds,
+        vec![PlannerCmd::Commit {
             req_id: "r2".into(),
-            facts_ref: Some("facts-r2".into())
+            route_key: fixture_route_key("gate7-timeout-engine-stuck.json"),
         }]
     );
+    assert!(o[5].ui_cmds.is_empty());
     assert_eq!(*s.planner().slot(), Slot::Idle);
 }
 
@@ -510,4 +536,91 @@ fn remaining_eta_of_another_route_is_not_used() {
             ..
         }]
     ));
+}
+
+/// Gate 7: commit is issued with the start-time route_key; when the route is replaced
+/// before dc_route_commit, the late route is refused (E_STALE) and never shown.
+#[test]
+fn commit_then_route_replaced_is_stale_and_not_shown() {
+    let (s, o, max_running) = run("gate7-commit-then-route-replaced.json");
+    assert_eq!(max_running, 1);
+    assert!(whats(&o[1]).contains(&"commit_issued"));
+    // the replacement route stays current; the late route did not replace it
+    assert!(s
+        .check_route_commit(&fixture_route_key("gate7-commit-then-route-replaced.json"))
+        .is_err());
+    // the tick after the refused commit: no horizon, no voice from the late route
+    assert_eq!(o[4].horizon, None);
+    assert!(o[4].voice_cmds.is_empty());
+    assert!(o[4].ui_cmds.is_empty());
+    // avoid chip ok: no commit, no display
+    assert!(whats(&o[6]).contains(&"avoid_result_ready"));
+    assert!(o[6].ui_cmds.is_empty());
+}
+
+#[test]
+fn commit_only_for_reroute_and_adhoc_explicit_plan() {
+    use SearchPriority::*;
+    let rk = || RouteKey {
+        trip_id: "t".into(),
+        trip_revision: contracts::U64Str(1),
+        route_revision: contracts::U64Str(1),
+        graph_version: "g".into(),
+    };
+    for (priority, commits) in [
+        (Reroute, true),
+        (ExplicitPlan, true),
+        (AvoidChip, false),
+        (Comparison, false),
+    ] {
+        let mut s = session_with_route();
+        s.request_search(0, priority).unwrap();
+        let o = s.tick(
+            serde_json::from_value(serde_json::json!({"now_mono_ms":10,"events":[
+            {"at_mono_ms":10,"kind":"search_finished","req_id":"r1","route_key":rk(),
+             "graph_version":"g","outcome":"ok","facts_ref":"f1","engine_ms":10}]}))
+            .unwrap(),
+        );
+        let want = if commits {
+            vec![PlannerCmd::Commit {
+                req_id: "r1".into(),
+                route_key: rk(),
+            }]
+        } else {
+            vec![]
+        };
+        assert_eq!(o.planner_cmds, want, "{priority:?}");
+        assert!(o.ui_cmds.is_empty(), "{priority:?}");
+        // the guard accepts the start-time key while the route is unchanged
+        assert!(s.check_route_commit(&rk()).is_ok());
+    }
+}
+
+#[test]
+fn no_commit_for_error_cancelled_or_stale() {
+    let rk = |rev: u64| RouteKey {
+        trip_id: "t".into(),
+        trip_revision: contracts::U64Str(1),
+        route_revision: contracts::U64Str(rev),
+        graph_version: "g".into(),
+    };
+    let fin = |outcome: &str, rev: u64| -> TickInput {
+        serde_json::from_value(serde_json::json!({"now_mono_ms":10,"events":[
+            {"at_mono_ms":10,"kind":"search_finished","req_id":"r1","route_key":rk(rev),
+             "graph_version":"g","outcome":outcome,"engine_ms":10}]}))
+        .unwrap()
+    };
+    // error
+    let mut s = session_with_route();
+    s.request_search(0, SearchPriority::Reroute).unwrap();
+    assert!(s.tick(fin("error", 1)).planner_cmds.is_empty());
+    // ok with another route_key than the one the search started with
+    let mut s = session_with_route();
+    s.request_search(0, SearchPriority::Reroute).unwrap();
+    assert!(s.tick(fin("ok", 2)).planner_cmds.is_empty());
+    // the current route changed while the search ran
+    let mut s = session_with_route();
+    s.request_search(0, SearchPriority::Reroute).unwrap();
+    s.set_current_route_key(rk(2));
+    assert!(s.tick(fin("ok", 1)).planner_cmds.is_empty());
 }

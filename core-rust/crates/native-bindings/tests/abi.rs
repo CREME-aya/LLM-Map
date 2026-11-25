@@ -237,3 +237,24 @@ fn tick_input_fixtures_agree_with_dc_tick() {
         assert!(n >= 9, "{n}");
     }
 }
+
+/// dc_route_commit re-checks the `commit` route_key (the current route's key at the search
+/// start): no / another current route → E_STALE, nothing replaced. Missing or malformed
+/// route_key → E_SCHEMA.
+#[test]
+fn route_commit_rechecks_route_key() {
+    unsafe {
+        let mut s = ptr::null_mut();
+        take(dc_session_new(din(b"{}"), &mut s));
+        let v = take(dc_route_commit(
+            s,
+            din(br#"{"route_key":{"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"}}"#),
+        ));
+        assert_eq!(v["error"]["code"], "E_STALE", "{v}");
+        for bad in [&b"{}"[..], b"{", br#"{"route_key":{"trip_id":"t"}}"#] {
+            let v = take(dc_route_commit(s, din(bad)));
+            assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
+        }
+        dc_session_free(s);
+    }
+}

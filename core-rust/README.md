@@ -23,7 +23,7 @@ core-rust/
 | 6 | `dc_rank(req)` | Applies L1/L2 3-axis scoring and the detour cap (shared with #11) to `{facts[], policy, profile}` and returns a `RouteComparison` | `E_UNIMPLEMENTED` |
 | 7 | `dc_validate_override(s, req)` | Parses and validates the SLM's 1-line command code in Rust and returns `Applied` or `Rejected{code}` | SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only; everything else `E_UNIMPLEMENTED` |
 | 8 | `dc_trip_score(summary)` | Computes the trip score (long-distance/trip detection) from a trip summary | `E_UNIMPLEMENTED` |
-| 9 | `dc_route_commit(s, bundle)` | Normalizes and loads the confirmed route's maneuver list (the only place the route body is passed) | `E_UNIMPLEMENTED` |
+| 9 | `dc_route_commit(s, bundle)` | Normalizes and loads the confirmed route's maneuver list (the only place the route body is passed) | Partial: `{route_key, ...}` — re-checks `route_key` (from `commit`) against the current route, `E_STALE` without replacing anything when it changed; loading itself is `E_UNIMPLEMENTED` |
 | 10 | `dc_tick(s, tick)` | The only event entry point. Takes `TickInput` and returns `horizon?/voice_cmds/ui_cmds/planner_cmds/next_wake_mono_ms/log` | Search planner (incl. watchdog → `engine_stuck` detected from `now_mono_ms`), time clamping and thermal collapse only |
 | 11 | `dc_avoid_offer_eval(s, req)` | Decides whether to show an `AvoidOffer` from `{now_mono_ms, alt_facts}`, using the same detour-cap function as #6 | `E_UNIMPLEMENTED` |
 | 12 | `dc_exchange_validate(req)` | Validates `{kind, payload}` received via `exchange-v1` | `E_UNIMPLEMENTED` |
@@ -41,6 +41,13 @@ uses it only for the watchdog limit (5 s / 10 s); the comparison budget (3 s / 8
 `dc_rank` with the CandidateFacts behind `facts_refs` (`search_finished.facts_ref`,
 formerly `comparison_ref`). On budget expiry queued candidates are dropped and a running one
 is cancelled; it keeps the slot until its `search_finished`.
+`commit{req_id, route_key}` is emitted only when a `reroute` / ad-hoc `explicit_plan` search
+returns `ok` with a valid state (not cancelled / stuck, `route_key` equal to the current
+route): Kotlin calls `dc_route_commit` with that search's route body. `route_key` is the current
+route's key when the search started (not the new route's); `dc_route_commit` re-checks it and
+returns `E_STALE` if the route was replaced meanwhile. An avoid-chip `ok` is never committed
+(it needs `dc_avoid_offer_eval` and consent; not wired yet). "経路を確認中" for a search in
+progress is `horizon.status` (`off_route` / `rerouting`), not a per-result UiCmd.
 Unknown fields are rejected with `E_SCHEMA` wherever the schema says `additionalProperties: false`
 (TickInput, Fix, every Event kind, PlannerCmd, VoiceCmd, UiCmd, TickOutput, LogEvent) and in the schema-less
 `dc_validate_override` request and `dc_session_new` config.
@@ -49,7 +56,7 @@ Unknown fields are rejected with `E_SCHEMA` wherever the schema says `additional
 what docs v1.2 names:
 - `voice_cmds`: `speak{token, priority: p0|p1|p2|p3, template_id, params{name: integer}}` |
   `stop{token}` (05 §5; no text crosses the boundary, Kotlin renders the template).
-- `ui_cmds`: `show_checking_route` | `search_result_ready{req_id, facts_ref}` |
+- `ui_cmds`: `show_checking_route` (engine_stuck) |
   `show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}` (05 §3.2, ADR-0007) |
   `dismiss{target_id, reason: expired|cancelled|route_changed|superseded}` (04 §4.3, 05 §3.2, ADR-0007).
 

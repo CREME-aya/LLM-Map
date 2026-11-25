@@ -291,6 +291,13 @@ mod tick {
                         serde_json::from_value::<SearchPriority>(step["priority"].clone()).unwrap();
                     }
                     "plan" => {}
+                    "set_route" | "route_commit" => {
+                        let key = compile_doc(
+                            "RouteKey",
+                            &serde_json::json!({ "$ref": format!("{BASE}common.schema.json#/$defs/RouteKey") }),
+                        );
+                        assert!(key.is_valid(&step["route_key"]), "{}", p.display());
+                    }
                     // remaining ETA on the current route: seconds or null (invalidated)
                     "route_eta" => {
                         let e = &step["remaining_eta_s"];
@@ -360,6 +367,10 @@ mod tick {
                 reason,
             });
         }
+        planner_cmds.push(PlannerCmd::Commit {
+            req_id: "r2".into(),
+            route_key: rk(),
+        });
         let horizon = load(&schema_dir().join("fixtures/valid/maneuver-horizon.min.json"));
         for (next_wake, horizon) in [(None, None), (Some(u64::MAX), Some(horizon))] {
             let out = TickOutput {
@@ -375,14 +386,6 @@ mod tick {
                     UiCmd::Dismiss {
                         target_id: "o1".into(),
                         reason: DismissReason::Superseded,
-                    },
-                    UiCmd::SearchResultReady {
-                        req_id: "r2".into(),
-                        facts_ref: None,
-                    },
-                    UiCmd::SearchResultReady {
-                        req_id: "r2".into(),
-                        facts_ref: Some("facts".into()),
                     },
                 ],
                 planner_cmds: planner_cmds.clone(),
@@ -654,10 +657,6 @@ mod tick {
             .collect();
         let uis: Vec<Value> = [
             UiCmd::ShowCheckingRoute {},
-            UiCmd::SearchResultReady {
-                req_id: "r1".into(),
-                facts_ref: None,
-            },
             UiCmd::ShowConfirm {
                 confirm_screen_id: "s".into(),
                 override_id: "o".into(),

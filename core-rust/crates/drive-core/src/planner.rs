@@ -34,6 +34,12 @@
 //!   budget passes first. On expiry the queued searches are dropped (never started) and a
 //!   running one of the plan gets `cancel`; it keeps the slot until its `search_finished`
 //!   (an `ok` then is `discarded_late`). No `start` is emitted for an ended plan.
+//! - Commit (team decision 2026-11-25): a `reroute` / ad-hoc `explicit_plan` search that
+//!   returns `ok` while still valid (not cancelled / stuck, `route_key` equal to both its
+//!   start key and the current route) yields `commit{req_id, route_key}` (the key at the
+//!   search start); Kotlin then calls `dc_route_commit` with that search's route body. An
+//!   avoid-chip `ok` is never committed here (it goes through `dc_avoid_offer_eval` and
+//!   consent). "経路を確認中" is shown through `horizon.status`, not a UiCmd per result.
 
 use contracts::tick::{
     DistanceClass, LogEvent, PlannerCmd, RankReason, SearchOutcome, SearchPriority, UiCmd,
@@ -515,13 +521,25 @@ impl SearchPlanner {
             SearchOutcome::Ok if Some(route_key) != current_route_key => {
                 log(fx, at, "discarded_stale_route_key", Some(req_id), None)
             }
-            SearchOutcome::Ok => {
-                fx.ui_cmds.push(UiCmd::SearchResultReady {
+            // TODO(drive-core): also require horizon.status == tracking (04 §3) once the
+            // ManeuverHorizon is produced.
+            SearchOutcome::Ok
+                if matches!(
+                    req.priority,
+                    SearchPriority::Reroute | SearchPriority::ExplicitPlan
+                ) =>
+            {
+                fx.planner_cmds.push(PlannerCmd::Commit {
                     req_id: req_id.to_owned(),
-                    facts_ref: facts_ref.map(str::to_owned),
+                    route_key: req.route_key.clone(),
                 });
-                log(fx, at, "search_adopted", Some(req_id), None);
+                log(fx, at, "commit_issued", Some(req_id), None);
             }
+            // TODO(drive-core): avoid chip → dc_avoid_offer_eval / AvoidOffer (not wired).
+            SearchOutcome::Ok if req.priority == SearchPriority::AvoidChip => {
+                log(fx, at, "avoid_result_ready", Some(req_id), None)
+            }
+            SearchOutcome::Ok => log(fx, at, "search_result_unused", Some(req_id), None),
             other => log(
                 fx,
                 at,
