@@ -156,9 +156,7 @@ pub unsafe extern "system" fn Java_dev_slmmap_core_DcNative_routeCommit(
     h: jlong,
     input: jbyteArray,
 ) -> jbyteArray {
-    stateful(env, h, input, |_, b| {
-        ops::unimplemented("dc_route_commit", b)
-    })
+    stateful(env, h, input, ops::route_commit)
 }
 
 #[no_mangle]
@@ -177,9 +175,10 @@ pub unsafe extern "system" fn Java_dev_slmmap_core_DcNative_avoidOfferEval(
 pub unsafe extern "system" fn Java_dev_slmmap_core_DcNative_planCandidates(
     env: *mut JNIEnv,
     _c: jclass,
+    h: jlong,
     input: jbyteArray,
 ) -> jbyteArray {
-    stateless(env, input, |b| ops::unimplemented("dc_plan_candidates", b))
+    stateful(env, h, input, ops::plan_candidates)
 }
 
 #[no_mangle]

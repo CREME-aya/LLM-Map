@@ -10,7 +10,7 @@ public final class DcNative {
     public static native byte[] validateOverride(long handle, byte[] input);
     public static native byte[] routeCommit(long handle, byte[] input);
     public static native byte[] avoidOfferEval(long handle, byte[] input);
-    public static native byte[] planCandidates(byte[] input);
+    public static native byte[] planCandidates(long handle, byte[] input);
     public static native byte[] rank(byte[] input);
     public static native byte[] tripScore(byte[] input);
     public static native byte[] exchangeValidate(byte[] input);

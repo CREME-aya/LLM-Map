@@ -11,6 +11,9 @@ import java.io.Closeable
 //   watchdog deadline); null means "tick on each Fix only". Never report a search timeout:
 //   Rust detects it from now_mono_ms and enters engine_stuck. search_finished.outcome is
 //   ok | cancelled | error, sent exactly once when the native call really returns.
+// - planner_cmds commit{req_id, route_key}: call routeCommit() with the route body of search
+//   req_id and that route_key (the route's key when the search started). E_STALE means the
+//   route was replaced meanwhile: drop the result (nothing was replaced).
 //
 // TODO(android): NOT COMPILED (no Gradle/Android SDK yet).
 // TODO(android): JSON parsing of the envelope (kotlinx.serialization?) is not decided;
@@ -24,6 +27,14 @@ class DcSession private constructor(private var handle: Long) : Closeable {
     fun routeCommit(bundleJson: ByteArray): ByteArray = call { DcNative.routeCommit(it, bundleJson) }
 
     fun avoidOfferEval(reqJson: ByteArray): ByteArray = call { DcNative.avoidOfferEval(it, reqJson) }
+
+    /**
+     * dc_plan_candidates: {now_mono_ms, eta_estimate_s?, snapshot: TripPlanSnapshot} ->
+     * {plan_request_id, distance_class, candidates, planner_cmds, next_wake_mono_ms, log}.
+     * Execute planner_cmds and honour next_wake_mono_ms exactly as for tick(); the remaining
+     * candidate searches and the final rank come from later tick() outputs.
+     */
+    fun planCandidates(reqJson: ByteArray): ByteArray = call { DcNative.planCandidates(it, reqJson) }
 
     /** Explicit close from the actor. Idempotent on the Kotlin side. */
     override fun close() {

@@ -226,10 +226,13 @@ pub struct TickOutput {
 }
 
 /// `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version,
-/// candidate_id?} | cancel{req_id} | rank{plan_request_id, facts_refs, reason}` (03 §3.1;
-/// `rank` and `candidate_id` are team decisions 2026-11-25, not in docs yet).
-/// `distance_class` is required: the class the Planner fixed for the plan before searching
-/// (searches outside any plan take the latest plan's class, or `long` if there was none).
+/// candidate_id?} | cancel{req_id} | rank{plan_request_id, facts_refs, reason}
+/// | commit{req_id, route_key}` (03 §3.1; `rank`, `candidate_id` and `commit` are team
+/// decisions 2026-11-25, not in docs yet).
+/// `distance_class` is required: for a plan's candidate search, the class the Planner fixed
+/// for the plan before searching; for a search outside a plan (reroute / avoid chip), the
+/// class fixed at its start from the valid remaining ETA on the current route (`< 1800 s` →
+/// short; `>= 1800 s`, unknown or invalidated by off-route → long; team decision 2026-11-25).
 /// TODO(abi-v1): tag field name `cmd` is provisional.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case", deny_unknown_fields)]
@@ -258,6 +261,19 @@ pub enum PlannerCmd {
         plan_request_id: String,
         facts_refs: Vec<String>,
         reason: RankReason,
+    },
+    /// Commit the route found by search `req_id`: Kotlin calls `dc_route_commit` with the
+    /// route body of that search. Emitted only for a `reroute` / ad-hoc `explicit_plan`
+    /// search that returned `ok` with a still valid state (not cancelled / stuck, its
+    /// `route_key` equal to the current route). Never for an avoid chip (it needs
+    /// `dc_avoid_offer_eval` and consent) nor for a plan's candidate (→ `rank`).
+    /// `route_key` is the current route's key *when the search started* (not the new
+    /// route's); `dc_route_commit` re-checks it against the current route and returns
+    /// `E_STALE` without replacing anything when the route changed meanwhile.
+    /// Team decision 2026-11-25 (not in docs yet).
+    Commit {
+        req_id: String,
+        route_key: RouteKey,
     },
 }
 
@@ -290,6 +306,9 @@ pub enum SearchPriority {
 /// from the plan start) and the native watchdog limit (03 §3.1, 07 §1: short 5 s /
 /// long 10 s, counted from each native call's start). Fixed for all candidate searches of
 /// the same plan_request.
+/// Outside a plan (reroute / avoid chip) it is fixed at each search start from the valid
+/// remaining ETA on the current route and selects only the watchdog limit (team decision
+/// 2026-11-25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DistanceClass {
@@ -321,11 +340,6 @@ pub enum UiCmd {
     /// "経路を確認中" (03 §3.1 engine_stuck, 04 §3 off_route / rerouting, Gate 7 t1).
     /// `{}` variant: a unit variant would silently accept unknown fields.
     ShowCheckingRoute {},
-    /// Adopted search result; Kotlin performs the atomic commit via dc_route_commit.
-    SearchResultReady {
-        req_id: String,
-        facts_ref: Option<String>,
-    },
     /// Present a validated override on the confirm screen Kotlin opened (05 §3.2: only
     /// while `route_key` matches and that screen is still valid; ADR-0007: confirmation
     /// itself only comes from dict `yes` or `user_tap`). `expires_at_mono_ms` is the

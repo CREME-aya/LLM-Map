@@ -1,0 +1,16 @@
+{
+  "description": "Gate 7: distance_class of searches outside a plan (reroute / avoid_chip; team decision 2026-11-25). Fixed when the search starts from the valid remaining ETA on the current route: < 1800 s -> short; >= 1800 s, unknown or invalidated -> long; the latest plan's class is never inherited. Only the native watchdog (short 5 s / long 10 s from each start) applies; the comparison budget is for plans. Cases: remaining ETA 1799 s (29:59) -> r1 short (watchdog 1000 + 5000); 1800 s (30:00) -> r2 long (3000 + 10000); plan p1 is short (estimate 1799 s) but off-route invalidates the remaining ETA -> the reroute r3 is long. 'route_eta' steps stand in for the remaining ETA from map-matching (null = invalidated; TODO), 'request' steps for triggers not wired into dc_tick yet.",
+  "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"},
+  "steps": [
+    {"step": "route_eta", "remaining_eta_s": 1799},
+    {"expect_starts": [{"req_id": "r1", "priority": "reroute", "distance_class": "short"}], "step": "request", "now_mono_ms": 1000, "priority": "reroute"},
+    {"step": "tick", "input": {"now_mono_ms": 2000, "events": [{"at_mono_ms": 2000, "kind": "search_finished", "req_id": "r1", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"}, "graph_version": "jp-2026.11.0", "outcome": "error", "engine_ms": 1000}]}},
+    {"step": "route_eta", "remaining_eta_s": 1800},
+    {"expect_starts": [{"req_id": "r2", "priority": "avoid_chip", "distance_class": "long"}], "step": "request", "now_mono_ms": 3000, "priority": "avoid_chip"},
+    {"step": "tick", "input": {"now_mono_ms": 4000, "events": [{"at_mono_ms": 4000, "kind": "search_finished", "req_id": "r2", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"}, "graph_version": "jp-2026.11.0", "outcome": "error", "engine_ms": 1000}]}},
+    {"step": "plan", "now_mono_ms": 5000, "plan_request_id": "p1", "eta_estimate_s": 1799},
+    {"step": "route_eta", "remaining_eta_s": 1799},
+    {"step": "route_eta", "remaining_eta_s": null},
+    {"expect_starts": [{"req_id": "r3", "priority": "reroute", "distance_class": "long"}], "step": "request", "now_mono_ms": 6000, "priority": "reroute"}
+  ]
+}

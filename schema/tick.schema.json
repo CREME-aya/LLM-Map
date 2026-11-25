@@ -466,7 +466,7 @@
       ]
     },
     "DistanceClass": {
-      "description": "Distance class the Planner fixes before searching, for every candidate search of the same plan: pre-search ETA estimate < 1800 s -> short; >= 1800 s or no estimate -> long; searches outside any plan take the latest plan's class (long when there was none). Selects the comparison budget (3 s / 8 s from the plan start) and the watchdog limit (5 s / 10 s from each start) (03 §3.1, 07 §1).",
+      "description": "Distance class the Planner fixes before searching, for every candidate search of the same plan: pre-search ETA estimate < 1800 s -> short; >= 1800 s or no estimate -> long; selects the comparison budget (3 s / 8 s from the plan start) and the watchdog limit (5 s / 10 s from each start) (03 §3.1, 07 §1). Searches outside a plan (reroute / avoid_chip) fix it at their start from the valid remaining ETA on the current route (< 1800 s -> short; >= 1800 s, unknown or invalidated -> long; the plan's class is not inherited) and use it for the watchdog limit only (team decision 2026-11-25).",
       "enum": [
         "short",
         "long"
@@ -612,6 +612,27 @@
               "$ref": "#/$defs/RankReason"
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cmd",
+            "req_id",
+            "route_key"
+          ],
+          "description": "Kotlin calls dc_route_commit with the route body of search req_id. Only for a reroute / explicit_plan search outside a plan that returned ok with a valid state (not cancelled / engine_stuck, route_key equal to the current route); never for avoid_chip (dc_avoid_offer_eval + consent) nor for a plan candidate (rank). route_key is the current route's key when the search started (not the new route's); dc_route_commit re-checks it and returns E_STALE without replacing anything if the route changed meanwhile. Team decision 2026-11-25, not in docs yet.",
+          "properties": {
+            "cmd": {
+              "const": "commit"
+            },
+            "req_id": {
+              "type": "string"
+            },
+            "route_key": {
+              "$ref": "common.schema.json#/$defs/RouteKey"
+            }
+          }
         }
       ]
     },
@@ -627,28 +648,6 @@
           "properties": {
             "ui": {
               "const": "show_checking_route"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "ui",
-            "req_id"
-          ],
-          "properties": {
-            "ui": {
-              "const": "search_result_ready"
-            },
-            "req_id": {
-              "type": "string"
-            },
-            "facts_ref": {
-              "type": [
-                "string",
-                "null"
-              ]
             }
           }
         },

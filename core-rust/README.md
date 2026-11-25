@@ -17,13 +17,13 @@ core-rust/
 |---:|---|---|---|
 | 1 | `dc_abi_version()` | Returns a u32 with the ABI version in the upper 16 bits and the schema version in the lower 16 (currently `0x0001_0001`) | Implemented |
 | 2 | `dc_buf_free(dc_out)` | Frees a `dc_out` allocated by Rust, exactly once. `{NULL,0}` is a no-op | Implemented |
-| 3 | `dc_session_new(config, **out)` | Creates the session state (search slot, deadlines, etc.) from config JSON. On failure sets `*out=NULL` and returns an error envelope | Implemented (config: optional `watchdog_{short,long}_ms` 5 s / 10 s and `comparison_budget_{short,long}_ms` 3 s / 8 s; distance class `short|long` fixed per plan from the pre-search ETA, < 1800 s → short) |
+| 3 | `dc_session_new(config, **out)` | Creates the session state (search slot, deadlines, etc.) from config JSON. On failure sets `*out=NULL` and returns an error envelope | Implemented (config: optional `watchdog_{short,long}_ms` 5 s / 10 s and `comparison_budget_{short,long}_ms` 3 s / 8 s; distance class `short|long` fixed per plan from the pre-search ETA, or per search outside a plan from the remaining ETA, < 1800 s → short) |
 | 4 | `dc_session_free(s)` | Frees the session when the actor explicitly closes it. NULL is safe; double free is undefined | Implemented |
-| 5 | `dc_plan_candidates(snapshot)` | Builds the candidate search requests `CandidateRequest[]` from a `TripPlanSnapshot` | `E_UNIMPLEMENTED` (not wired: the body `Session::plan_candidates(now, eta?, snapshot)` exists and needs the session; the signature change comes first) |
+| 5 | `dc_plan_candidates(s, req)` | `{now_mono_ms, eta_estimate_s?, snapshot}` → `{plan_request_id, distance_class, candidates, planner_cmds, next_wake_mono_ms, log}`: fixes the plan's distance class, builds `CandidateRequest[]` from the `TripPlanSnapshot`, queues their searches and returns the first `start` | Implemented (`Session::plan_candidates`; candidate triggers / `through_anchor` TODO) |
 | 6 | `dc_rank(req)` | Applies L1/L2 3-axis scoring and the detour cap (shared with #11) to `{facts[], policy, profile}` and returns a `RouteComparison` | `E_UNIMPLEMENTED` |
 | 7 | `dc_validate_override(s, req)` | Parses and validates the SLM's 1-line command code in Rust and returns `Applied` or `Rejected{code}` | SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only; everything else `E_UNIMPLEMENTED` |
 | 8 | `dc_trip_score(summary)` | Computes the trip score (long-distance/trip detection) from a trip summary | `E_UNIMPLEMENTED` |
-| 9 | `dc_route_commit(s, bundle)` | Normalizes and loads the confirmed route's maneuver list (the only place the route body is passed) | `E_UNIMPLEMENTED` |
+| 9 | `dc_route_commit(s, bundle)` | Normalizes and loads the confirmed route's maneuver list (the only place the route body is passed) | Partial: `{route_key, ...}` — re-checks `route_key` (from `commit`) against the current route, `E_STALE` without replacing anything when it changed; loading itself is `E_UNIMPLEMENTED` |
 | 10 | `dc_tick(s, tick)` | The only event entry point. Takes `TickInput` and returns `horizon?/voice_cmds/ui_cmds/planner_cmds/next_wake_mono_ms/log` | Search planner (incl. watchdog → `engine_stuck` detected from `now_mono_ms`), time clamping and thermal collapse only |
 | 11 | `dc_avoid_offer_eval(s, req)` | Decides whether to show an `AvoidOffer` from `{now_mono_ms, alt_facts}`, using the same detour-cap function as #6 | `E_UNIMPLEMENTED` |
 | 12 | `dc_exchange_validate(req)` | Validates `{kind, payload}` received via `exchange-v1` | `E_UNIMPLEMENTED` |
@@ -32,11 +32,22 @@ JSON conventions (docs v1.2 ADR-0008): `*_mono_ms` are JSON numbers; only Web-re
 (`trip_revision`, `route_revision`, edge ids) are decimal strings; enum values are snake_case;
 `dc_validate_override` returns `{"result":"applied"|"rejected", ...}`. `search_finished.outcome` is `ok|cancelled|error`.
 `planner_cmds.start` carries the required `distance_class: short|long` fixed by the Planner,
-and `candidate_id` for a plan's candidate search. A plan ends with exactly one
+and `candidate_id` for a plan's candidate search. A plan's class comes from the pre-search ETA
+estimate and is fixed for the plan; a search outside a plan (reroute / avoid chip) fixes its
+class at its start from the valid remaining ETA on the current route (< 1800 s → short;
+≥ 1800 s, unknown or invalidated by off-route → long; the plan's class is not inherited) and
+uses it only for the watchdog limit (5 s / 10 s); the comparison budget (3 s / 8 s) is for plans. A plan ends with exactly one
 `rank{plan_request_id, facts_refs, reason: all_done|budget_expired}`: Kotlin then calls
 `dc_rank` with the CandidateFacts behind `facts_refs` (`search_finished.facts_ref`,
 formerly `comparison_ref`). On budget expiry queued candidates are dropped and a running one
 is cancelled; it keeps the slot until its `search_finished`.
+`commit{req_id, route_key}` is emitted only when a `reroute` / ad-hoc `explicit_plan` search
+returns `ok` with a valid state (not cancelled / stuck, `route_key` equal to the current
+route): Kotlin calls `dc_route_commit` with that search's route body. `route_key` is the current
+route's key when the search started (not the new route's); `dc_route_commit` re-checks it and
+returns `E_STALE` if the route was replaced meanwhile. An avoid-chip `ok` is never committed
+(it needs `dc_avoid_offer_eval` and consent; not wired yet). "経路を確認中" for a search in
+progress is `horizon.status` (`off_route` / `rerouting`), not a per-result UiCmd.
 Unknown fields are rejected with `E_SCHEMA` wherever the schema says `additionalProperties: false`
 (TickInput, Fix, every Event kind, PlannerCmd, VoiceCmd, UiCmd, TickOutput, LogEvent) and in the schema-less
 `dc_validate_override` request and `dc_session_new` config.
@@ -45,7 +56,7 @@ Unknown fields are rejected with `E_SCHEMA` wherever the schema says `additional
 what docs v1.2 names:
 - `voice_cmds`: `speak{token, priority: p0|p1|p2|p3, template_id, params{name: integer}}` |
   `stop{token}` (05 §5; no text crosses the boundary, Kotlin renders the template).
-- `ui_cmds`: `show_checking_route` | `search_result_ready{req_id, facts_ref}` |
+- `ui_cmds`: `show_checking_route` (engine_stuck) |
   `show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}` (05 §3.2, ADR-0007) |
   `dismiss{target_id, reason: expired|cancelled|route_changed|superseded}` (04 §4.3, 05 §3.2, ADR-0007).
 

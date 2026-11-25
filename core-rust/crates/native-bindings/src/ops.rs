@@ -2,8 +2,9 @@
 //! Every function returns a complete `{ok, data | error}` envelope.
 
 use contracts::override_types::ValidateOverrideRequest;
+use contracts::plan::PlanCandidatesRequest;
 use contracts::tick::TickInput;
-use contracts::{envelope_err, envelope_ok, ErrorCode};
+use contracts::{envelope_err, envelope_ok, ErrorCode, RouteKey};
 use drive_core::{CoreError, Session};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -84,6 +85,38 @@ pub fn validate_override(s: &mut Session, input: &[u8]) -> Vec<u8> {
             Err(e) => err(e),
         },
         Err(e) => envelope_err(ErrorCode::Schema, &format!("validate_override: {e}")),
+    }
+}
+
+/// `dc_plan_candidates(s, {now_mono_ms, eta_estimate_s?, snapshot})` →
+/// `Session::plan_candidates` result.
+pub fn plan_candidates(s: &mut Session, input: &[u8]) -> Vec<u8> {
+    match serde_json::from_slice::<PlanCandidatesRequest>(input) {
+        Ok(r) => envelope_ok(&s.plan_candidates(r.now_mono_ms, r.eta_estimate_s, &r.snapshot)),
+        Err(e) => envelope_err(ErrorCode::Schema, &format!("plan_candidates: {e}")),
+    }
+}
+
+/// `dc_route_commit`: `{route_key, ...}`. Only the `route_key` re-check is implemented
+/// (`E_STALE` when the current route changed since the search started); the rest of the
+/// route bundle is not specified yet (TODO(abi-v1)) and is not read.
+pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
+    let v: serde_json::Value = match serde_json::from_slice(input) {
+        Ok(v) => v,
+        Err(e) => return envelope_err(ErrorCode::Schema, &format!("route_commit: {e}")),
+    };
+    let key = match v
+        .get("route_key")
+        .cloned()
+        .map(serde_json::from_value::<RouteKey>)
+    {
+        Some(Ok(k)) => k,
+        Some(Err(e)) => return envelope_err(ErrorCode::Schema, &format!("route_commit: {e}")),
+        None => return envelope_err(ErrorCode::Schema, "route_commit: missing field `route_key`"),
+    };
+    match s.check_route_commit(&key) {
+        Ok(()) => unimplemented("dc_route_commit", input),
+        Err(e) => err(e),
     }
 }
 

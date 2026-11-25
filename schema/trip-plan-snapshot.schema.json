@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://slm-map.invalid/schema/trip-plan-snapshot.schema.json",
   "title": "TripPlanSnapshot (v1 skeleton)",
-  "description": "Input of dc_plan_candidates. Source: devteam #13 draft. TODO(schema-v1): GeoPoint shape, vias[] item shape, budget units are not specified in the conversation and are provisional.",
+  "description": "snapshot field of the dc_plan_candidates(s, {now_mono_ms, eta_estimate_s?, snapshot}) input. Source: devteam #13 draft. TODO(schema-v1): GeoPoint shape, vias[] item shape, budget units are not specified in the conversation and are provisional.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "trip_id", "trip_revision", "plan_request_id", "graph_version",

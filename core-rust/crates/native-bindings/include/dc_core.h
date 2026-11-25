@@ -35,11 +35,15 @@ typedef struct dc_session dc_session;
 /* 4  */ void     dc_session_free(dc_session* s);       /* NULL is safe. Double free is undefined.
                                                          * Called on explicit actor close, never from a GC finalizer. */
 
-/* 5  */ dc_out   dc_plan_candidates(dc_in trip_plan_snapshot_json);           /* -> CandidateRequest[]   (TODO: E_UNIMPLEMENTED) */
-         /* TODO(abi-v1): not wired. The body is Session::plan_candidates(now_mono_ms, eta_estimate_s?,
-          * TripPlanSnapshot) -> {plan_request_id, distance_class, candidates[], planner_cmds[],
-          * next_wake_mono_ms, log[]}; it needs the session, so the signature change
-          * (dc_plan_candidates(s, ...), decided, separate work before Gate 0) comes first. */
+/* 5  */ dc_out   dc_plan_candidates(dc_session* s, dc_in req_json);
+         /* in : {now_mono_ms, eta_estimate_s?, snapshot: TripPlanSnapshot}
+          *      eta_estimate_s = pre-search ETA estimate (< 1800 -> short; >= 1800 or absent -> long)
+          * out: {plan_request_id, distance_class: short|long,
+          *       candidates[{candidate_id, label, priority, engine_alternates, costing_variant?}],
+          *       planner_cmds[] (the first start{..., candidate_id}; the rest come from dc_tick),
+          *       next_wake_mono_ms: u64|null, log[]}
+          * Same plan_request_id as the current plan -> class kept, nothing re-queued; a new one
+          * supersedes the current plan (its running search gets cancel). Unknown fields -> E_SCHEMA. */
 /* 6  */ dc_out   dc_rank(dc_in rank_req_json);         /* {facts[], policy, profile} -> RouteComparison (TODO: E_UNIMPLEMENTED) */
 /* 7  */ dc_out   dc_validate_override(dc_session* s, dc_in req_json);
          /* req: {code_line, contract, utterance_id (required), utterance_mono_ms, ref_frame_seq, pending_offer_id?}
@@ -48,7 +52,10 @@ typedef struct dc_session dc_session;
           *                               |FORBIDDEN_WHILE_DRIVING|NO_EFFECT|NO_PENDING_TARGET}
           * (skeleton: SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only, else E_UNIMPLEMENTED) */
 /* 8  */ dc_out   dc_trip_score(dc_in trip_summary_json);                      /* TODO: E_UNIMPLEMENTED */
-/* 9  */ dc_out   dc_route_commit(dc_session* s, dc_in route_bundle_json);     /* route body only here (TODO: E_UNIMPLEMENTED) */
+/* 9  */ dc_out   dc_route_commit(dc_session* s, dc_in route_bundle_json);     /* route body only here */
+         /* in: {route_key, ...}: route_key from planner_cmds commit (the current route's key when
+          * the search started). Re-checked against the current route: changed -> E_STALE, nothing
+          * replaced. Loading the route body: TODO E_UNIMPLEMENTED (bundle shape TODO(abi-v1)). */
 /* 10 */ dc_out   dc_tick(dc_session* s, dc_in tick_json);
          /* dc_tick v2:
           * in : {now_mono_ms, fix?{at_mono_ms, lat, lon, acc_m, bearing?, speed?},
@@ -71,12 +78,15 @@ typedef struct dc_session dc_session;
           * out: {horizon? (only when frame_seq changed),
           *       voice_cmds[speak{token, priority: p0|p1|p2|p3, template_id, params{name: int}}
           *                 | stop{token}],
-          *       ui_cmds[show_checking_route | search_result_ready{req_id, facts_ref}
+          *       ui_cmds[show_checking_route
           *              | show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}
           *              | dismiss{target_id, reason: expired|cancelled|route_changed|superseded}],
           *       planner_cmds[start{req_id, priority, distance_class: short|long, route_key,
           *                    graph_version, candidate_id?} | cancel{req_id}
-          *                  | rank{plan_request_id, facts_refs[], reason: all_done|budget_expired}],
+          *                  | rank{plan_request_id, facts_refs[], reason: all_done|budget_expired}
+          *                  | commit{req_id, route_key}],
+          *   commit: only for a reroute / ad-hoc explicit_plan ok with a valid state; Kotlin calls
+          *   dc_route_commit with that search's route body (never for avoid_chip / plan candidates).
           *   rank: once per plan; Kotlin calls dc_rank with the CandidateFacts behind facts_refs
           *   (may be empty). The plan is over: no more start for it, a late search_finished
           *   only frees the slot (discarded_late).

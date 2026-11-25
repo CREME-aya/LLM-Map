@@ -123,14 +123,41 @@ impl Session {
         self.current_route_key = Some(key);
     }
 
+    /// `dc_route_commit` guard (team decision 2026-11-25): `route_key` is the one from
+    /// `commit{req_id, route_key}`, i.e. the current route's key when that search started.
+    /// If the current route is no longer that one (replaced after the commit was issued,
+    /// or none), the late route is refused with `E_STALE` and nothing is replaced, so it
+    /// never reaches the horizon or voice_cmds.
+    /// TODO(abi-v1): loading the route body (operations normalization) is not implemented;
+    /// `dc_route_commit` returns E_UNIMPLEMENTED after this check passes.
+    pub fn check_route_commit(&self, route_key: &RouteKey) -> Result<(), CoreError> {
+        match &self.current_route_key {
+            Some(k) if k == route_key => Ok(()),
+            _ => Err(CoreError::new(
+                ErrorCode::Stale,
+                "route_key no longer matches the current route",
+            )),
+        }
+    }
+
+    /// Remaining ETA on the current route (`None` = unknown / invalidated, e.g. off-route).
+    /// Decides the distance class of searches outside a plan when they start (planner docs).
+    /// Ignored without a committed route; a later route change makes it stale by route_key.
+    /// TODO(drive-core): set from map-matching / the committed route's ETA instead.
+    pub fn set_remaining_eta(&mut self, remaining_eta_s: Option<u64>) {
+        match (&self.current_route_key, remaining_eta_s) {
+            (Some(k), Some(s)) => self.planner.set_route_eta(k.clone(), s),
+            _ => self.planner.invalidate_route_eta(),
+        }
+    }
+
     /// `dc_plan_candidates` body (team decision 2026-11-25): fixes the plan's distance
     /// class (`begin_plan`), builds the ordered `CandidateRequest[]`, queues their searches
     /// and returns the first `start` (one search at a time; the rest start from `dc_tick`
     /// as each `search_finished` arrives). The plan ends with one `rank` in `planner_cmds`.
     /// Candidate searches use `route_key {trip_id, trip_revision, route_revision: 0,
     /// graph_version}` from the snapshot.
-    /// TODO(abi-v1): dc_plan_candidates(dc_in) takes no session today; the ABI change to
-    /// pass the session (decided, separate work before Gate 0) will just call this.
+    /// Called by `dc_plan_candidates(s, {now_mono_ms, eta_estimate_s?, snapshot})`.
     /// TODO(abi-v1): route_revision 0 for a plan without a committed route is provisional;
     /// `budget.deadline_ms` is not used (its relation to the comparison budget is unspecified).
     pub fn plan_candidates(
