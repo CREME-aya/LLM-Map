@@ -41,3 +41,13 @@ pub struct RouteKey {
     pub route_revision: U64Str,
     pub graph_version: String,
 }
+
+/// `Option<T>` that must be present (may be `null`). Without `deserialize_with`, serde would
+/// treat a missing `Option` field as `None`; tick.schema.json requires the key.
+pub(crate) fn required_nullable<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d)
+}

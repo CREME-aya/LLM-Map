@@ -3,6 +3,7 @@
 
 use contracts::override_types::ValidateOverrideRequest;
 use contracts::plan::PlanCandidatesRequest;
+use contracts::route::RouteCommitRequest;
 use contracts::tick::TickInput;
 use contracts::{envelope_err, envelope_ok, ErrorCode, RouteKey};
 use drive_core::{CoreError, Session};
@@ -97,25 +98,39 @@ pub fn plan_candidates(s: &mut Session, input: &[u8]) -> Vec<u8> {
     }
 }
 
-/// `dc_route_commit`: `{route_key, ...}`. Only the `route_key` re-check is implemented
-/// (`E_STALE` when the current route changed since the search started); the rest of the
-/// route bundle is not specified yet (TODO(abi-v1)) and is not read.
+/// `dc_route_commit`: `{expected_route_key, bundle}` (`contracts::route::RouteCommitRequest`).
+/// `expected_route_key` (from `commit`, or `null` for the first route) is re-checked against the
+/// current route first (`E_STALE`, nothing replaced); then the bundle is validated
+/// (`E_SCHEMA`) and becomes the current route.
 pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
     let v: serde_json::Value = match serde_json::from_slice(input) {
         Ok(v) => v,
         Err(e) => return envelope_err(ErrorCode::Schema, &format!("route_commit: {e}")),
     };
-    let key = match v
-        .get("route_key")
-        .cloned()
-        .map(serde_json::from_value::<RouteKey>)
-    {
-        Some(Ok(k)) => k,
-        Some(Err(e)) => return envelope_err(ErrorCode::Schema, &format!("route_commit: {e}")),
-        None => return envelope_err(ErrorCode::Schema, "route_commit: missing field `route_key`"),
+    // The guard is checked before the body so a late route is refused as E_STALE even if
+    // its body would not parse.
+    let key = match v.get("expected_route_key").cloned() {
+        Some(serde_json::Value::Null) => None,
+        Some(k) => match serde_json::from_value::<RouteKey>(k) {
+            Ok(k) => Some(k),
+            Err(e) => return envelope_err(ErrorCode::Schema, &format!("route_commit: {e}")),
+        },
+        None => {
+            return envelope_err(
+                ErrorCode::Schema,
+                "route_commit: missing field `expected_route_key`",
+            )
+        }
     };
-    match s.check_route_commit(&key) {
-        Ok(()) => unimplemented("dc_route_commit", input),
+    if let Err(e) = s.check_route_guard(key.as_ref()) {
+        return err(e);
+    }
+    let req: RouteCommitRequest = match serde_json::from_value(v) {
+        Ok(r) => r,
+        Err(e) => return envelope_err(ErrorCode::Schema, &format!("route_commit: {e}")),
+    };
+    match s.route_commit(&req) {
+        Ok(r) => envelope_ok(&r),
         Err(e) => err(e),
     }
 }

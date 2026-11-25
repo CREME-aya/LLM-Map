@@ -40,9 +40,15 @@
 //!   search start); Kotlin then calls `dc_route_commit` with that search's route body. An
 //!   avoid-chip `ok` is never committed here (it goes through `dc_avoid_offer_eval` and
 //!   consent). "経路を確認中" is shown through `horizon.status`, not a UiCmd per result.
+//!   The commit additionally needs the session to be following the vehicle with
+//!   confidence (`commit_allowed`: horizon status not `uncertain` / `finished`).
+//! - `engine_stuck` emits no UiCmd (docs 03 §3.1, `show_checking_route` is abolished): a
+//!   stuck reroute keeps `horizon.status = rerouting` (the slot stays occupied); a stuck
+//!   avoid-chip search leaves the status unchanged and is only logged, and no new avoid
+//!   chip can start until the slot is freed.
 
 use contracts::tick::{
-    DistanceClass, LogEvent, PlannerCmd, RankReason, SearchOutcome, SearchPriority, UiCmd,
+    DistanceClass, Fix, LogEvent, PlannerCmd, RankReason, SearchOutcome, SearchPriority, UiCmd,
 };
 use contracts::RouteKey;
 use std::collections::VecDeque;
@@ -142,6 +148,8 @@ pub enum Slot {
 struct Pending {
     priority: SearchPriority,
     route_key: RouteKey,
+    /// Current position for a reroute (`start.fix`).
+    fix: Option<Fix>,
 }
 
 /// Remaining ETA on a route, as last reported. Valid only for that `route_key` and until
@@ -274,7 +282,7 @@ impl SearchPlanner {
         match &self.slot {
             Slot::Running { req } if of_plan(req) => {
                 let req = req.clone();
-                Self::send_cancel(now, &req, false, fx);
+                Self::send_cancel(now, &req, fx);
                 self.slot = Slot::CancelRequested { req };
             }
             Slot::EngineStuck {
@@ -282,7 +290,7 @@ impl SearchPlanner {
                 cancel_sent: false,
             } if of_plan(req) => {
                 let req = req.clone();
-                Self::send_cancel(now, &req, false, fx);
+                Self::send_cancel(now, &req, fx);
                 self.slot = Slot::EngineStuck {
                     req,
                     cancel_sent: true,
@@ -351,17 +359,20 @@ impl SearchPlanner {
         DistanceClass::from_eta_estimate_s(eta)
     }
 
-    /// Enqueue a search request into the single priority queue.
+    /// Enqueue a search request into the single priority queue. `fix` is the current
+    /// position handed to a reroute (`start.fix`).
     pub fn request(
         &mut self,
         now: u64,
         priority: SearchPriority,
         route_key: RouteKey,
+        fix: Option<Fix>,
         fx: &mut Effects,
     ) {
         self.keep_higher(Pending {
             priority,
             route_key,
+            fix,
         });
         self.preempt_or_start(now, priority, fx);
     }
@@ -369,12 +380,11 @@ impl SearchPlanner {
     /// A search of `priority` is waiting: start it if the slot is free, or cancel a
     /// lower-priority running search (it keeps the slot until its `search_finished`).
     fn preempt_or_start(&mut self, now: u64, priority: SearchPriority, fx: &mut Effects) {
-        let reroute = priority == SearchPriority::Reroute;
         match &self.slot {
             Slot::Idle => self.start_next(now, fx),
             Slot::Running { req } if req.priority < priority => {
                 let req = req.clone();
-                Self::send_cancel(now, &req, reroute, fx);
+                Self::send_cancel(now, &req, fx);
                 self.slot = Slot::CancelRequested { req };
             }
             Slot::EngineStuck {
@@ -382,7 +392,7 @@ impl SearchPlanner {
                 cancel_sent: false,
             } if req.priority < priority => {
                 let req = req.clone();
-                Self::send_cancel(now, &req, reroute, fx);
+                Self::send_cancel(now, &req, fx);
                 self.slot = Slot::EngineStuck {
                     req,
                     cancel_sent: true,
@@ -392,14 +402,43 @@ impl SearchPlanner {
         }
     }
 
-    fn send_cancel(now: u64, req: &SearchReq, checking_route: bool, fx: &mut Effects) {
+    fn send_cancel(now: u64, req: &SearchReq, fx: &mut Effects) {
         fx.planner_cmds.push(PlannerCmd::Cancel {
             req_id: req.req_id.clone(),
         });
-        if checking_route {
-            fx.ui_cmds.push(UiCmd::ShowCheckingRoute {});
-        }
         log(fx, now, "search_cancel_requested", Some(&req.req_id), None);
+    }
+
+    /// A reroute is waiting or occupies the slot (no second one is requested).
+    pub fn has_reroute(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| p.priority == SearchPriority::Reroute)
+            || self.reroute_in_slot()
+    }
+
+    /// The slot holds a reroute (running, being cancelled or stuck): `horizon.status`
+    /// is `rerouting`.
+    pub fn reroute_in_slot(&self) -> bool {
+        match &self.slot {
+            Slot::Idle => false,
+            Slot::Running { req }
+            | Slot::CancelRequested { req }
+            | Slot::EngineStuck { req, .. } => req.priority == SearchPriority::Reroute,
+        }
+    }
+
+    /// A new route was committed: a waiting request made for another route is dropped.
+    pub fn on_route_changed(&mut self, now: u64, route_key: &RouteKey, fx: &mut Effects) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.route_key != *route_key)
+        {
+            let p = self.pending.take().expect("checked");
+            let detail = format!("priority={}", priority_name(p.priority));
+            log(fx, now, "pending_dropped_route_changed", None, Some(detail));
+        }
     }
 
     fn keep_higher(&mut self, new: Pending) {
@@ -428,7 +467,8 @@ impl SearchPlanner {
             (None, Some(_)) => true,
             (_, None) => false,
         };
-        let (priority, route_key, distance_class, plan_request_id, candidate_id) = if take_plan {
+        let (priority, route_key, distance_class, plan_request_id, candidate_id, fix) = if take_plan
+        {
             let plan = self.plan.as_mut().expect("plan head implies plan");
             let s = plan.queue.pop_front().expect("plan head");
             (
@@ -437,12 +477,13 @@ impl SearchPlanner {
                 plan.distance_class,
                 Some(plan.plan_request_id.clone()),
                 Some(s.candidate_id),
+                None,
             )
         } else {
             let Some(p) = self.pending.take() else { return };
             // Fixed here, at the start, for the whole native call.
             let class = self.adhoc_distance_class(&p.route_key);
-            (p.priority, p.route_key, class, None, None)
+            (p.priority, p.route_key, class, None, None, p.fix)
         };
         let req_id = format!("r{}", self.next_req_seq); // TODO(abi-v1): req_id format provisional
         self.next_req_seq += 1;
@@ -453,6 +494,7 @@ impl SearchPlanner {
             graph_version: route_key.graph_version.clone(),
             route_key: route_key.clone(),
             candidate_id: candidate_id.clone(),
+            fix,
         });
         let mut detail = format!("distance_class={}", class_name(distance_class));
         if let Some(c) = &candidate_id {
@@ -482,6 +524,7 @@ impl SearchPlanner {
         outcome: SearchOutcome,
         facts_ref: Option<&str>,
         current_route_key: Option<&RouteKey>,
+        commit_allowed: bool,
         fx: &mut Effects,
     ) {
         let (req, cancelled, stuck) = match &self.slot {
@@ -521,8 +564,18 @@ impl SearchPlanner {
             SearchOutcome::Ok if Some(route_key) != current_route_key => {
                 log(fx, at, "discarded_stale_route_key", Some(req_id), None)
             }
-            // TODO(drive-core): also require horizon.status == tracking (04 §3) once the
-            // ManeuverHorizon is produced.
+            // 04 §3 / 03 §3.1 "status=tracking": the session must be following the vehicle
+            // with confidence (not uncertain / finished; off_route / rerouting is the state
+            // a reroute was started for). Decided by the session (`commit_allowed`).
+            SearchOutcome::Ok
+                if !commit_allowed
+                    && matches!(
+                        req.priority,
+                        SearchPriority::Reroute | SearchPriority::ExplicitPlan
+                    ) =>
+            {
+                log(fx, at, "discarded_not_tracking", Some(req_id), None)
+            }
             SearchOutcome::Ok
                 if matches!(
                     req.priority,
@@ -585,8 +638,10 @@ impl SearchPlanner {
             Slot::CancelRequested { req } => (req.clone(), true),
             _ => return,
         };
-        fx.ui_cmds.push(UiCmd::ShowCheckingRoute {});
-        log(fx, now, "engine_stuck", Some(&req.req_id), None);
+        // No UiCmd: a stuck reroute stays `rerouting` (the slot is still occupied); a stuck
+        // avoid chip / other search leaves horizon.status unchanged, log only.
+        let detail = format!("priority={}", priority_name(req.priority));
+        log(fx, now, "engine_stuck", Some(&req.req_id), Some(detail));
         self.slot = Slot::EngineStuck { req, cancel_sent };
     }
 
@@ -609,6 +664,15 @@ impl SearchPlanner {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
+    }
+}
+
+fn priority_name(p: SearchPriority) -> &'static str {
+    match p {
+        SearchPriority::Reroute => "reroute",
+        SearchPriority::ExplicitPlan => "explicit_plan",
+        SearchPriority::AvoidChip => "avoid_chip",
+        SearchPriority::Comparison => "comparison",
     }
 }
 

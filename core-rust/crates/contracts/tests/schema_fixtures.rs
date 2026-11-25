@@ -9,13 +9,14 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 const BASE: &str = "https://slm-map.invalid/schema/";
-const SCHEMAS: [&str; 6] = [
+const SCHEMAS: [&str; 7] = [
     "common",
     "trip-plan-snapshot",
     "candidate-facts",
     "maneuver-horizon",
     "personal-routing-override",
     "tick",
+    "route-bundle",
 ];
 
 fn schema_dir() -> PathBuf {
@@ -43,6 +44,18 @@ fn compile_doc(name: &str, root: &Value) -> JSONSchema {
     }
     opts.compile(root)
         .unwrap_or_else(|e| panic!("compile {name}: {e}"))
+}
+
+/// Compiles `route-bundle.schema.json#/$defs/<def>`.
+fn route_def(def: &str) -> JSONSchema {
+    compile_doc(
+        def,
+        &serde_json::json!({ "$ref": format!("{BASE}route-bundle.schema.json#/$defs/{def}") }),
+    )
+}
+
+fn minimal_bundle() -> Value {
+    load(&schema_dir().join("fixtures/valid/route-bundle.min.json"))
 }
 
 /// Compiles `tick.schema.json#/$defs/<def>`.
@@ -291,17 +304,24 @@ mod tick {
                         serde_json::from_value::<SearchPriority>(step["priority"].clone()).unwrap();
                     }
                     "plan" => {}
-                    "set_route" | "route_commit" => {
+                    "set_route" => {
                         let key = compile_doc(
                             "RouteKey",
                             &serde_json::json!({ "$ref": format!("{BASE}common.schema.json#/$defs/RouteKey") }),
                         );
                         assert!(key.is_valid(&step["route_key"]), "{}", p.display());
                     }
-                    // remaining ETA on the current route: seconds or null (invalidated)
-                    "route_eta" => {
-                        let e = &step["remaining_eta_s"];
-                        assert!(e.is_null() || e.is_u64(), "{}", p.display());
+                    // with a bundle: a full RouteCommitRequest; without: the guard only
+                    "route_commit" => {
+                        let req = if step.get("bundle").is_some() {
+                            serde_json::json!({"expected_route_key": step["expected_route_key"], "bundle": step["bundle"]})
+                        } else {
+                            serde_json::json!({"expected_route_key": step["expected_route_key"], "bundle": minimal_bundle()})
+                        };
+                        let c = route_def("RouteCommitRequest");
+                        assert_eq!(errors(&c, &req), Vec::<String>::new(), "{}", p.display());
+                        serde_json::from_value::<contracts::route::RouteCommitRequest>(req)
+                            .unwrap();
                     }
                     "plan_candidates" => {
                         let snap = compile("trip-plan-snapshot");
@@ -346,6 +366,7 @@ mod tick {
                     route_key: rk(),
                     graph_version: "g".into(),
                     candidate_id: None,
+                    fix: None,
                 });
                 planner_cmds.push(PlannerCmd::Start {
                     req_id: "r3".into(),
@@ -354,6 +375,23 @@ mod tick {
                     route_key: rk(),
                     graph_version: "g".into(),
                     candidate_id: Some("c2".into()),
+                    fix: None,
+                });
+                planner_cmds.push(PlannerCmd::Start {
+                    req_id: "r4".into(),
+                    priority,
+                    distance_class,
+                    route_key: rk(),
+                    graph_version: "g".into(),
+                    candidate_id: None,
+                    fix: Some(contracts::tick::Fix {
+                        at_mono_ms: 9,
+                        lat_e7: 356_812_345,
+                        lon_e7: 1_397_671_234,
+                        acc_cm: 500,
+                        bearing_cdeg: Some(35_999),
+                        speed_cm_s: Some(1_390),
+                    }),
                 });
             }
         }
@@ -371,13 +409,15 @@ mod tick {
             req_id: "r2".into(),
             route_key: rk(),
         });
-        let horizon = load(&schema_dir().join("fixtures/valid/maneuver-horizon.min.json"));
+        let horizon: contracts::horizon::ManeuverHorizon = serde_json::from_value(load(
+            &schema_dir().join("fixtures/valid/maneuver-horizon.min.json"),
+        ))
+        .unwrap();
         for (next_wake, horizon) in [(None, None), (Some(u64::MAX), Some(horizon))] {
             let out = TickOutput {
                 horizon,
                 voice_cmds: all_voice_cmds(),
                 ui_cmds: vec![
-                    UiCmd::ShowCheckingRoute {},
                     UiCmd::ShowConfirm {
                         confirm_screen_id: "s1".into(),
                         override_id: "ov1".into(),
@@ -587,7 +627,7 @@ mod tick {
             kinds += 1;
         }
         assert_eq!(kinds, 16);
-        let fix = serde_json::json!({"now_mono_ms":1,"fix":{"at_mono_ms":1,"lat":0.0,"lon":0.0,"acc_m":1.0,"alt":2}});
+        let fix = serde_json::json!({"now_mono_ms":1,"fix":{"at_mono_ms":1,"lat_e7":0,"lon_e7":0,"acc_cm":100,"alt":2}});
         let top = serde_json::json!({"now_mono_ms":1,"extra":true});
         for bad in [fix, top] {
             assert!(!input.is_valid(&bad));
@@ -656,7 +696,6 @@ mod tick {
             .map(|c| serde_json::to_value(c).unwrap())
             .collect();
         let uis: Vec<Value> = [
-            UiCmd::ShowCheckingRoute {},
             UiCmd::ShowConfirm {
                 confirm_screen_id: "s".into(),
                 override_id: "o".into(),
@@ -699,8 +738,10 @@ mod tick {
             assert!(!ui.is_valid(&bad), "{bad}");
             assert!(serde_json::from_value::<UiCmd>(bad).is_err(), "{v}");
         }
-        // show_checking_route stays a bare tag on the wire
-        assert_eq!(uis[0], serde_json::json!({"ui": "show_checking_route"}));
+        // show_checking_route is abolished on both sides
+        let gone = serde_json::json!({"ui": "show_checking_route"});
+        assert!(!ui.is_valid(&gone));
+        assert!(serde_json::from_value::<UiCmd>(gone).is_err());
     }
 
     /// `planner_cmds.start` carries a required `distance_class`; every serde Start passes
@@ -716,6 +757,7 @@ mod tick {
                 route_key: rk(),
                 graph_version: "g".into(),
                 candidate_id: None,
+                fix: None,
             })
             .unwrap();
             assert_eq!(errors(&cmd, &v), Vec::<String>::new());
@@ -725,4 +767,124 @@ mod tick {
             assert!(serde_json::from_value::<PlannerCmd>(missing).is_err());
         }
     }
+}
+
+// ---- route-bundle.schema.json ⇔ contracts::route ----------------------------------------
+
+/// Valid route-bundle fixtures parse with serde and round-trip through the schema;
+/// invalid ones that break a JSON type / range / unknown-field rule are rejected by both.
+/// (Rules JSON Schema cannot express, e.g. chunk continuity or edge coverage, are covered
+/// by drive-core's route_bundle tests.)
+#[test]
+fn rust_mirror_agrees_on_route_bundle() {
+    use contracts::route::RouteBundle;
+    let c = compile("route-bundle");
+    let mut n = 0;
+    for kind in ["valid", "invalid"] {
+        for (schema, path) in fixtures(kind) {
+            if schema != "route-bundle" {
+                continue;
+            }
+            n += 1;
+            let v = load(&path);
+            let serde = serde_json::from_value::<RouteBundle>(v.clone());
+            let f = path.display();
+            if kind == "valid" {
+                let b = serde.unwrap_or_else(|e| panic!("{f}: {e}"));
+                let back = serde_json::to_value(&b).unwrap();
+                assert_eq!(back, v, "{f}: round trip");
+                assert_eq!(errors(&c, &back), Vec::<String>::new(), "{f}");
+            } else {
+                assert!(serde.is_err(), "serde should reject {f}");
+            }
+        }
+    }
+    assert!(n >= 5, "route-bundle fixtures found: {n}");
+    // RouteCommitRequest: expected_route_key is required and nullable; unknown fields rejected.
+    let req = route_def("RouteCommitRequest");
+    let rk = serde_json::json!({"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"g"});
+    for (v, ok) in [
+        (
+            serde_json::json!({"expected_route_key": null, "bundle": minimal_bundle()}),
+            true,
+        ),
+        (
+            serde_json::json!({"expected_route_key": rk, "bundle": minimal_bundle()}),
+            true,
+        ),
+        (serde_json::json!({"bundle": minimal_bundle()}), false),
+        (
+            serde_json::json!({"route_key": null, "bundle": minimal_bundle()}),
+            false,
+        ),
+        (serde_json::json!({"expected_route_key": null}), false),
+        (
+            serde_json::json!({"expected_route_key": null, "bundle": minimal_bundle(), "x": 1}),
+            false,
+        ),
+    ] {
+        assert_eq!(req.is_valid(&v), ok, "{v}");
+        assert_eq!(
+            serde_json::from_value::<contracts::route::RouteCommitRequest>(v.clone()).is_ok(),
+            ok,
+            "{v}"
+        );
+    }
+}
+
+/// core-rust/tests/fixtures/route/*.json (GPX-like alignment cases): the bundle passes
+/// route-bundle.schema.json and every tick input passes TickInput, both also via serde.
+#[test]
+fn route_fixtures_pass_schemas() {
+    use contracts::route::RouteBundle;
+    use contracts::tick::TickInput;
+    let bundle = compile("route-bundle");
+    let input = tick_def("TickInput");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/route");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    assert!(files.len() >= 8, "{files:?}");
+    for p in files {
+        let fx = load(&p);
+        let f = p.display();
+        assert_eq!(errors(&bundle, &fx["bundle"]), Vec::<String>::new(), "{f}");
+        serde_json::from_value::<RouteBundle>(fx["bundle"].clone()).unwrap();
+        for t in fx["ticks"].as_array().into_iter().flatten() {
+            assert_eq!(errors(&input, &t["input"]), Vec::<String>::new(), "{f}");
+            serde_json::from_value::<TickInput>(t["input"].clone()).unwrap();
+        }
+    }
+}
+
+/// contracts::horizon::ManeuverHorizon agrees with maneuver-horizon.schema.json on every
+/// fixture (valid: parse + identical round trip; invalid: rejected by serde too).
+#[test]
+fn rust_mirror_agrees_on_maneuver_horizon() {
+    use contracts::horizon::ManeuverHorizon;
+    let c = compile("maneuver-horizon");
+    let mut n = 0;
+    for kind in ["valid", "invalid"] {
+        for (schema, path) in fixtures(kind) {
+            if schema != "maneuver-horizon" {
+                continue;
+            }
+            n += 1;
+            let v = load(&path);
+            let serde = serde_json::from_value::<ManeuverHorizon>(v.clone());
+            let f = path.display();
+            if kind == "valid" {
+                let h = serde.unwrap_or_else(|e| panic!("{f}: {e}"));
+                let back = serde_json::to_value(&h).unwrap();
+                assert_eq!(back, v, "{f}");
+                assert_eq!(errors(&c, &back), Vec::<String>::new(), "{f}");
+            } else {
+                assert!(serde.is_err(), "serde should reject {f}");
+            }
+        }
+    }
+    assert!(n >= 6);
 }

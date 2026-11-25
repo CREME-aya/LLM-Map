@@ -11,9 +11,22 @@ import java.io.Closeable
 //   watchdog deadline); null means "tick on each Fix only". Never report a search timeout:
 //   Rust detects it from now_mono_ms and enters engine_stuck. search_finished.outcome is
 //   ok | cancelled | error, sent exactly once when the native call really returns.
-// - planner_cmds commit{req_id, route_key}: call routeCommit() with the route body of search
-//   req_id and that route_key (the route's key when the search started). E_STALE means the
-//   route was replaced meanwhile: drop the result (nothing was replaced).
+// - TickInput.fix is integers only (docs 04 §3.1, ADR-0008). Round the Location doubles
+//   exactly once, here, and nowhere else (determinism starts at the integers):
+//     lat_e7       = Math.round(location.latitude  * 1e7)        (Int)
+//     lon_e7       = Math.round(location.longitude * 1e7)        (Int)
+//     acc_cm       = Math.round(location.accuracy * 100.0)       (meters -> cm)
+//     bearing_cdeg = Math.round(location.bearing * 100.0) % 36000   (only if hasBearing();
+//                    359.996° rounds to 36000 and wraps to 0; Rust rejects >= 36000 with E_SCHEMA)
+//     speed_cm_s   = Math.round(location.speed * 100.0)          (only if hasSpeed(); m/s -> cm/s)
+// - planner_cmds commit{req_id, route_key}: call routeCommit() with
+//   {expected_route_key, bundle}: that route_key (the route's key when the search started) and the
+//   route bundle of search req_id (schema/route-bundle.schema.json, built by C++). The first
+//   route of a session goes in with expected_route_key = null. E_STALE means the route was replaced
+//   meanwhile: drop the result (nothing was replaced).
+// - planner_cmds start{priority: reroute, fix}: Rust decided the vehicle left the route
+//   (on-route alignment is in Rust, docs 04 §3.1); search from that fix.
+// - "経路を確認中" is horizon.status off_route / rerouting; there is no show_checking_route UiCmd.
 //
 // TODO(android): NOT COMPILED (no Gradle/Android SDK yet).
 // TODO(android): JSON parsing of the envelope (kotlinx.serialization?) is not decided;

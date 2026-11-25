@@ -98,16 +98,15 @@ fn enums_are_snake_case_on_the_wire() {
         .unwrap(),
         graph_version: "g".into(),
         candidate_id: None,
+        fix: None,
     })
     .unwrap();
     assert_eq!(v["cmd"], "start");
     assert!(v.get("candidate_id").is_none(), "absent, not null");
     assert_eq!(v["priority"], "avoid_chip");
     assert_eq!(v["distance_class"], "short");
-    assert_eq!(
-        serde_json::to_value(UiCmd::ShowCheckingRoute {}).unwrap()["ui"],
-        "show_checking_route"
-    );
+    // show_checking_route is abolished ("経路を確認中" = horizon.status, ADR-0008)
+    assert!(serde_json::from_str::<UiCmd>(r#"{"ui":"show_checking_route"}"#).is_err());
     assert_eq!(
         serde_json::to_value(ThermalStatus::Critical).unwrap(),
         "critical"
@@ -154,4 +153,47 @@ fn tick_input_requires_now_and_rejects_unknown_fields() {
     assert!(serde_json::from_str::<TickInput>(r#"{"now_mono_ms":1,"extra":1}"#).is_err());
     let t: TickInput = serde_json::from_str(r#"{"now_mono_ms":1}"#).unwrap();
     assert!(t.events.is_empty() && t.fix.is_none());
+}
+
+/// Fix is integers only (04 §3.1, ADR-0008). Kotlin rounds once:
+/// `lat_e7 = Math.round(deg * 1e7)`, `bearing_cdeg = Math.round(deg * 100) % 36000`.
+#[test]
+fn fix_is_integer_and_range_checked() {
+    let parse = |fix: &str| {
+        serde_json::from_str::<TickInput>(&format!(r#"{{"now_mono_ms":1,"fix":{fix}}}"#))
+    };
+    let base = r#""at_mono_ms":1,"lat_e7":356812345,"lon_e7":1397671234,"acc_cm":500"#;
+    let t = parse(&format!(
+        "{{{base},\"bearing_cdeg\":35999,\"speed_cm_s\":139}}"
+    ))
+    .unwrap();
+    let f = t.fix.unwrap();
+    assert_eq!((f.lat_e7, f.lon_e7, f.acc_cm), (356812345, 1397671234, 500));
+    assert_eq!((f.bearing_cdeg, f.speed_cm_s), (Some(35999), Some(139)));
+    // Kotlin's rounding of 359.996° gives 36000 % 36000 = 0, which is accepted.
+    // (The f64 here only emulates Kotlin's Math.round; Rust never sees a double.)
+    let kotlin_cdeg = ((359.996_f64 * 100.0).round() as i64 % 36_000) as u16;
+    assert_eq!(kotlin_cdeg, 0);
+    let t = parse(&format!("{{{base},\"bearing_cdeg\":{kotlin_cdeg}}}")).unwrap();
+    assert_eq!(t.fix.unwrap().bearing_cdeg, Some(0));
+    // Rejected: 36000 (unwrapped), floats, legacy degree fields, out of range, negatives.
+    for bad in [
+        format!("{{{base},\"bearing_cdeg\":36000}}"),
+        format!("{{{base},\"bearing_cdeg\":-1}}"),
+        format!("{{{base},\"bearing_cdeg\":90.5}}"),
+        format!("{{{base},\"speed_cm_s\":-1}}"),
+        format!("{{{base},\"speed_cm_s\":1.5}}"),
+        r#"{"at_mono_ms":1,"lat_e7":35.68,"lon_e7":1397671234,"acc_cm":500}"#.into(),
+        r#"{"at_mono_ms":1,"lat_e7":900000001,"lon_e7":0,"acc_cm":500}"#.into(),
+        r#"{"at_mono_ms":1,"lat_e7":0,"lon_e7":-1800000001,"acc_cm":500}"#.into(),
+        r#"{"at_mono_ms":1,"lat_e7":0,"lon_e7":0,"acc_cm":-1}"#.into(),
+        r#"{"at_mono_ms":1,"lat":35.68,"lon":139.76,"acc_m":5.0}"#.into(),
+        format!("{{{base},\"bearing\":90.0}}"),
+    ] {
+        assert!(parse(&bad).is_err(), "{bad}");
+    }
+    // Round trip keeps integers.
+    let back = serde_json::to_value(parse(&format!("{{{base}}}")).unwrap()).unwrap();
+    assert_eq!(back["fix"]["lat_e7"], 356812345);
+    assert!(back["fix"].get("bearing_cdeg").is_none());
 }

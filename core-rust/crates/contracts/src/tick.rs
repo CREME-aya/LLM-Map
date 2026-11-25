@@ -8,7 +8,8 @@
 //! - `reroute_result` / `search_cancelled` are abolished: one `search_finished` per search.
 //! - There is no `timeout` outcome: the watchdog deadline is detected in Rust from
 //!   `now_mono_ms` (→ `engine_stuck`); Kotlin only calls `dc_tick` by `next_wake_mono_ms`.
-use crate::common::{MonoMs, RouteKey};
+use crate::common::{required_nullable, MonoMs, RouteKey};
+use crate::horizon::ManeuverHorizon;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -21,17 +22,71 @@ pub struct TickInput {
     pub events: Vec<Event>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+/// GNSS fix, integers only (docs 04 §3.1, ADR-0008): Kotlin rounds the `Location` doubles
+/// once, so everything from here on is deterministic integer arithmetic.
+/// - `lat_e7` / `lon_e7` = `Math.round(deg * 1e7)` (WGS84 degrees * 1e7).
+/// - `acc_cm` = horizontal accuracy in cm.
+/// - `bearing_cdeg` = `Math.round(deg * 100) % 36000` (centidegrees clockwise from north,
+///   `0..=35999`; 359.996° rounds to 36000 and wraps to 0). 36000 or more is rejected.
+/// - `speed_cm_s` = ground speed in cm/s.
+///
+/// Out-of-range values are rejected at parse time (→ `E_SCHEMA`), like the schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fix {
     pub at_mono_ms: MonoMs,
-    pub lat: f64,
-    pub lon: f64,
-    pub acc_m: f64,
+    #[serde(deserialize_with = "lat_e7")]
+    pub lat_e7: i32,
+    #[serde(deserialize_with = "lon_e7")]
+    pub lon_e7: i32,
+    pub acc_cm: u32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "bearing_cdeg"
+    )]
+    pub bearing_cdeg: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bearing: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speed: Option<f64>,
+    pub speed_cm_s: Option<u32>,
+}
+
+/// `|lat_e7| <= 900_000_000`.
+pub const LAT_E7_MAX: i32 = 900_000_000;
+/// `|lon_e7| <= 1_800_000_000`.
+pub const LON_E7_MAX: i32 = 1_800_000_000;
+/// Bearings are `0..BEARING_CDEG_FULL` (36000 = 360.00°).
+pub const BEARING_CDEG_FULL: u16 = 36_000;
+
+fn ranged_i32<'de, D: serde::Deserializer<'de>>(
+    d: D,
+    max: i32,
+    what: &str,
+) -> Result<i32, D::Error> {
+    let v = i32::deserialize(d)?;
+    if v < -max || v > max {
+        return Err(serde::de::Error::custom(format!(
+            "{what} out of range: {v}"
+        )));
+    }
+    Ok(v)
+}
+
+fn lat_e7<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
+    ranged_i32(d, LAT_E7_MAX, "lat_e7")
+}
+
+fn lon_e7<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
+    ranged_i32(d, LON_E7_MAX, "lon_e7")
+}
+
+fn bearing_cdeg<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u16>, D::Error> {
+    let v = u16::deserialize(d)?;
+    if v >= BEARING_CDEG_FULL {
+        return Err(serde::de::Error::custom(format!(
+            "bearing_cdeg out of range (0..=35999): {v}"
+        )));
+    }
+    Ok(Some(v))
 }
 
 /// `Event = { at_mono_ms } & (kind-specific fields)`.
@@ -209,9 +264,9 @@ pub enum SearchOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TickOutput {
-    /// Only present when frame_seq changed. TODO(abi-v1): typed ManeuverHorizon (schema/maneuver-horizon.schema.json).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub horizon: Option<serde_json::Value>,
+    /// Only present when `frame_seq` changed (04 §2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizon: Option<ManeuverHorizon>,
     /// Instructions to Kotlin's single TTS queue (05 §5). Nothing emits them yet.
     pub voice_cmds: Vec<VoiceCmd>,
     pub ui_cmds: Vec<UiCmd>,
@@ -247,6 +302,11 @@ pub enum PlannerCmd {
         /// output). Absent for searches outside a plan (reroute / avoid chip).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         candidate_id: Option<String>,
+        /// Current position for a `reroute` (04 §3.1: Rust decided the vehicle left the
+        /// route and hands the fix that confirmed it to Valhalla as the new origin).
+        /// Absent for other searches.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fix: Option<Fix>,
     },
     Cancel {
         req_id: String,
@@ -330,16 +390,15 @@ impl DistanceClass {
 }
 
 /// Minimal UI catalogue: only what docs v1.2 names. Drawing state that already lives in
-/// `ManeuverHorizon` (3-ahead cards, `HorizonEntry.avoid_offer` chip) is NOT repeated here:
-/// the horizon is the single source (04 §1, ADR-0005), returned as `TickOutput.horizon`.
+/// `ManeuverHorizon` (3-ahead cards, `HorizonEntry.avoid_offer` chip, "経路を確認中" =
+/// `horizon.status` off_route / rerouting) is NOT repeated here: the horizon is the single
+/// source (04 §1, ADR-0005), returned as `TickOutput.horizon`. The former
+/// `show_checking_route` is abolished (ADR-0008).
 /// TODO(abi-v1): tag field name `ui` is provisional; see core-rust/README.md for the items
 /// docs do not define yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "ui", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UiCmd {
-    /// "経路を確認中" (03 §3.1 engine_stuck, 04 §3 off_route / rerouting, Gate 7 t1).
-    /// `{}` variant: a unit variant would silently accept unknown fields.
-    ShowCheckingRoute {},
     /// Present a validated override on the confirm screen Kotlin opened (05 §3.2: only
     /// while `route_key` matches and that screen is still valid; ADR-0007: confirmation
     /// itself only comes from dict `yes` or `user_tap`). `expires_at_mono_ms` is the
@@ -418,14 +477,4 @@ pub struct LogEvent {
     pub req_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub detail: Option<String>,
-}
-
-/// `Option<T>` that must be present (may be `null`). Without `deserialize_with`, serde would
-/// treat a missing `Option` field as `None`; tick.schema.json requires the key.
-fn required_nullable<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(d)
 }

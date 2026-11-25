@@ -168,7 +168,7 @@ fn unknown_fields_are_e_schema() {
         .unwrap();
         let mut cases: Vec<Value> = vec![
             serde_json::json!({"now_mono_ms": 1, "extra": 1}),
-            serde_json::json!({"now_mono_ms": 1, "fix": {"at_mono_ms": 1, "lat": 0.0, "lon": 0.0, "acc_m": 1.0, "alt": 1}}),
+            serde_json::json!({"now_mono_ms": 1, "fix": {"at_mono_ms": 1, "lat_e7": 0, "lon_e7": 0, "acc_cm": 100, "alt": 1}}),
         ];
         for e in all["events"].as_array().unwrap() {
             // sanity: the event alone is accepted
@@ -241,6 +241,65 @@ fn tick_input_fixtures_agree_with_dc_tick() {
     }
 }
 
+/// dc_route_commit `{expected_route_key, bundle}`: the first route with `expected_route_key: null`, then the
+/// next dc_tick returns its horizon; a fix aligns it (tracking). A replacement needs the
+/// current key (`E_STALE` otherwise, nothing replaced); a broken bundle is `E_SCHEMA`.
+#[test]
+fn route_commit_loads_the_bundle() {
+    unsafe {
+        let bundle: Value = serde_json::from_slice(
+            &std::fs::read(schema_fixture_dir("valid").join("route-bundle.min.json")).unwrap(),
+        )
+        .unwrap();
+        let rk = bundle["route_key"].clone();
+        let mut s = ptr::null_mut();
+        take(dc_session_new(din(b"{}"), &mut s));
+        let req = serde_json::json!({"expected_route_key": null, "bundle": bundle});
+        let v = take(dc_route_commit(s, din(&serde_json::to_vec(&req).unwrap())));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["data"]["route_key"], rk);
+        assert_eq!(v["data"]["segments"], 3);
+        assert_eq!(v["data"]["maneuvers"], 2);
+        // fix on the first segment, 50 m east of the start
+        let tick = serde_json::json!({"now_mono_ms": 10, "fix": {"at_mono_ms": 10,
+            "lat_e7": 350000000, "lon_e7": 1390005483, "acc_cm": 300}});
+        let v = take(dc_tick(s, din(&serde_json::to_vec(&tick).unwrap())));
+        let h = &v["data"]["horizon"];
+        assert_eq!(h["status"], "tracking", "{v}");
+        assert_eq!(h["route_key"], rk);
+        assert_eq!(h["upcoming"][0]["maneuver"]["arrow"], "left");
+        assert_eq!(h["upcoming"][0]["from_vehicle_m"], 150);
+        // again with null: a route is current now → E_STALE
+        let v = take(dc_route_commit(s, din(&serde_json::to_vec(&req).unwrap())));
+        assert_eq!(v["error"]["code"], "E_STALE", "{v}");
+        // right guard, broken body → E_SCHEMA; wrong guard with a broken body → E_STALE
+        let mut broken = req.clone();
+        broken["expected_route_key"] = rk.clone();
+        broken["bundle"]["length_cm"] = 1.into();
+        let v = take(dc_route_commit(
+            s,
+            din(&serde_json::to_vec(&broken).unwrap()),
+        ));
+        assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
+        broken["expected_route_key"]["route_revision"] = "1".into();
+        let v = take(dc_route_commit(
+            s,
+            din(&serde_json::to_vec(&broken).unwrap()),
+        ));
+        assert_eq!(v["error"]["code"], "E_STALE", "{v}");
+        // unknown field in the request
+        let mut extra = req.clone();
+        extra["expected_route_key"] = rk;
+        extra["x"] = 1.into();
+        let v = take(dc_route_commit(
+            s,
+            din(&serde_json::to_vec(&extra).unwrap()),
+        ));
+        assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
+        dc_session_free(s);
+    }
+}
+
 /// dc_route_commit re-checks the `commit` route_key (the current route's key at the search
 /// start): no / another current route → E_STALE, nothing replaced. Missing or malformed
 /// route_key → E_SCHEMA.
@@ -251,10 +310,15 @@ fn route_commit_rechecks_route_key() {
         take(dc_session_new(din(b"{}"), &mut s));
         let v = take(dc_route_commit(
             s,
-            din(br#"{"route_key":{"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"}}"#),
+            din(br#"{"expected_route_key":{"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"}}"#),
         ));
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
-        for bad in [&b"{}"[..], b"{", br#"{"route_key":{"trip_id":"t"}}"#] {
+        for bad in [
+            &br#"{"route_key":null,"bundle":{}}"#[..],
+            &b"{}"[..],
+            b"{",
+            br#"{"expected_route_key":{"trip_id":"t"}}"#,
+        ] {
             let v = take(dc_route_commit(s, din(bad)));
             assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
         }
@@ -321,6 +385,28 @@ fn plan_candidates_through_the_session() {
         ] {
             let v = take(dc_plan_candidates(s, din(&bad)));
             assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
+        }
+        dc_session_free(s);
+    }
+}
+
+/// Gate 7 case 5 (07 §2.4): Kotlin's `Math.round(359.996 * 100) % 36000` = 0 is accepted;
+/// an unwrapped 36000 is E_SCHEMA through dc_tick.
+#[test]
+fn fix_bearing_range_through_dc_tick() {
+    unsafe {
+        let mut s = ptr::null_mut();
+        take(dc_session_new(din(b"{}"), &mut s));
+        for (bearing, ok) in [(0u32, true), (35_999, true), (36_000, false)] {
+            let t = serde_json::json!({"now_mono_ms": 1, "fix": {"at_mono_ms": 1,
+                "lat_e7": 350000000, "lon_e7": 1390000000, "acc_cm": 300,
+                "bearing_cdeg": bearing, "speed_cm_s": 1000}});
+            let v = take(dc_tick(s, din(&serde_json::to_vec(&t).unwrap())));
+            if ok {
+                assert_eq!(v["ok"], true, "{bearing}: {v}");
+            } else {
+                assert_eq!(v["error"]["code"], "E_SCHEMA", "{bearing}: {v}");
+            }
         }
         dc_session_free(s);
     }

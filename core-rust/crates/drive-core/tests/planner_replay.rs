@@ -1,5 +1,6 @@
 //! Deterministic replay of the Gate 7 common test data (core-rust/tests/fixtures/tick).
-use contracts::tick::{PlannerCmd, SearchPriority, TickInput, TickOutput, UiCmd};
+use contracts::route::{RouteBundle, RouteCommitRequest};
+use contracts::tick::{Fix, PlannerCmd, SearchPriority, TickInput, TickOutput};
 use contracts::RouteKey;
 use drive_core::planner::Slot;
 use drive_core::{Session, SessionConfig};
@@ -13,16 +14,97 @@ fn fixture(name: &str) -> Value {
     serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap()
 }
 
+/// tests/fixtures/route/straight-3km.json with `route_key` and a total travel time of
+/// `eta_ms` (edge times rescaled). Stands in for the C++ route body.
+fn straight_bundle(route_key: &RouteKey, eta_ms: u32) -> RouteBundle {
+    let p = format!(
+        "{}/../../tests/fixtures/route/straight-3km.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+    let mut b: RouteBundle = serde_json::from_value(v["bundle"].clone()).unwrap();
+    let len = u64::from(b.length_cm);
+    b.route_key = route_key.clone();
+    b.eta_ms = eta_ms;
+    for leg in &mut b.legs {
+        let start = leg.along_route_start_cm;
+        let mut along = Vec::new();
+        for c in &leg.chunks {
+            along.extend_from_slice(&c.seg_along_cm);
+        }
+        for e in &mut leg.edges {
+            let end = u64::from(start + along[e.to_pt as usize]);
+            e.cum_time_ms = (u64::from(eta_ms) * end / len) as u32;
+        }
+        for m in &mut leg.maneuvers {
+            m.id.route_key = route_key.clone();
+        }
+    }
+    b
+}
+
+/// A fix on the start point of `b` (matched at progress 0 → remaining ETA = eta).
+fn start_fix(b: &RouteBundle, at_mono_ms: u64) -> Fix {
+    let o = b.legs[0].chunks[0].origin_e7;
+    Fix {
+        at_mono_ms,
+        lat_e7: o.lat,
+        lon_e7: o.lon,
+        acc_cm: 500,
+        bearing_cdeg: None,
+        speed_cm_s: None,
+    }
+}
+
+/// Commits `b` (first route or replacing the current one).
+fn commit(s: &mut Session, b: &RouteBundle) {
+    let guard = s.route().map(|r| r.route_key.clone());
+    s.route_commit(&RouteCommitRequest {
+        expected_route_key: guard,
+        bundle: b.clone(),
+    })
+    .unwrap();
+}
+
+/// Tick with only a fix.
+fn tick_fix(s: &mut Session, now: u64, fix: Fix) -> TickOutput {
+    s.tick(TickInput {
+        now_mono_ms: now,
+        fix: Some(fix),
+        events: vec![],
+    })
+}
+
 fn fixture_route_key(name: &str) -> RouteKey {
     serde_json::from_value(fixture(name)["route_key"].clone()).unwrap()
 }
 
 /// Runs a fixture and returns (outputs per step, max concurrently running searches).
 fn run(name: &str) -> (Session, Vec<TickOutput>, usize) {
+    let (s, o, m, _) = run_with_wakes(name);
+    (s, o, m)
+}
+
+/// Same, plus the planner's own wake time after each step (watchdog / comparison budget,
+/// without the alignment freshness limit that `next_wake_mono_ms` also includes).
+fn run_with_wakes(name: &str) -> (Session, Vec<TickOutput>, usize, Vec<Option<u64>>) {
     let fx = fixture(name);
-    let mut s = Session::new(SessionConfig::default());
-    let rk: RouteKey = serde_json::from_value(fx["route_key"].clone()).unwrap();
-    s.set_current_route_key(rk);
+    let cfg: SessionConfig = match fx.get("config") {
+        Some(c) => serde_json::from_value(c.clone()).unwrap(),
+        None => SessionConfig::default(),
+    };
+    let mut s = Session::new(cfg);
+    let mut wakes = Vec::new();
+    // Fixtures with their own `route_commit` (bundle) steps start without a route.
+    let has_bundle = fx["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|st| st.get("bundle").is_some());
+    if !has_bundle {
+        let rk: RouteKey = serde_json::from_value(fx["route_key"].clone()).unwrap();
+        s.set_current_route_key(rk);
+    }
     let mut outs = Vec::new();
     let mut running = 0usize;
     let mut max_running = 0usize;
@@ -41,21 +123,25 @@ fn run(name: &str) -> (Session, Vec<TickOutput>, usize) {
                 )
                 .1
             }
-            // Remaining ETA on the current route (null = unknown / invalidated by off-route).
-            "route_eta" => {
-                s.set_remaining_eta(step["remaining_eta_s"].as_u64());
-                TickOutput::default()
-            }
             // The current route is replaced (stands in for another dc_route_commit).
             "set_route" => {
                 s.set_current_route_key(serde_json::from_value(step["route_key"].clone()).unwrap());
                 TickOutput::default()
             }
-            // Kotlin's dc_route_commit for a `commit`: only the route_key re-check.
+            // Kotlin's dc_route_commit: with a `bundle` the full commit, otherwise only the
+            // route_key re-check of a `commit`.
             "route_commit" => {
-                let key: RouteKey = serde_json::from_value(step["route_key"].clone()).unwrap();
-                let got = s.check_route_commit(&key).err().map(|e| e.code.as_str());
                 let want = step["expect_error"].as_str();
+                let got = if step.get("bundle").is_some() {
+                    let req: RouteCommitRequest = serde_json::from_value(serde_json::json!({
+                        "expected_route_key": step["expected_route_key"], "bundle": step["bundle"]}))
+                    .unwrap();
+                    s.route_commit(&req).err().map(|e| e.code.as_str())
+                } else {
+                    let key: RouteKey =
+                        serde_json::from_value(step["expected_route_key"].clone()).unwrap();
+                    s.check_route_commit(&key).err().map(|e| e.code.as_str())
+                };
                 assert_eq!(got, want, "{name}: step {step}");
                 TickOutput::default()
             }
@@ -97,13 +183,25 @@ fn run(name: &str) -> (Session, Vec<TickOutput>, usize) {
             .unwrap_or_default();
         assert_eq!(got, want, "{name}: step {step}");
         // Full planner_cmds of the step when the fixture lists them (`expect_cmds`).
+        if let Some(w) = step.get("expect_watchdog") {
+            assert_eq!(
+                s.planner().watchdog_deadline(),
+                w.as_u64(),
+                "{name}: step {step}"
+            );
+        }
         if let Some(cmds) = step.get("expect_cmds") {
             let want: Vec<PlannerCmd> = serde_json::from_value(cmds.clone()).unwrap();
             assert_eq!(out.planner_cmds, want, "{name}: step {step}");
         }
+        let planner_wake = s.planner().next_wake();
+        if let (Some(w), Some(p)) = (out.next_wake_mono_ms, planner_wake) {
+            assert!(w <= p, "{name}: next_wake includes the planner deadline");
+        }
+        wakes.push(planner_wake);
         outs.push(out);
     }
-    (s, outs, max_running)
+    (s, outs, max_running, wakes)
 }
 
 fn whats(o: &TickOutput) -> Vec<&str> {
@@ -118,14 +216,15 @@ fn cancel_then_reroute() {
     assert!(
         matches!(&o[0].planner_cmds[..], [PlannerCmd::Start { req_id, priority: SearchPriority::AvoidChip, .. }] if req_id == "r1")
     );
-    // t1: cancel r1 + "checking route", no start yet
+    // t1: cancel r1, no start yet. "経路を確認中" is horizon.status (off_route /
+    // rerouting), never a UiCmd (show_checking_route is abolished).
     assert_eq!(
         o[1].planner_cmds,
         vec![PlannerCmd::Cancel {
             req_id: "r1".into()
         }]
     );
-    assert_eq!(o[1].ui_cmds, vec![UiCmd::ShowCheckingRoute {}]);
+    assert!(o[1].ui_cmds.is_empty());
     // t2: r1 ok after cancel → discarded, slot freed → start r2
     assert!(whats(&o[2]).contains(&"discarded_late"));
     assert!(
@@ -159,7 +258,7 @@ fn timeout_engine_stuck_keeps_slot_until_native_returns() {
     assert_eq!(o[1].next_wake_mono_ms, Some(11_000));
     // Rust detects the deadline from now_mono_ms (no timeout event from Kotlin)
     assert!(whats(&o[2]).contains(&"engine_stuck"));
-    assert_eq!(o[2].ui_cmds, vec![UiCmd::ShowCheckingRoute {}]);
+    assert!(o[2].ui_cmds.is_empty(), "no UiCmd for engine_stuck");
     assert!(o[2].planner_cmds.is_empty());
     assert_eq!(
         o[2].next_wake_mono_ms, None,
@@ -309,7 +408,9 @@ fn unknown_req_and_lower_priority_do_not_start_second_search() {
 
 #[test]
 fn short_plan_watchdog_5s_keeps_slot_until_search_finished() {
-    let (s, o, max_running) = run("gate7-short-engine-stuck.json");
+    // Steps 1 / 2 commit the route (eta 29:59) and match its start; `w` = planner wake
+    // (watchdog / comparison budget) after each step.
+    let (s, o, max_running, w) = run_with_wakes("gate7-short-engine-stuck.json");
     assert_eq!(max_running, 1);
     // plan at 0 with ETA estimate 29:59 → short; comparison budget 0 + 3000
     assert!(o[0].log.iter().any(|l| l.what == "plan_started"
@@ -317,43 +418,61 @@ fn short_plan_watchdog_5s_keeps_slot_until_search_finished() {
             .as_deref()
             .unwrap()
             .ends_with("distance_class=short")));
-    assert_eq!(o[0].next_wake_mono_ms, Some(3_000));
+    assert_eq!(w[0], Some(3_000));
     // r1 started at 1000: watchdog 1000 + 5000, budget 3000 comes first
-    assert_eq!(o[2].next_wake_mono_ms, Some(3_000));
-    assert!(whats(&o[4]).contains(&"comparison_budget_expired"));
-    assert_eq!(o[4].next_wake_mono_ms, Some(6_000));
+    assert_eq!(w[3], Some(3_000));
+    assert!(whats(&o[5]).contains(&"comparison_budget_expired"));
+    assert_eq!(w[5], Some(6_000));
     // 5999: not yet stuck
-    assert!(!whats(&o[5]).contains(&"engine_stuck"));
-    // 6000: watchdog limit reached → engine_stuck, slot still occupied
-    assert!(whats(&o[6]).contains(&"engine_stuck"));
-    assert_eq!(o[6].next_wake_mono_ms, None);
+    assert!(!whats(&o[6]).contains(&"engine_stuck"));
+    // 6000: watchdog limit reached → engine_stuck, slot still occupied, no UiCmd
+    assert!(whats(&o[7]).contains(&"engine_stuck"));
+    assert!(o[7].ui_cmds.is_empty());
+    assert_eq!(w[7], None);
     // reroute requested while stuck: one cancel, no start (slot occupied)
     assert_eq!(
-        o[7].planner_cmds,
+        o[8].planner_cmds,
         vec![PlannerCmd::Cancel {
             req_id: "r1".into()
         }]
     );
     // much later (past both limits, engine_reset seen): still no start, no wake request
-    assert!(o[8].planner_cmds.is_empty());
-    assert_eq!(o[8].next_wake_mono_ms, None);
+    assert!(o[9].planner_cmds.is_empty());
+    assert_eq!(w[9], None);
     // r1 returns → discarded_after_stuck, r2 starts short (remaining ETA 29:59 still valid)
-    assert!(whats(&o[9]).contains(&"discarded_after_stuck"));
+    assert!(whats(&o[10]).contains(&"discarded_after_stuck"));
     assert!(
-        matches!(&o[9].planner_cmds[..], [PlannerCmd::Start { req_id, priority: SearchPriority::Reroute, .. }] if req_id == "r2")
+        matches!(&o[10].planner_cmds[..], [PlannerCmd::Start { req_id, priority: SearchPriority::Reroute, .. }] if req_id == "r2")
     );
-    assert_eq!(o[9].next_wake_mono_ms, Some(30_000 + 5_000));
+    assert_eq!(w[10], Some(30_000 + 5_000));
     assert!(matches!(s.planner().slot(), Slot::Running { .. }));
 }
 
-fn session_with_route() -> Session {
-    let mut s = Session::new(SessionConfig::default());
-    s.set_current_route_key(RouteKey {
+fn test_rk() -> RouteKey {
+    RouteKey {
         trip_id: "t".into(),
         trip_revision: contracts::U64Str(1),
         route_revision: contracts::U64Str(1),
         graph_version: "g".into(),
-    });
+    }
+}
+
+fn session_with_route() -> Session {
+    let mut s = Session::new(SessionConfig::default());
+    s.set_current_route_key(test_rk());
+    s
+}
+
+/// A committed route of `test_rk()` whose remaining ETA at `now = 0` is `eta_s` (matched
+/// at its start), or unknown (`None`: committed, no fix yet → uncertain).
+fn session_tracking(eta_s: Option<u64>) -> Session {
+    let mut s = Session::new(SessionConfig::default());
+    let b = straight_bundle(&test_rk(), (eta_s.unwrap_or(600) * 1000) as u32);
+    commit(&mut s, &b);
+    if eta_s.is_some() {
+        tick_fix(&mut s, 0, start_fix(&b, 0));
+    }
+    assert_eq!(s.remaining_eta_ms(0).map(|ms| u64::from(ms) / 1000), eta_s);
     s
 }
 
@@ -379,9 +498,9 @@ fn watchdog_limit_follows_distance_class_from_each_start() {
         (Some(1_800), 10_000, 8_000),
         (None, 10_000, 8_000),
     ] {
-        let mut s = session_with_route();
+        // search outside the plan: watchdog from the remaining ETA of the alignment
+        let mut s = session_tracking(eta);
         s.begin_plan(0, "p", eta); // plan: comparison budget
-        s.set_remaining_eta(eta); // search outside the plan: watchdog from remaining ETA
         s.request_search(100, SearchPriority::Comparison).unwrap();
         assert_eq!(s.planner().watchdog_deadline(), Some(100 + watchdog));
         assert_eq!(s.planner().comparison_deadline(), Some(budget));
@@ -400,14 +519,18 @@ fn watchdog_limit_follows_distance_class_from_each_start() {
 #[test]
 fn distance_class_is_fixed_for_the_same_plan_request() {
     use contracts::tick::DistanceClass;
-    let mut s = session_with_route();
+    let mut s = session_tracking(Some(600));
     assert_eq!(s.begin_plan(0, "p1", Some(600)).0, DistanceClass::Short);
     // a later (longer) estimate for the same plan does not reclassify it nor restart the budget
     let (c, o) = s.begin_plan(500, "p1", Some(7_200));
     assert_eq!(c, DistanceClass::Short);
     assert!(!whats(&o).contains(&"plan_started"));
     assert_eq!(s.planner().comparison_deadline(), Some(3_000));
-    s.set_remaining_eta(Some(600));
+    tick_fix(
+        &mut s,
+        600,
+        start_fix(&straight_bundle(&test_rk(), 600_000), 600),
+    );
     s.request_search(600, SearchPriority::Comparison).unwrap();
     assert_eq!(s.planner().watchdog_deadline(), Some(5_600));
     // a new plan_request is classified anew, but the running search keeps its class
@@ -470,7 +593,7 @@ fn priority_order_reroute_explicit_plan_avoid_chip_comparison() {
             req_id: "r1".into()
         }]
     );
-    assert_eq!(o.ui_cmds, vec![UiCmd::ShowCheckingRoute {}]);
+    assert!(o.ui_cmds.is_empty(), "no show_checking_route");
 }
 
 /// Gate 7: distance class of searches outside a plan (team decision 2026-11-25), fixed at
@@ -480,29 +603,41 @@ fn priority_order_reroute_explicit_plan_avoid_chip_comparison() {
 fn adhoc_distance_class_from_remaining_eta_at_start() {
     let (s, o, max_running) = run("gate7-adhoc-distance-class.json");
     assert_eq!(max_running, 1);
-    // r1 (29:59 → short): watchdog 1000 + 5000; r2 (30:00 → long): 3000 + 10000
-    assert_eq!(o[1].next_wake_mono_ms, Some(6_000));
-    assert_eq!(o[4].next_wake_mono_ms, Some(13_000));
-    // plan p1 is short, but the reroute after off-route (ETA invalidated) is long:
-    // its watchdog is 10 s, and no comparison budget applies to it
-    // (next wake = min(watchdog 6000 + 10000, plan p1 budget 5000 + 3000))
-    assert_eq!(o[9].next_wake_mono_ms, Some(8_000));
-    let o = o[9].clone();
-    let started = o.log.iter().find(|l| l.what == "search_started").unwrap();
+    // r1 (29:59 → short) / r2 (30:00 → long): checked per step (expect_starts /
+    // expect_watchdog 1000 + 5000 and 3000 + 10000).
+    // plan p1 is short, but off-route (3 fixes 1 km away) invalidates the remaining ETA and
+    // the alignment itself starts the reroute: long (watchdog 10 s, no comparison budget;
+    // next wake = min(watchdog 6000 + 10000, plan p1 budget 5000 + 3000)).
+    let last = o.last().unwrap();
+    assert_eq!(last.next_wake_mono_ms, Some(8_000));
+    let started = last
+        .log
+        .iter()
+        .find(|l| l.what == "search_started")
+        .unwrap();
     assert_eq!(started.detail.as_deref(), Some("distance_class=long"));
+    assert!(whats(last).contains(&"off_route_confirmed"));
+    match &last.planner_cmds[..] {
+        [PlannerCmd::Start {
+            fix: Some(f),
+            priority: SearchPriority::Reroute,
+            ..
+        }] => assert_eq!(f.at_mono_ms, 6_000, "the confirming fix is the new origin"),
+        other => panic!("{other:?}"),
+    }
     assert_eq!(s.planner().watchdog_deadline(), Some(6_000 + 10_000));
+    assert_eq!(s.remaining_eta_ms(6_000), None);
 }
 
 #[test]
 fn adhoc_class_is_fixed_at_start_not_at_request() {
     use contracts::tick::DistanceClass;
-    let mut s = session_with_route();
-    s.set_remaining_eta(Some(600));
+    let mut s = session_tracking(Some(600));
     s.request_search(0, SearchPriority::AvoidChip).unwrap(); // r1 short
     s.request_search(10, SearchPriority::Reroute).unwrap(); // cancel r1, r2 waits
-    s.set_remaining_eta(None); // off-route before r2 starts
+                                                            // the fix of t=0 goes stale (2.5 s) before r2 starts → remaining ETA invalidated
     let o = s.tick(
-        serde_json::from_value(serde_json::json!({"now_mono_ms":100,"events":[
+        serde_json::from_value(serde_json::json!({"now_mono_ms":2_501,"events":[
         {"at_mono_ms":100,"kind":"search_finished","req_id":"r1",
          "route_key":{"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"},
          "graph_version":"g","outcome":"cancelled","engine_ms":100}]}))
@@ -513,15 +648,16 @@ fn adhoc_class_is_fixed_at_start_not_at_request() {
         [PlannerCmd::Start { req_id, distance_class: DistanceClass::Long, .. }] if req_id == "r2"
     ));
     // the class stays for the whole call even if a short ETA arrives meanwhile
-    s.set_remaining_eta(Some(60));
+    let b = straight_bundle(&test_rk(), 600_000);
+    tick_fix(&mut s, 3_000, start_fix(&b, 3_000));
+    assert_eq!(s.remaining_eta_ms(3_000), Some(600_000));
     assert_eq!(s.planner().watchdog_deadline(), Some(100 + 10_000));
 }
 
 #[test]
 fn remaining_eta_of_another_route_is_not_used() {
     use contracts::tick::DistanceClass;
-    let mut s = session_with_route();
-    s.set_remaining_eta(Some(600));
+    let mut s = session_tracking(Some(600));
     s.set_current_route_key(RouteKey {
         trip_id: "t".into(),
         trip_revision: contracts::U64Str(1),

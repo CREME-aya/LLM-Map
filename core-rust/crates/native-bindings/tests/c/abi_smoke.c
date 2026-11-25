@@ -27,7 +27,7 @@ int main(void) {
         "{\"code_line\":\"YES\",\"contract\":{},\"utterance_id\":\"u1\",\"utterance_mono_ms\":1,\"ref_frame_seq\":1}")),
         "NO_PENDING_TARGET", "validate_override");
     /* no current route: the commit's route_key is stale */
-    fails += expect(dc_route_commit(s, in_str("{\"route_key\":{\"trip_id\":\"t\",\"trip_revision\":\"1\",\"route_revision\":\"1\",\"graph_version\":\"g\"}}")), "E_STALE", "route_commit");
+    fails += expect(dc_route_commit(s, in_str("{\"expected_route_key\":{\"trip_id\":\"t\",\"trip_revision\":\"1\",\"route_revision\":\"1\",\"graph_version\":\"g\"}}")), "E_STALE", "route_commit");
     fails += expect(dc_avoid_offer_eval(s, in_str("{}")), "E_UNIMPLEMENTED", "avoid_offer_eval");
     fails += expect(dc_plan_candidates(s, in_str("{\"now_mono_ms\":20,\"eta_estimate_s\":1799,\"snapshot\":{\"schema_version\":1,\"trip_id\":\"t1\",\"trip_revision\":\"3\",\"plan_request_id\":\"p1\",\"graph_version\":\"g\",\"policy_version\":\"pol-1\",\"origin\":{\"lat\":35.681,\"lon\":139.767},\"destination\":{\"display_point\":{\"lat\":35.69,\"lon\":139.70}},\"vias\":[],\"vehicle\":{\"profile\":\"standard_car\",\"width_mm\":1695,\"height_mm\":1550},\"avoid\":{\"toll\":false,\"ferry\":true},\"depart_at_unix_s\":1795000000,\"budget\":{\"max_requests\":3,\"deadline_ms\":3000}}}")),
         "\"distance_class\":\"short\"", "plan_candidates");

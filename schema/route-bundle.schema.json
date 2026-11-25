@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slm-map.invalid/schema/route-bundle.schema.json",
+  "title": "RouteBundle (route body for dc_route_commit)",
+  "description": "Route body passed once to dc_route_commit (docs 04 §3.1). Mirrors contracts::route (core-rust). Rust only aligns the vehicle on this route (no road network). Fixed-point contract (provisional, team proposal): each chunk has origin_e7 {lat, lon} (1e-7 deg) and k_lat_q16 / k_lon_q16 = cm per 1e-7 deg in Q16 (u32), computed once by C++ (k_lon uses cos(lat)); dx_cm = round_q16((lon_e7 - origin.lon) * k_lon_q16), dy_cm = round_q16((lat_e7 - origin.lat) * k_lat_q16) with i64 intermediates and round_q16(v) = (v + 2^15) >> 16 (arithmetic shift, exact halves toward +inf). A chunk is valid for a fix inside the bounding box of its points plus a 1 km margin; near a boundary Rust converts with both chunks and takes the smaller lateral distance (tie: smaller along). Distances exist per leg (seg_along_cm) and for the whole route (along_route_start_cm + leg value = along_route_cm). Checks JSON Schema cannot express (chunk continuity, edge coverage, ordering, totals) are done by Rust on load (E_SCHEMA). The root is a RouteBundle; dc_route_commit takes #/$defs/RouteCommitRequest.",
+  "$ref": "#/$defs/RouteBundle",
+  "$defs": {
+    "U32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "RouteCommitRequest": {
+      "description": "dc_route_commit input. expected_route_key = guard: the current route's key from planner_cmds commit{req_id, route_key} (the current route when the search started), or null when no route is committed yet. Must equal the current route (null = none), otherwise E_STALE and nothing is replaced. bundle.route_key is the new route's key.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_route_key",
+        "bundle"
+      ],
+      "properties": {
+        "expected_route_key": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/RouteKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bundle": {
+          "$ref": "#/$defs/RouteBundle"
+        }
+      }
+    },
+    "RouteBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "route_key",
+        "eta_ms",
+        "length_cm",
+        "legs"
+      ],
+      "properties": {
+        "route_key": {
+          "$ref": "common.schema.json#/$defs/RouteKey",
+          "description": "Key of this (new) route."
+        },
+        "eta_ms": {
+          "$ref": "#/$defs/U32",
+          "description": "Total travel time (ms) = cum_time_ms of the last edge of the last leg."
+        },
+        "length_cm": {
+          "$ref": "#/$defs/U32",
+          "description": "Total length (cm) = sum of the legs' length_cm."
+        },
+        "legs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/Leg"
+          }
+        }
+      }
+    },
+    "Leg": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "leg_index",
+        "along_route_start_cm",
+        "length_cm",
+        "chunks",
+        "edges",
+        "maneuvers"
+      ],
+      "properties": {
+        "leg_index": {
+          "$ref": "#/$defs/U32",
+          "description": "Equal to the position in legs."
+        },
+        "along_route_start_cm": {
+          "$ref": "#/$defs/U32",
+          "description": "along_route_cm of the leg's first point (sum of the previous legs' length_cm)."
+        },
+        "length_cm": {
+          "$ref": "#/$defs/U32",
+          "description": "Leg length (cm) = seg_along_cm of the last point of the last chunk."
+        },
+        "chunks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/Chunk"
+          },
+          "description": "Leg shape split into chunks (about 20 km each, 07 §1). Consecutive chunks share their boundary point (same leg_shape_index and seg_along_cm)."
+        },
+        "edges": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/Edge"
+          },
+          "description": "Edges covering the leg shape without gaps: edges[0].from_pt = 0, edges[i].from_pt = edges[i-1].to_pt, the last to_pt = last shape index."
+        },
+        "maneuvers": {
+          "type": "array",
+          "items": {
+            "$ref": "maneuver-horizon.schema.json#/$defs/Maneuver"
+          },
+          "description": "Maneuvers of this leg in route order (04 §2 Maneuver, normalized by C++ per 04 §2.1). id.route_key = bundle route_key, id.leg_index = anchor.leg_index = leg_index."
+        }
+      }
+    },
+    "Chunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "first_shape_index",
+        "origin_e7",
+        "k_lat_q16",
+        "k_lon_q16",
+        "points_cm",
+        "seg_along_cm",
+        "bearing_cdeg"
+      ],
+      "properties": {
+        "first_shape_index": {
+          "$ref": "#/$defs/U32",
+          "description": "leg_shape_index of points_cm[0]. The next chunk starts at first_shape_index + len(points_cm) - 1."
+        },
+        "origin_e7": {
+          "$ref": "#/$defs/OriginE7"
+        },
+        "k_lat_q16": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576,
+          "description": "cm per 1e-7 deg of latitude in Q16 (about 72955 = 1.1132 cm). Upper bound 2^20 keeps the i64 products safe."
+        },
+        "k_lon_q16": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576,
+          "description": "cm per 1e-7 deg of longitude in Q16 (k_lat_q16 * cos(lat), computed once by C++)."
+        },
+        "points_cm": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          },
+          "description": "[dx_cm, dy_cm] relative to origin_e7 (x east, y north), i32."
+        },
+        "seg_along_cm": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/U32"
+          },
+          "description": "Distance from the leg start to each point (cm, non-decreasing); same length as points_cm."
+        },
+        "bearing_cdeg": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 35999
+          },
+          "description": "Heading of each segment points_cm[i] -> points_cm[i+1], centidegrees clockwise from north, computed by C++ (Rust has no atan2). Length = len(points_cm) - 1."
+        }
+      }
+    },
+    "OriginE7": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lat",
+        "lon"
+      ],
+      "properties": {
+        "lat": {
+          "type": "integer",
+          "minimum": -900000000,
+          "maximum": 900000000
+        },
+        "lon": {
+          "type": "integer",
+          "minimum": -1800000000,
+          "maximum": 1800000000
+        }
+      }
+    },
+    "Edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "edge_id",
+        "from_pt",
+        "to_pt",
+        "length_cm",
+        "cum_time_ms",
+        "flags"
+      ],
+      "properties": {
+        "edge_id": {
+          "$ref": "common.schema.json#/$defs/U64Str"
+        },
+        "from_pt": {
+          "$ref": "#/$defs/U32",
+          "description": "Leg shape index where the edge starts."
+        },
+        "to_pt": {
+          "$ref": "#/$defs/U32",
+          "description": "Leg shape index where the edge ends (> from_pt)."
+        },
+        "length_cm": {
+          "$ref": "#/$defs/U32",
+          "description": "seg_along_cm[to_pt] - seg_along_cm[from_pt]."
+        },
+        "cum_time_ms": {
+          "$ref": "#/$defs/U32",
+          "description": "Travel time from the route start to the end of this edge (ms, non-decreasing over the route). Remaining ETA = eta_ms - time at the matched position."
+        },
+        "flags": {
+          "$ref": "#/$defs/U32",
+          "description": "Bit set. Provisional (TODO(schema-v1)): 1 tunnel, 2 motorway, 4 toll, 8 ferry."
+        }
+      }
+    }
+  }
+}
