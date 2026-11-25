@@ -93,6 +93,8 @@ pub struct LoadedRoute {
     pub maneuvers: Vec<Maneuver>,
     edges: Vec<EdgeSpan>,
     group_heads: Vec<Option<usize>>,
+    /// (anchor distance, earliest P1 time offset among this anchor and all following it).
+    p1_deadlines: Vec<(u32, i64)>,
 }
 
 impl LoadedRoute {
@@ -278,6 +280,20 @@ impl LoadedRoute {
                 if along < lo || along > hi {
                     return Err(at("anchor.along_route_cm not on its shape segment"));
                 }
+                if let Some(exit) = m.roundabout_leave_anchor {
+                    let idx = exit.leg_shape_index as usize;
+                    if !matches!(m.arrow, contracts::horizon::Arrow::Roundabout { .. })
+                        || exit.leg_index != leg.leg_index
+                        || idx > last_shape as usize
+                        || exit.along_route_cm < m.anchor.along_route_cm
+                        || !(route_along + u64::from(shape_along[idx])
+                            ..=route_along
+                                + u64::from(shape_along[(idx + 1).min(last_shape as usize)]))
+                            .contains(&u64::from(exit.along_route_cm))
+                    {
+                        return Err(at("invalid roundabout leave anchor"));
+                    }
+                }
                 if let Some(prev) = maneuvers.last() {
                     if m.anchor.along_route_cm < prev.anchor.along_route_cm
                         || (prev.id.leg_index == m.id.leg_index && m.id.ordinal <= prev.id.ordinal)
@@ -297,6 +313,7 @@ impl LoadedRoute {
         }
         let mut route = Self {
             group_heads: vec![None; maneuvers.len()],
+            p1_deadlines: Vec::new(),
             route_key: b.route_key.clone(),
             eta_ms: b.eta_ms,
             length_cm: b.length_cm,
@@ -306,6 +323,7 @@ impl LoadedRoute {
             edges,
         };
         route.index_groups();
+        route.index_p1_deadlines();
         Ok(route)
     }
 
@@ -351,6 +369,44 @@ impl LoadedRoute {
 
     pub(crate) fn group_head(&self, index: usize) -> Option<&Maneuver> {
         self.group_heads[index].map(|head| &self.maneuvers[head])
+    }
+
+    fn index_p1_deadlines(&mut self) {
+        let mut deadlines: Vec<_> = self
+            .maneuvers
+            .iter()
+            .flat_map(|m| std::iter::once(m.anchor).chain(m.roundabout_leave_anchor))
+            .map(|a| {
+                let along = a.along_route_cm;
+                let lead = if self.motorway_approach(along) {
+                    20_000
+                } else {
+                    8_000
+                };
+                (along, i64::from(self.time_at(along)) - lead)
+            })
+            .collect();
+        deadlines.sort_unstable_by_key(|&(along, _)| along);
+        // A following motorway turn can need speech before the preceding city turn.
+        let mut earliest = i64::MAX;
+        for (_, deadline) in deadlines.iter_mut().rev() {
+            earliest = earliest.min(*deadline);
+            *deadline = earliest;
+        }
+        self.p1_deadlines = deadlines;
+    }
+
+    pub(crate) fn next_p1_deadline(
+        &self,
+        passed: Option<u32>,
+        progress: u32,
+        sampled: u64,
+    ) -> Option<u64> {
+        let first = passed.map_or(0, |p| {
+            self.p1_deadlines.partition_point(|&(along, _)| along <= p)
+        });
+        let (_, offset) = self.p1_deadlines.get(first)?;
+        Some(sampled.saturating_add_signed(offset - i64::from(self.time_at(progress))))
     }
 
     /// Travel time from the route start to `along_cm` (ms), interpolated inside the edge.

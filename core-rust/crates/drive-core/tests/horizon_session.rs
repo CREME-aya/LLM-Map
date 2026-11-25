@@ -448,3 +448,33 @@ fn ok_after_arrival_is_not_committed() {
     assert!(o.planner_cmds.is_empty());
     assert!(o.log.iter().any(|l| l.what == "discarded_not_tracking"));
 }
+
+#[test]
+fn roundabout_exit_still_has_a_p1_deadline_after_entrance_passage() {
+    let mut b = main_line();
+    let m = &mut b.legs[0].maneuvers[0];
+    m.arrow = Arrow::Roundabout {
+        exit_number: Some(2),
+    };
+    let mut exit = m.anchor;
+    exit.leg_shape_index = 17;
+    exit.along_route_cm = 175_000;
+    m.roundabout_leave_anchor = Some(exit);
+    let mut s = Session::new(SessionConfig::default());
+    s.route_commit(&RouteCommitRequest {
+        expected_route_key: None,
+        bundle: b.clone(),
+    })
+    .unwrap();
+    tick(&mut s, 40_000, Some(fix_xy(&b, 40_000, 155_000, 0)));
+    let frame = tick(&mut s, 41_000, Some(fix_xy(&b, 41_000, 155_000, 0)))
+        .horizon
+        .unwrap();
+    assert_eq!(frame.upcoming[0].maneuver.arrow, Arrow::Right);
+    let r = s.route().unwrap();
+    let exit_eta = r.time_at(exit.along_route_cm) - r.time_at(frame.matched_progress_cm.unwrap());
+    assert_eq!(
+        frame.next_p1_deadline_monotonic_ms,
+        Some(41_000 + u64::from(exit_eta) - 8_000)
+    );
+}

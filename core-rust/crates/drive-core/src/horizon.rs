@@ -222,17 +222,8 @@ impl HorizonFrames {
             }
         };
         let tracking = status == HorizonStatus::Tracking;
-        let next_p1_deadline_monotonic_ms =
-            upcoming.first().filter(|_| tracking).and_then(|entry| {
-                let lead = if route.motorway_approach(entry.maneuver.anchor.along_route_cm) {
-                    20_000
-                } else {
-                    8_000
-                };
-                let arrival =
-                    sampled_at_mono_ms.saturating_add(u64::from(entry.eta_range_ms?.typical));
-                Some(arrival.saturating_sub(lead))
-            });
+        let next_p1_deadline_monotonic_ms = matched_progress_cm
+            .and_then(|p| route.next_p1_deadline(self.passed_cm, p, sampled_at_mono_ms));
         let refs = Refs {
             next: if tracking { next_ref(&upcoming) } else { None },
             last: self
