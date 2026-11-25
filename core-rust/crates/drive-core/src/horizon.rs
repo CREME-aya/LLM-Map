@@ -46,8 +46,8 @@
 use crate::junction::{classify, is_complex_trigger, JunctionClass};
 use crate::route::LoadedRoute;
 use contracts::horizon::{
-    Arrow, ComplexWindow, EtaRange, HorizonEntry, HorizonStatus, JunctionRef, Maneuver,
-    ManeuverHorizon, PassedRef, Refs, UPCOMING_MAX,
+    Arrow, AvoidOffer, ComplexWindow, EtaRange, HorizonEntry, HorizonStatus, JunctionRef, Maneuver,
+    ManeuverHorizon, ManeuverId, PassedRef, Refs, UPCOMING_MAX,
 };
 
 /// Preparation lead before a complex window (04 §4.1 "準備" emphasis: 30 s on ordinary
@@ -376,7 +376,15 @@ impl HorizonFrames {
         self.window.map(|(w, _)| w)
     }
 
-    /// Returns the frame to emit when the content changed.
+    /// Index of the first maneuver not passed yet.
+    pub(crate) fn first_unpassed(&self, route: &LoadedRoute) -> usize {
+        unpassed_index(route, self.passed_cm)
+    }
+
+    /// Returns the frame to emit when the content changed. `offer` is the avoid chip and
+    /// the maneuver it belongs to: carried on that `HorizonEntry` while tracking only
+    /// (`uncertain` suppresses proposals, so the frozen entries never carry it).
+    #[allow(clippy::too_many_arguments)]
     pub fn next(
         &mut self,
         route: &LoadedRoute,
@@ -385,10 +393,11 @@ impl HorizonFrames {
         sampled_at_mono_ms: u64,
         fix_stale_ms: u64,
         now: u64,
+        offer: Option<(&ManeuverId, &AvoidOffer)>,
     ) -> Option<ManeuverHorizon> {
         let (matched_progress_cm, upcoming) = match status {
             HorizonStatus::Tracking => {
-                let u = upcoming(route, progress_cm, self.passed_cm, self.eta);
+                let mut u = upcoming(route, progress_cm, self.passed_cm, self.eta);
                 self.frozen = Some(
                     u.iter()
                         .cloned()
@@ -398,6 +407,11 @@ impl HorizonFrames {
                         })
                         .collect(),
                 );
+                if let Some((id, o)) = offer {
+                    for e in u.iter_mut().filter(|e| e.maneuver.id == *id) {
+                        e.avoid_offer = Some(o.clone());
+                    }
+                }
                 (progress_cm, u)
             }
             HorizonStatus::Uncertain => (

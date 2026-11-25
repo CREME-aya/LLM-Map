@@ -25,7 +25,7 @@ core-rust/
 | 8 | `dc_trip_score(summary)` | Computes the trip score (long-distance/trip detection) from a trip summary | `E_UNIMPLEMENTED` |
 | 9 | `dc_route_commit(s, req)` | Loads the confirmed route body (the only place it is passed) | Implemented: `{expected_route_key: RouteKey\|null, bundle: RouteBundle}` — the guard `expected_route_key` (from `commit`, `null` for the first route) is re-checked first (`E_STALE`, nothing replaced), then the bundle must carry `route_revision` "0" (`E_SCHEMA`; Rust assigns current + 1, the first route 1, rewrites every `route_key` in the bundle and returns it), and while a route is current its `trip_id` / `trip_revision` / `graph_version` must match (`E_STALE`), then the bundle is validated (`E_SCHEMA`) and indexed |
 | 10 | `dc_tick(s, tick)` | The only event entry point. Takes `TickInput` and returns `horizon?/voice_cmds/ui_cmds/planner_cmds/next_wake_mono_ms/log` | Search planner (incl. watchdog → `engine_stuck` detected from `now_mono_ms`), on-route alignment of `fix` (off-route → `reroute` start with the fix), remaining ETA, `ManeuverHorizon` (3 ahead, `frame_seq` only on change, `next_complex_window` from the junction classes of `drive_core::junction` / groups while tracking; P3 available time `horizon::p3_available_ms`, 05 §6.2), time clamping and thermal collapse |
-| 11 | `dc_avoid_offer_eval(s, req)` | Decides whether to show an `AvoidOffer` from `{now_mono_ms, alt_facts}`, using the same detour-cap function as #6 | `E_UNIMPLEMENTED` |
+| 11 | `dc_avoid_offer_eval(s, req)` | Decides whether to show an `AvoidOffer` from `{now_mono_ms, alt_facts}`, using the same detour-cap function as #6 (`drive_core::avoid::DetourPolicy`) → `{result: offered, avoid_offer} \| {result: declined, reason}` (shape provisional) | implemented |
 | 12 | `dc_exchange_validate(req)` | Validates `{kind, payload}` received via `exchange-v1` | `E_UNIMPLEMENTED` |
 
 JSON conventions (docs v1.2 ADR-0008): `*_mono_ms` are JSON numbers; only Web-reachable u64 IDs / revisions
@@ -45,8 +45,11 @@ is cancelled; it keeps the slot until its `search_finished`.
 returns `ok` with a valid state (not cancelled / stuck, `route_key` equal to the current
 route): Kotlin calls `dc_route_commit` with that search's route body. `route_key` is the current
 route's key when the search started (not the new route's); `dc_route_commit` re-checks it and
-returns `E_STALE` if the route was replaced meanwhile. An avoid-chip `ok` is never committed
-(it needs `dc_avoid_offer_eval` and consent; not wired yet). "経路を確認中" for a search in
+returns `E_STALE` if the route was replaced meanwhile. An avoid-chip `ok` is not committed when
+it returns: it waits for `dc_avoid_offer_eval`, the `AvoidOffer` rides on its `HorizonEntry`,
+and only `user_tap{target_id: offer_id, action: avoid}` before the deadline (while tracking,
+same route_key) issues `commit` (`drive_core::avoid`; look-ahead off by default,
+`avoid_chip_lookahead`, 04 §4.3 item 6). The deadline removes it with `dismiss{expired}`. "経路を確認中" for a search in
 progress is `horizon.status` (`off_route` / `rerouting`), not a per-result UiCmd.
 A committable `ok` that returns while `uncertain` is held (one at most; a newer one replaces it,
 `discarded_hold_replaced`) and its `commit` is issued when the status is back to `tracking` /
@@ -86,7 +89,8 @@ Unknown fields are rejected with `E_SCHEMA` wherever the schema says `additional
 (TickInput, Fix, every Event kind, PlannerCmd, VoiceCmd, UiCmd, TickOutput, LogEvent) and in the schema-less
 `dc_validate_override` request and `dc_session_new` config.
 
-`voice_cmds` / `ui_cmds` (types only; nothing emits voice / confirm / dismiss yet) hold only
+`voice_cmds` / `ui_cmds` (types only; nothing emits voice / confirm yet, `dismiss` only for the
+avoid chip) hold only
 what docs v1.2 names:
 - `voice_cmds`: `speak{token, priority: p0|p1|p2|p3, template_id, params{name: integer}}` |
   `stop{token}` (05 §5; no text crosses the boundary, Kotlin renders the template).

@@ -121,9 +121,7 @@ pub unsafe extern "C" fn dc_route_commit(s: *mut DcSession, route_bundle_json: D
 pub unsafe extern "C" fn dc_avoid_offer_eval(s: *mut DcSession, req_json: DcIn) -> DcOut {
     let inp = input(req_json);
     DcOut::from_vec(guard(|| {
-        ops::with_session(session(s), |_| {
-            ops::unimplemented("dc_avoid_offer_eval", inp)
-        })
+        ops::with_session(session(s), |ss| ops::avoid_offer_eval(ss, inp))
     }))
 }
 

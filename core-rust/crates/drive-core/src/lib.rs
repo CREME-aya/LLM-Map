@@ -2,6 +2,7 @@
 //! time only arrives as `now_mono_ms` / `at_mono_ms`; no IO, DB, HTTP, threads or clocks.
 
 pub mod align;
+pub mod avoid;
 pub mod candidates;
 pub mod command_line;
 pub mod geo;

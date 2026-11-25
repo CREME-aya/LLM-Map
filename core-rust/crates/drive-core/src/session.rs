@@ -1,16 +1,20 @@
 //! `dc_session` state. Single-threaded: called only from the NavigationSession actor.
 
 use crate::align::{AlignConfig, AlignStats, Aligner, FixResult, Mode};
+use crate::avoid::{self, AvoidConfig, AvoidState, AvoidTarget, DetourPolicy};
 use crate::command_line::{self, Command, JpRef};
-use crate::horizon::{arrived, EtaFactors, HorizonFrames};
+use crate::horizon::{arrived, eta_range, EtaFactors, HorizonFrames};
+use crate::junction::is_avoid_target;
 use crate::planner::{CommitGate, Effects, PlanSearch, SearchLimits, SearchPlanner};
 use crate::route::LoadedRoute;
-use contracts::horizon::{HorizonStatus, ManeuverHorizon};
+use contracts::facts::{AvoidDeclineReason, AvoidOfferEvalRequest, AvoidOfferEvalResult};
+use contracts::horizon::{HorizonStatus, ManeuverHorizon, ManeuverId, UPCOMING_MAX};
 use contracts::override_types::{RejectCode, ValidateOverrideRequest, ValidateOverrideResult};
 use contracts::plan::{PlanCandidates, TripPlanSnapshot};
 use contracts::route::{RouteCommitRequest, RouteCommitResult};
 use contracts::tick::{
-    DistanceClass, EventBody, Fix, LogEvent, SearchPriority, ThermalStatus, TickInput, TickOutput,
+    DismissReason, DistanceClass, EventBody, Fix, LogEvent, PlannerCmd, SearchPriority, TapAction,
+    ThermalStatus, TickInput, TickOutput, UiCmd,
 };
 use contracts::{ErrorCode, RouteKey};
 use serde::Deserialize;
@@ -48,6 +52,15 @@ pub struct SessionConfig {
     /// earliest 850 = × 0.85, latest 1250 = × 1.25; no basis yet, Gate 2 / 3 calibrate).
     pub eta_earliest_permille: u32,
     pub eta_latest_permille: u32,
+    /// Driving-time avoid-chip look-ahead (04 §4.3 item 6 / 03 §3.1: off by default until
+    /// the stop latency is measured).
+    pub avoid_chip_lookahead: bool,
+    /// Avoid-chip compute budget (ms; 07 §1: 1.5 s, provisional).
+    pub avoid_budget_ms: u64,
+    /// Avoid-chip decision deadline before the branch (ms; 07 §1: 20 s), from `earliest`.
+    pub avoid_deadline_before_ms: u64,
+    /// "到達約 120 秒前" avoid-chip trigger (ms; 04 §4.3), compared with `earliest`.
+    pub avoid_trigger_eta_ms: u64,
 }
 
 impl Default for SessionConfig {
@@ -55,6 +68,7 @@ impl Default for SessionConfig {
         let l = SearchLimits::default();
         let a = AlignConfig::default();
         let e = EtaFactors::default();
+        let v = AvoidConfig::default();
         Self {
             watchdog_short_ms: l.watchdog_short_ms,
             watchdog_long_ms: l.watchdog_long_ms,
@@ -69,6 +83,10 @@ impl Default for SessionConfig {
             commit_hold_ms: l.commit_hold_ms,
             eta_earliest_permille: e.earliest_permille,
             eta_latest_permille: e.latest_permille,
+            avoid_chip_lookahead: v.enabled,
+            avoid_budget_ms: v.budget_ms,
+            avoid_deadline_before_ms: v.deadline_before_ms,
+            avoid_trigger_eta_ms: v.trigger_eta_ms,
         }
     }
 }
@@ -102,6 +120,15 @@ impl SessionConfig {
         EtaFactors {
             earliest_permille: self.eta_earliest_permille,
             latest_permille: self.eta_latest_permille,
+        }
+    }
+
+    pub fn avoid(&self) -> AvoidConfig {
+        AvoidConfig {
+            enabled: self.avoid_chip_lookahead,
+            budget_ms: self.avoid_budget_ms,
+            deadline_before_ms: self.avoid_deadline_before_ms,
+            trigger_eta_ms: self.avoid_trigger_eta_ms,
         }
     }
 
@@ -169,6 +196,14 @@ pub struct Session {
     frames: HorizonFrames,
     /// `at_mono_ms` of the latest fix used (horizon `sampled_at_monotonic_ms`).
     last_fix_at: Option<u64>,
+    avoid_cfg: AvoidConfig,
+    detour: DetourPolicy,
+    avoid: AvoidState,
+    /// Maneuvers of the current route an avoid chip was tried for (once each).
+    avoid_tried: Vec<ManeuverId>,
+    /// UiCmds raised outside `dc_tick` (a route commit removing an offer), sent with the
+    /// next tick.
+    pending_ui: Vec<UiCmd>,
 }
 
 impl Session {
@@ -185,6 +220,11 @@ impl Session {
             finished: false,
             frames: HorizonFrames::new(config.eta_factors()),
             last_fix_at: None,
+            avoid_cfg: config.avoid(),
+            detour: DetourPolicy::default(),
+            avoid: AvoidState::Idle,
+            avoid_tried: Vec::new(),
+            pending_ui: Vec::new(),
         }
     }
 
@@ -277,6 +317,25 @@ impl Session {
         self.finished = false;
         self.frames.reset_route();
         self.last_fix_at = None;
+        self.reset_avoid();
+    }
+
+    /// The avoid chip state (04 §4.3).
+    pub fn avoid_state(&self) -> &AvoidState {
+        &self.avoid
+    }
+
+    /// A new route: the chip of the old one is gone (`dismiss{route_changed}` with the next
+    /// tick when it was shown) and every maneuver may be tried again.
+    fn reset_avoid(&mut self) {
+        if let Some((_, offer)) = self.avoid.offer() {
+            self.pending_ui.push(UiCmd::Dismiss {
+                target_id: offer.offer_id.clone(),
+                reason: DismissReason::RouteChanged,
+            });
+        }
+        self.avoid = AvoidState::Idle;
+        self.avoid_tried.clear();
     }
 
     /// `dc_route_commit` guard (team decision 2026-11-25): `route_key` is the one from
@@ -390,6 +449,7 @@ impl Session {
         self.finished = false;
         self.frames.reset_route();
         self.last_fix_at = None;
+        self.reset_avoid();
         Ok(result)
     }
 
@@ -527,6 +587,10 @@ impl Session {
                         gate,
                         &mut fx,
                     );
+                    self.on_avoid_finished(now, at, &req_id, &fx, &mut extra_log);
+                }
+                EventBody::UserTap { target_id, action } => {
+                    self.on_user_tap(now, at, &target_id, action, &mut fx, &mut extra_log);
                 }
                 EventBody::EngineReset {} => self.planner.on_engine_reset(at, &mut fx),
                 EventBody::Thermal { status } => {
@@ -537,7 +601,8 @@ impl Session {
                     }
                 }
                 // TODO(drive-core): voice scheduler (tts_*), ASR/consent (asr_*, override_ready,
-                // user_tap), inference tier, audio focus, call state, low memory.
+                // user_tap for overrides / confirm screens), inference tier, audio focus,
+                // call state, low memory.
                 _ => {}
             }
         }
@@ -550,7 +615,228 @@ impl Session {
         self.planner
             .release_held(now, gate, self.current_route_key.as_ref(), &mut fx);
         self.refresh_eta(now);
+        self.avoid_step(now, &mut fx, &mut extra_log);
         self.finish(now, fx, extra_log)
+    }
+
+    /// The avoid-chip search `req_id` ended: a usable `ok` waits for `dc_avoid_offer_eval`
+    /// (only while tracking, 03 §3.1); anything else ends the attempt.
+    fn on_avoid_finished(
+        &mut self,
+        now: u64,
+        at: u64,
+        req_id: &str,
+        fx: &Effects,
+        log: &mut Vec<LogEvent>,
+    ) {
+        let AvoidState::Searching { req_id: r, target } = &self.avoid else {
+            return;
+        };
+        if r != req_id {
+            return;
+        }
+        let ready = fx.avoid_ready.iter().any(|(id, _)| id == req_id);
+        let tracking = self.horizon_status(now) == Some(HorizonStatus::Tracking);
+        self.avoid = if ready && tracking {
+            AvoidState::Ready {
+                req_id: r.clone(),
+                target: target.clone(),
+            }
+        } else {
+            let why = if ready {
+                "not_tracking"
+            } else {
+                "search_unused"
+            };
+            log.push(log_req(at, "avoid_attempt_ended", req_id, why));
+            AvoidState::Idle
+        };
+    }
+
+    /// Consent to the chip: `user_tap{target_id: offer_id, action: avoid}` before the
+    /// deadline, while tracking, on the route the search started on → `commit`.
+    fn on_user_tap(
+        &mut self,
+        now: u64,
+        at: u64,
+        target_id: &str,
+        action: TapAction,
+        fx: &mut Effects,
+        log: &mut Vec<LogEvent>,
+    ) {
+        let AvoidState::Offered {
+            req_id,
+            target,
+            offer,
+        } = &self.avoid
+        else {
+            return;
+        };
+        if offer.offer_id != target_id {
+            return;
+        }
+        let refused = if action != TapAction::Avoid {
+            // TODO(04 §4.3 / 03 §3.1): `undo` within 5 s of consent is not built yet.
+            Some("action")
+        } else if at >= target.deadline_mono_ms {
+            Some("deadline_passed")
+        } else if self.horizon_status(now) != Some(HorizonStatus::Tracking) {
+            Some("not_tracking")
+        } else if self.current_route_key.as_ref() != Some(&target.route_key) {
+            Some("route_key")
+        } else {
+            None
+        };
+        if let Some(why) = refused {
+            log.push(log_req(at, "avoid_consent_refused", req_id, why));
+            return;
+        }
+        fx.planner_cmds.push(PlannerCmd::Commit {
+            req_id: req_id.clone(),
+            route_key: target.route_key.clone(),
+        });
+        log.push(log_req(at, "avoid_consent_commit", req_id, &offer.offer_id));
+        self.avoid = AvoidState::Idle;
+    }
+
+    /// End of a tick: removes a chip past its deadline or off the route, then looks for a
+    /// new avoid target (see `crate::avoid`).
+    fn avoid_step(&mut self, now: u64, fx: &mut Effects, log: &mut Vec<LogEvent>) {
+        let status = self.horizon_status(now);
+        if let Some(t) = self.avoid.target() {
+            let expired = now >= t.deadline_mono_ms;
+            let off = matches!(
+                status,
+                Some(HorizonStatus::OffRoute | HorizonStatus::Rerouting | HorizonStatus::Finished)
+            );
+            // A search still running ends through its own search_finished.
+            let searching = matches!(self.avoid, AvoidState::Searching { .. });
+            if expired || (off && !searching) {
+                let reason = if expired {
+                    DismissReason::Expired
+                } else {
+                    DismissReason::RouteChanged
+                };
+                if let Some((_, offer)) = self.avoid.offer() {
+                    fx.ui_cmds.push(UiCmd::Dismiss {
+                        target_id: offer.offer_id.clone(),
+                        reason,
+                    });
+                }
+                let what = if expired {
+                    "deadline_passed"
+                } else {
+                    "left_route"
+                };
+                log.push(log_at(now, "avoid_withdrawn", Some(what.to_owned())));
+                self.avoid = AvoidState::Idle;
+            }
+        }
+        if !self.avoid_cfg.enabled
+            || self.avoid != AvoidState::Idle
+            || status != Some(HorizonStatus::Tracking)
+            || !self.planner.is_idle()
+        {
+            return;
+        }
+        let (Some(route), Some(progress), Some(key)) = (
+            self.route.as_ref(),
+            self.aligner.progress_cm(),
+            self.current_route_key.clone(),
+        ) else {
+            return;
+        };
+        let sampled = self.last_fix_at.unwrap_or(now);
+        let current = route.time_at(progress);
+        let factors = self.frames.eta_factors();
+        let first = self.frames.first_unpassed(route);
+        let mut found = None;
+        for (k, m) in route.maneuvers.iter().enumerate().skip(first) {
+            let earliest =
+                u64::from(eta_range(route, m.anchor.along_route_cm, current, factors).earliest);
+            if k - first >= UPCOMING_MAX && earliest > self.avoid_cfg.trigger_eta_ms {
+                break;
+            }
+            if !is_avoid_target(m) || self.avoid_tried.contains(&m.id) {
+                continue;
+            }
+            self.avoid_tried.push(m.id.clone());
+            let deadline = sampled
+                .saturating_add(earliest)
+                .saturating_sub(self.avoid_cfg.deadline_before_ms);
+            if now.saturating_add(self.avoid_cfg.budget_ms) > deadline {
+                let detail = format!("ordinal={} deadline={deadline}", m.id.ordinal);
+                log.push(log_at(now, "avoid_too_close", Some(detail)));
+                continue;
+            }
+            found = Some(AvoidTarget {
+                maneuver_id: m.id.clone(),
+                route_key: key.clone(),
+                deadline_mono_ms: deadline,
+                base_eta_ms: u64::from(route.remaining_ms(progress)),
+                avoided: avoid::avoided(m),
+            });
+            break;
+        }
+        let Some(target) = found else { return };
+        let before = fx.planner_cmds.len();
+        self.planner
+            .request(now, SearchPriority::AvoidChip, key, None, fx);
+        let started = fx.planner_cmds[before..].iter().find_map(|c| match c {
+            PlannerCmd::Start {
+                req_id,
+                priority: SearchPriority::AvoidChip,
+                ..
+            } => Some(req_id.clone()),
+            _ => None,
+        });
+        if let Some(req_id) = started {
+            self.avoid = AvoidState::Searching { req_id, target };
+        }
+    }
+
+    /// `dc_avoid_offer_eval(s, {now_mono_ms, alt_facts})` (02 §2.1 #11): turns the waiting
+    /// avoid-chip result into an `AvoidOffer` on its `HorizonEntry` when it is still
+    /// before the deadline, the session is tracking and the alternative is within the
+    /// detour cap (`DetourPolicy`, base_eta = remaining ETA when the search started).
+    /// Any other outcome drops the result. The frame itself comes with the next `dc_tick`.
+    pub fn avoid_offer_eval(&mut self, req: &AvoidOfferEvalRequest) -> AvoidOfferEvalResult {
+        let now = self
+            .last_now_mono_ms
+            .map_or(req.now_mono_ms, |p| p.max(req.now_mono_ms));
+        let declined = |reason| AvoidOfferEvalResult::Declined { reason };
+        // A search still running or an offer already shown is left as it is.
+        if !matches!(self.avoid, AvoidState::Ready { .. }) {
+            return declined(AvoidDeclineReason::NoPendingResult);
+        }
+        let AvoidState::Ready { req_id, target } =
+            std::mem::replace(&mut self.avoid, AvoidState::Idle)
+        else {
+            unreachable!("checked above");
+        };
+        if self.horizon_status(now) != Some(HorizonStatus::Tracking) {
+            return declined(AvoidDeclineReason::NotTracking);
+        }
+        if now >= target.deadline_mono_ms {
+            return declined(AvoidDeclineReason::DeadlinePassed);
+        }
+        match avoid::build_offer(
+            &req_id,
+            &target,
+            &target.route_key.graph_version,
+            &req.alt_facts,
+            &self.detour,
+        ) {
+            Ok(offer) => {
+                self.avoid = AvoidState::Offered {
+                    req_id,
+                    target,
+                    offer: offer.clone(),
+                };
+                AvoidOfferEvalResult::Offered { avoid_offer: offer }
+            }
+            Err(reason) => declined(reason),
+        }
     }
 
     /// On-route alignment of one fix (04 §3.1); confirms off-route and requests the reroute
@@ -650,8 +936,11 @@ impl Session {
         let horizon = self.next_horizon(now);
         // The freshness limit can turn tracking into uncertain without new input.
         let stale_at = self.route.as_ref().and_then(|_| self.aligner.stale_at(now));
+        let mut ui_cmds = std::mem::take(&mut self.pending_ui);
+        ui_cmds.extend(fx.ui_cmds);
         let next_wake_mono_ms = [
             self.planner.next_wake(),
+            self.avoid.target().map(|t| t.deadline_mono_ms),
             stale_at,
             self.frames.last_ref_expires_at(),
             self.frames.window_expires_at(),
@@ -662,7 +951,7 @@ impl Session {
         TickOutput {
             horizon,
             voice_cmds: Vec::new(),
-            ui_cmds: fx.ui_cmds,
+            ui_cmds,
             planner_cmds: fx.planner_cmds,
             next_wake_mono_ms,
             log,
@@ -682,6 +971,7 @@ impl Session {
             sampled,
             self.align_cfg.fix_stale_ms,
             now,
+            self.avoid.offer(),
         )
     }
 
@@ -725,6 +1015,15 @@ impl Session {
                 "parsed; contract / Safety Gate / revision checks not implemented",
             )),
         }
+    }
+}
+
+fn log_req(at: u64, what: &str, req_id: &str, detail: &str) -> LogEvent {
+    LogEvent {
+        at_mono_ms: at,
+        what: what.to_owned(),
+        req_id: Some(req_id.to_owned()),
+        detail: Some(detail.to_owned()),
     }
 }
 

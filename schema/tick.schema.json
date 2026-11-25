@@ -636,7 +636,7 @@
             "req_id",
             "route_key"
           ],
-          "description": "Kotlin calls dc_route_commit with the route body of search req_id. Only for a reroute / explicit_plan search outside a plan that returned ok with a valid state (not cancelled / engine_stuck, route_key equal to the current route); never for avoid_chip (dc_avoid_offer_eval + consent) nor for a plan candidate (rank). route_key is the current route's key when the search started (not the new route's); dc_route_commit re-checks it and returns E_STALE without replacing anything if the route changed meanwhile. Team decision 2026-11-25, not in docs yet.",
+          "description": "Kotlin calls dc_route_commit with the route body of search req_id. Only for a reroute / explicit_plan search outside a plan that returned ok with a valid state (not cancelled / engine_stuck, route_key equal to the current route); for an avoid_chip search only after consent (dc_avoid_offer_eval put its AvoidOffer on the horizon, then user_tap{target_id: offer_id, action: avoid} arrived before the deadline with the offer's route_key still current; 03 §3.1 / 04 §4.3); never for a plan candidate (rank). route_key is the current route's key when the search started (not the new route's); dc_route_commit re-checks it and returns E_STALE without replacing anything if the route changed meanwhile. Team decision 2026-11-25, not in docs yet.",
           "properties": {
             "cmd": {
               "const": "commit"

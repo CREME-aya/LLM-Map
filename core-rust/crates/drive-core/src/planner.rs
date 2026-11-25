@@ -25,7 +25,7 @@
 //!   off-route, `invalidate_route_eta`) → long. The latest plan's class is never inherited.
 //!   Only the watchdog limit (5 s / 10 s) applies to these searches; the comparison budget
 //!   (3 s / 8 s) is for plans only. The avoid chip's own compute budget (1.5 s) and the
-//!   20 s-before-branch deadline are separate and not handled here.
+//!   20 s-before-branch deadline are separate (`crate::avoid`, decided by the session).
 //! - Plan queue (team decision 2026-11-25): `begin_plan_with` queues the plan's candidate
 //!   searches (baseline `explicit_plan`, the rest `comparison`); they share the single slot
 //!   with ad-hoc requests and start one at a time. The plan ends with exactly one
@@ -201,6 +201,9 @@ pub struct Effects {
     pub planner_cmds: Vec<PlannerCmd>,
     pub ui_cmds: Vec<UiCmd>,
     pub log: Vec<LogEvent>,
+    /// Avoid-chip searches that returned a usable `ok` (not committed: the session waits
+    /// for `dc_avoid_offer_eval`, 04 §4.3), as `(req_id, facts_ref)`.
+    pub avoid_ready: Vec<(String, Option<String>)>,
 }
 
 #[derive(Debug)]
@@ -521,6 +524,16 @@ impl SearchPlanner {
         log(fx, now, "search_cancel_requested", Some(&req.req_id), None);
     }
 
+    /// Nothing runs or waits: a search requested now starts at once.
+    pub fn is_idle(&self) -> bool {
+        self.slot == Slot::Idle
+            && self.pending.is_none()
+            && !self
+                .plan
+                .as_ref()
+                .is_some_and(|p| !p.ended && !p.queue.is_empty())
+    }
+
     /// A reroute is waiting or occupies the slot (no second one is requested).
     pub fn has_reroute(&self) -> bool {
         self.pending
@@ -736,8 +749,10 @@ impl SearchPlanner {
                 });
                 log(fx, at, "commit_issued", Some(req_id), None);
             }
-            // TODO(drive-core): avoid chip → dc_avoid_offer_eval / AvoidOffer (not wired).
+            // Never committed here: dc_avoid_offer_eval and consent first (04 §4.3).
             SearchOutcome::Ok if req.priority == SearchPriority::AvoidChip => {
+                fx.avoid_ready
+                    .push((req_id.to_owned(), facts_ref.map(str::to_owned)));
                 log(fx, at, "avoid_result_ready", Some(req_id), None)
             }
             SearchOutcome::Ok => log(fx, at, "search_result_unused", Some(req_id), None),

@@ -1,6 +1,7 @@
 //! Safe, byte-in/byte-out operations shared by the C ABI and JNI layers.
 //! Every function returns a complete `{ok, data | error}` envelope.
 
+use contracts::facts::AvoidOfferEvalRequest;
 use contracts::override_types::ValidateOverrideRequest;
 use contracts::plan::PlanCandidatesRequest;
 use contracts::route::RouteCommitRequest;
@@ -134,6 +135,16 @@ pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
     match s.route_commit(&req) {
         Ok(r) => envelope_ok(&r),
         Err(e) => err(e),
+    }
+}
+
+/// `dc_avoid_offer_eval(s, {now_mono_ms, alt_facts})` → `{"result": "offered", avoid_offer}`
+/// | `{"result": "declined", reason}` (`Session::avoid_offer_eval`). A malformed request
+/// (including `alt_facts` not matching schema/candidate-facts.schema.json) is `E_SCHEMA`.
+pub fn avoid_offer_eval(s: &mut Session, input: &[u8]) -> Vec<u8> {
+    match serde_json::from_slice::<AvoidOfferEvalRequest>(input) {
+        Ok(r) => envelope_ok(&s.avoid_offer_eval(&r)),
+        Err(e) => envelope_err(ErrorCode::Schema, &format!("avoid_offer_eval: {e}")),
     }
 }
 

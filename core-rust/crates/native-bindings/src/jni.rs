@@ -166,9 +166,7 @@ pub unsafe extern "system" fn Java_dev_slmmap_core_DcNative_avoidOfferEval(
     h: jlong,
     input: jbyteArray,
 ) -> jbyteArray {
-    stateful(env, h, input, |_, b| {
-        ops::unimplemented("dc_avoid_offer_eval", b)
-    })
+    stateful(env, h, input, ops::avoid_offer_eval)
 }
 
 #[no_mangle]

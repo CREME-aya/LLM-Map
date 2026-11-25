@@ -171,6 +171,39 @@ fn rust_mirror_agrees_on_trip_plan_snapshot() {
     assert!(seen >= 2);
 }
 
+/// contracts::facts::CandidateFacts (the `alt_facts` of dc_avoid_offer_eval) agrees with
+/// candidate-facts.schema.json on every fixture, and rejects unknown fields like the schema.
+#[test]
+fn rust_mirror_agrees_on_candidate_facts() {
+    use contracts::facts::CandidateFacts;
+    let mut seen = 0;
+    for kind in ["valid", "invalid"] {
+        for (schema, path) in fixtures(kind) {
+            if schema != "candidate-facts" {
+                continue;
+            }
+            seen += 1;
+            let v = load(&path);
+            let by_schema = compile(&schema).is_valid(&v);
+            let by_serde = serde_json::from_value::<CandidateFacts>(v.clone());
+            assert_eq!(by_schema, by_serde.is_ok(), "{}", path.display());
+            if let Ok(typed) = by_serde {
+                assert_eq!(
+                    serde_json::to_value(&typed).unwrap(),
+                    v,
+                    "{}",
+                    path.display()
+                );
+                let mut extra = v.clone();
+                extra["counts"]["extra"] = serde_json::json!(1);
+                assert!(!compile(&schema).is_valid(&extra));
+                assert!(serde_json::from_value::<CandidateFacts>(extra).is_err());
+            }
+        }
+    }
+    assert!(seen >= 3);
+}
+
 #[test]
 fn rust_mirror_agrees_on_personal_routing_override() {
     for (schema, path) in fixtures("valid") {

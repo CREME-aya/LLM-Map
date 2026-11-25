@@ -103,14 +103,21 @@ typedef struct dc_session dc_session;
           *   the committed route only; Valhalla searches the road network from that position).
           *   commit: only for a reroute / ad-hoc explicit_plan ok with a valid state (not
           *   cancelled / stuck, route_key current, horizon.status not uncertain / finished); Kotlin calls
-          *   dc_route_commit with that search's route body (never for avoid_chip / plan candidates).
+          *   dc_route_commit with that search's route body (never for plan candidates). For an
+          *   avoid_chip search only after consent: user_tap{target_id: offer_id, action: avoid}
+          *   before the offer's deadline, while tracking, route_key unchanged (04 §4.3, 03 §3.1).
           *   rank: once per plan; Kotlin calls dc_rank with the CandidateFacts behind facts_refs
           *   (may be empty). The plan is over: no more start for it, a late search_finished
           *   only frees the slot (discarded_late).
           *       next_wake_mono_ms: u64|null, log[]}
           *   next_wake_mono_ms: earliest time the output may change without new input (includes the
           *   search watchdog deadline). Kotlin calls dc_tick by then; null = tick on each Fix only. */
-/* 11 */ dc_out   dc_avoid_offer_eval(dc_session* s, dc_in req_json);         /* {now_mono_ms, alt_facts} (TODO: E_UNIMPLEMENTED) */
+/* 11 */ dc_out   dc_avoid_offer_eval(dc_session* s, dc_in req_json);         /* {now_mono_ms, alt_facts: CandidateFacts}
+          *   Call after the dc_tick that carried search_finished{ok} of an avoid_chip search.
+          * → {result: "offered", avoid_offer: AvoidOffer} (shown on its HorizonEntry from the
+          *   next dc_tick; dismiss{expired} at the deadline) | {result: "declined", reason:
+          *   no_pending_result|not_tracking|deadline_passed|graph_mismatch|not_legal_or_complete
+          *   |over_detour_cap}. Result shape provisional (not in docs). */
 /* 12 */ dc_out   dc_exchange_validate(dc_in req_json);                        /* {kind, payload} (TODO: E_UNIMPLEMENTED) */
 
 #ifdef __cplusplus

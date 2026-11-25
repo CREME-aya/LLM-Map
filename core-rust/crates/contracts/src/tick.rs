@@ -325,8 +325,11 @@ pub enum PlannerCmd {
     /// Commit the route found by search `req_id`: Kotlin calls `dc_route_commit` with the
     /// route body of that search. Emitted only for a `reroute` / ad-hoc `explicit_plan`
     /// search that returned `ok` with a still valid state (not cancelled / stuck, its
-    /// `route_key` equal to the current route). Never for an avoid chip (it needs
-    /// `dc_avoid_offer_eval` and consent) nor for a plan's candidate (→ `rank`).
+    /// `route_key` equal to the current route). For an avoid-chip search only after
+    /// consent (`dc_avoid_offer_eval` put its `AvoidOffer` on the horizon, then
+    /// `user_tap{target_id: offer_id, action: avoid}` arrived before the deadline with the
+    /// offer's `route_key` still current; 03 §3.1 / 04 §4.3). Never for a plan's candidate
+    /// (→ `rank`).
     /// `route_key` is the current route's key *when the search started* (not the new
     /// route's); `dc_route_commit` re-checks it against the current route and returns
     /// `E_STALE` without replacing anything when the route changed meanwhile.
