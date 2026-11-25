@@ -105,11 +105,11 @@ fn expected(h: &ManeuverHorizon, first: usize, last: usize, prep: u64) -> Comple
 
 // ---- classification ----------------------------------------------------------------------
 
-/// Oracle for the crossing class, written as the decision table (only confirmed signal /
-/// protection values decide).
+/// Oracle for the crossing class, written as the decision table (asymmetric Evidence rule:
+/// inferred `absent` / `unprotected` are used, inferred `present` / `protected` are unknown).
 fn expected_crossing(signal: (&str, &str), protection: (&str, &str)) -> JunctionClass {
     match (signal, protection) {
-        (("confirmed", "absent"), _) | (_, ("confirmed", "unprotected")) => RightUnprotected,
+        ((_, "absent"), _) | (_, (_, "unprotected")) => RightUnprotected,
         (("confirmed", "present"), ("confirmed", "protected")) => RightProtected,
         (("confirmed", "present"), _) => RightSignalUnknownProtection,
         _ => RightSignalUnknown,
@@ -127,13 +127,15 @@ fn evidence(kv: (&str, &str)) -> Evidence {
 #[test]
 fn classification_covers_every_evidence_combination() {
     let base = main_line().legs[0].maneuvers[0].clone();
-    let crossings: [((&str, &str), Option<bool>); 6] = [
+    // None: unknown by the asymmetric rule → crossing only on a right-hand arrow.
+    let crossings: [((&str, &str), Option<bool>); 7] = [
         (("confirmed", "across_oncoming"), Some(true)),
         (("inferred", "across_oncoming"), Some(true)),
         (("confirmed", "no_crossing"), Some(false)),
-        (("inferred", "no_crossing"), Some(false)),
         (("confirmed", "not_applicable"), Some(false)),
-        // unknown: crossing only on a right-hand arrow (safe side)
+        // inferred "no crossing" is the safe side: treated as unknown
+        (("inferred", "no_crossing"), None),
+        (("inferred", "not_applicable"), None),
         (("unknown", ""), None),
     ];
     let signals = [
@@ -164,10 +166,13 @@ fn classification_covers_every_evidence_combination() {
         (Arrow::MergeRight, false),
         (Arrow::Arrive, false),
     ];
-    let widths: [((&str, u64), bool); 6] = [
+    let widths: [((&str, u64), bool); 8] = [
         (("confirmed", 3_999), true),
         (("confirmed", 4_000), false),
         (("inferred", 2_500), true),
+        (("inferred", 3_999), true),
+        // inferred >= 4.0 m is the safe side: width unknown, not narrow
+        (("inferred", 4_000), false),
         (("inferred", 4_001), false),
         (("unknown", 0), false),
         // approach narrow only: not entering a narrow road
@@ -227,7 +232,7 @@ fn classification_covers_every_evidence_combination() {
             }
         }
     }
-    assert_eq!(n, 6 * 5 * 5 * 12 * 6);
+    assert_eq!(n, 7 * 5 * 5 * 12 * 8);
 }
 
 /// The two predicates per class (team decision 2026-11-26): every class starts a complex
@@ -321,6 +326,83 @@ fn predicates_and_names_per_class() {
         m.departure_width_mm = ev("inferred", json!(3_500));
     });
     assert_eq!(classify(&m), vec![RightUnprotected, Narrow]);
+}
+
+/// The asymmetric Evidence rule, one field at a time (team decision 2026-11-26, 04 §2.2):
+/// an inferred value on the dangerous side is used, on the safe side it equals unknown.
+#[test]
+fn inferred_is_used_only_on_the_dangerous_side() {
+    let base = main_line().legs[0].maneuvers[0].clone();
+    let inf = |v: &str| ev("inferred", json!(v));
+    let right = |f: &dyn Fn(&mut Maneuver)| {
+        let mut m = base.clone();
+        plain(&mut m, Arrow::Right);
+        f(&mut m);
+        classify(&m)
+    };
+    // crossing: inferred across_oncoming crosses (even on a left arrow) ...
+    let mut m = base.clone();
+    plain(&mut m, Arrow::Left);
+    m.crossing = inf("across_oncoming");
+    assert_eq!(classify(&m), vec![RightSignalUnknown]);
+    // ... inferred no_crossing / not_applicable is unknown: a right arrow still crosses,
+    // a left arrow does not; only a confirmed value rules the crossing out.
+    for v in ["no_crossing", "not_applicable"] {
+        assert_eq!(
+            right(&|m| m.crossing = inf(v)),
+            right(&|m| m.crossing = unknown())
+        );
+        assert_eq!(
+            right(&|m| m.crossing = inf(v)),
+            vec![RightSignalUnknown],
+            "{v}"
+        );
+        assert!(right(&|m| m.crossing = c(v)).is_empty(), "{v}");
+        let mut m = base.clone();
+        plain(&mut m, Arrow::Left);
+        m.crossing = inf(v);
+        assert!(classify(&m).is_empty(), "{v}");
+    }
+    // approach_signal: inferred absent → no signal → right_unprotected;
+    // inferred present = unknown → right_signal_unknown (not ..._protection).
+    assert_eq!(
+        right(&|m| m.approach_signal = inf("absent")),
+        vec![RightUnprotected]
+    );
+    assert_eq!(
+        right(&|m| m.approach_signal = inf("present")),
+        right(&|m| m.approach_signal = unknown())
+    );
+    assert_eq!(
+        right(&|m| m.approach_signal = inf("present")),
+        vec![RightSignalUnknown]
+    );
+    // right_turn_protection: inferred unprotected is used (with any signal evidence) ...
+    for sig in [c("present"), inf("present"), unknown()] {
+        let got = right(&|m| {
+            m.approach_signal = sig.clone();
+            m.right_turn_protection = inf("unprotected");
+        });
+        assert_eq!(got, vec![RightUnprotected]);
+    }
+    // ... inferred protected = unknown: a confirmed signal stays "protection unknown".
+    let got = right(&|m| {
+        m.approach_signal = c("present");
+        m.right_turn_protection = inf("protected");
+    });
+    assert_eq!(got, vec![RightSignalUnknownProtection]);
+    let got = right(&|m| {
+        m.approach_signal = c("present");
+        m.right_turn_protection = c("protected");
+    });
+    assert_eq!(got, vec![RightProtected]);
+    // width: inferred < 4.0 m is narrow, inferred >= 4.0 m is unknown (not narrow).
+    let mut m = base.clone();
+    plain(&mut m, Arrow::Left);
+    m.departure_width_mm = ev("inferred", json!(3_999));
+    assert_eq!(classify(&m), vec![Narrow]);
+    m.departure_width_mm = ev("inferred", json!(4_000));
+    assert!(classify(&m).is_empty());
 }
 
 // ---- next_complex_window ---------------------------------------------------------------

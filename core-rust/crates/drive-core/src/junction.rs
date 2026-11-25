@@ -7,20 +7,34 @@
 //! `right_protected` / `right_entry`, plus `merge` and `narrow` (CandidateFacts has
 //! `counts.merges` and `narrow_m`, not these exact names).
 //!
-//! Rules (implementation choices, not spelled out in docs; see each function):
+//! Evidence rule (team decision 2026-11-26, 04 §2.2): `confirmed` and `inferred` are used
+//! asymmetrically. An `inferred` value is used only when it leans to the dangerous side; an
+//! `inferred` value on the safe side is treated exactly like `unknown`.
+//!
+//! | field | dangerous side (inferred is used) | safe side (inferred = unknown) |
+//! |---|---|---|
+//! | `crossing` | `across_oncoming` → crosses | `no_crossing` / `not_applicable` → unknown |
+//! | `approach_signal` | `absent` → no signal | `present` → unknown |
+//! | `right_turn_protection` | `unprotected` → unprotected | `protected` → unknown |
+//! | `departure_width_mm` | `< 4.0 m` → narrow | `>= 4.0 m` → unknown (not narrow) |
+//!
 //! - A maneuver crosses oncoming traffic when `crossing` is `across_oncoming` (confirmed or
-//!   inferred), or when `crossing` is `unknown` on a right-hand arrow (`right` /
-//!   `slight_right` / `sharp_right` / `u_turn_right`): left-hand traffic, safe side (03 §3.2
-//!   counts every right turn that is not confirmed free of an oncoming crossing).
+//!   inferred), or when `crossing` is unknown by the rule above (`unknown`, or an inferred
+//!   "no crossing") on a right-hand arrow (`right` / `slight_right` / `sharp_right` /
+//!   `u_turn_right`): left-hand traffic, "対向横断が分からない右の矢印は横切る" (04 §2.2).
+//!   Only a confirmed `no_crossing` / `not_applicable` rules the crossing out.
 //! - Crossing maneuvers: `arrive` → `right_entry` (03 §3.2 "目的地への対向横断入口").
-//!   Otherwise by the signal / protection evidence, only `confirmed` values decide:
-//!   signal absent, or protection unprotected → `right_unprotected`; signal present and
-//!   protection protected → `right_protected`; signal present otherwise →
-//!   `right_signal_unknown_protection` (03 §3.2 "無タグ信号は保護不明"); signal not
-//!   confirmed → `right_signal_unknown`.
+//!   Otherwise: signal absent (confirmed or inferred) or protection unprotected (confirmed
+//!   or inferred) → `right_unprotected`; signal confirmed present and protection confirmed
+//!   protected → `right_protected`; signal confirmed present otherwise →
+//!   `right_signal_unknown_protection` (03 §3.2 "無タグ信号は保護不明"); signal not known
+//!   (unknown, or inferred present) → `right_signal_unknown`.
 //! - `merge` / `merge_left` / `merge_right` → `merge`.
 //! - `departure_width_mm` < 4.0 m (03 §3.2 provisional narrow threshold), confirmed or
-//!   inferred → `narrow` (entering a narrow road). Unknown widths are not narrow.
+//!   inferred → `narrow` (entering a narrow road). A confirmed width >= 4.0 m is not narrow;
+//!   an inferred width >= 4.0 m and an unknown width are "width unknown", not narrow either.
+//!   TODO(04 §2.2): whether an unknown width on a residential road leans to narrow is
+//!   undecided (`edges.flags` has no road class), so it is not narrow for now.
 //!
 //! A maneuver can be one crossing class and also `narrow` (e.g. a right turn into a narrow
 //! road); `merge` and the crossing classes are independent too.
@@ -36,8 +50,14 @@ fn value_is(e: &Evidence, kinds: &[EvidenceKind], value: &str) -> bool {
     kinds.contains(&e.kind) && e.value.as_ref().and_then(|v| v.as_str()) == Some(value)
 }
 
+/// `value` is established for a value on the safe side: confirmed only.
 fn confirmed(e: &Evidence, value: &str) -> bool {
     value_is(e, &[EvidenceKind::Confirmed], value)
+}
+
+/// `value` is established for a value on the dangerous side: confirmed or inferred.
+fn confirmed_or_inferred(e: &Evidence, value: &str) -> bool {
+    value_is(e, &[EvidenceKind::Confirmed, EvidenceKind::Inferred], value)
 }
 
 fn right_hand(a: Arrow) -> bool {
@@ -47,13 +67,15 @@ fn right_hand(a: Arrow) -> bool {
     )
 }
 
-/// Crosses oncoming traffic (see module docs).
+/// Crosses oncoming traffic (see module docs): `across_oncoming` confirmed or inferred;
+/// otherwise unless a confirmed "no crossing" rules it out, a right-hand arrow crosses.
 fn crosses_oncoming(m: &Maneuver) -> bool {
-    value_is(
-        &m.crossing,
-        &[EvidenceKind::Confirmed, EvidenceKind::Inferred],
-        "across_oncoming",
-    ) || (m.crossing.kind == EvidenceKind::Unknown && right_hand(m.arrow))
+    if confirmed_or_inferred(&m.crossing, "across_oncoming") {
+        return true;
+    }
+    let ruled_out =
+        confirmed(&m.crossing, "no_crossing") || confirmed(&m.crossing, "not_applicable");
+    !ruled_out && right_hand(m.arrow)
 }
 
 fn crossing_class(m: &Maneuver) -> Option<JunctionClass> {
@@ -62,8 +84,8 @@ fn crossing_class(m: &Maneuver) -> Option<JunctionClass> {
     }
     Some(if m.arrow == Arrow::Arrive {
         JunctionClass::RightEntry
-    } else if confirmed(&m.approach_signal, "absent")
-        || confirmed(&m.right_turn_protection, "unprotected")
+    } else if confirmed_or_inferred(&m.approach_signal, "absent")
+        || confirmed_or_inferred(&m.right_turn_protection, "unprotected")
     {
         JunctionClass::RightUnprotected
     } else if confirmed(&m.approach_signal, "present") {
@@ -77,6 +99,8 @@ fn crossing_class(m: &Maneuver) -> Option<JunctionClass> {
     })
 }
 
+/// Entering a narrow road: `departure_width_mm` < 4.0 m, confirmed or inferred (the
+/// dangerous side). Any width >= 4.0 m, or none, is not narrow (see module docs).
 fn narrow_entry(m: &Maneuver) -> bool {
     matches!(
         m.departure_width_mm.kind,
