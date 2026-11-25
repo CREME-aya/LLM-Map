@@ -41,7 +41,17 @@
 //!   avoid-chip `ok` is never committed here (it goes through `dc_avoid_offer_eval` and
 //!   consent). "経路を確認中" is shown through `horizon.status`, not a UiCmd per result.
 //!   The commit additionally needs the session to be following the vehicle with
-//!   confidence (`commit_allowed`: horizon status not `uncertain` / `finished`).
+//!   confidence (`CommitGate`: `uncertain` holds the result, `finished` drops it).
+//! - Hold while `uncertain` (04 §3): a committable `reroute` / ad-hoc `explicit_plan` ok
+//!   that returns while the session is `uncertain` (`CommitGate::Hold`) is not
+//!   discarded but held (one at most; a newer committable ok replaces it,
+//!   `discarded_hold_replaced`). Once the session may commit again (status `tracking` /
+//!   `off_route` / `rerouting`), `release_held` issues its `commit` if its start-time
+//!   `route_key` is still the current route (`discarded_stale_route_key` otherwise). After
+//!   `commit_hold_ms` (10 s, provisional) it is dropped as `discarded_hold_expired`.
+//!   TODO(04 §3 / Gate 7): the hold limit and whether an expired hold restarts the reroute
+//!   are undecided; nothing is restarted here (a still-confirmed off-route requests a
+//!   new reroute on the next fix, as before).
 //! - `engine_stuck` emits no UiCmd (docs 03 §3.1, `show_checking_route` is abolished): a
 //!   stuck reroute keeps `horizon.status = rerouting` (the slot stays occupied); a stuck
 //!   avoid-chip search leaves the status unchanged and is only logged, and no new avoid
@@ -74,6 +84,9 @@ pub struct SearchLimits {
     /// Comparison budget, counted from the plan start.
     pub comparison_budget_short_ms: u64,
     pub comparison_budget_long_ms: u64,
+    /// How long a result returned while `uncertain` is held for a later commit
+    /// (04 §3; 10 s, provisional — not in 07 §1).
+    pub commit_hold_ms: u64,
 }
 
 impl Default for SearchLimits {
@@ -83,6 +96,7 @@ impl Default for SearchLimits {
             watchdog_long_ms: 10_000,
             comparison_budget_short_ms: 3_000,
             comparison_budget_long_ms: 8_000,
+            commit_hold_ms: 10_000,
         }
     }
 }
@@ -152,6 +166,28 @@ struct Pending {
     fix: Option<Fix>,
 }
 
+/// Whether a committable `ok` may be committed now (decided by the session from
+/// `horizon.status`, 04 §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitGate {
+    /// `tracking` / `off_route` / `rerouting` (or no geometry yet): commit.
+    Allowed,
+    /// `uncertain`: hold until the status allows a commit again.
+    Hold,
+    /// `finished`: discard (`discarded_not_tracking`).
+    Denied,
+}
+
+/// A committable result returned while the session could not commit (04 §3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldResult {
+    pub req_id: String,
+    pub priority: SearchPriority,
+    /// The current route's key when the search started (the `commit` key).
+    pub route_key: RouteKey,
+    pub held_at_mono_ms: u64,
+}
+
 /// Remaining ETA on a route, as last reported. Valid only for that `route_key` and until
 /// invalidated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +211,7 @@ pub struct SearchPlanner {
     limits: SearchLimits,
     plan: Option<Plan>,
     route_eta: Option<RouteEta>,
+    held: Option<HeldResult>,
 }
 
 impl SearchPlanner {
@@ -186,6 +223,81 @@ impl SearchPlanner {
             limits,
             plan: None,
             route_eta: None,
+            held: None,
+        }
+    }
+
+    pub fn held(&self) -> Option<&HeldResult> {
+        self.held.as_ref()
+    }
+
+    /// Last instant (inclusive) the held result may still be committed.
+    fn hold_deadline(&self) -> Option<u64> {
+        self.held
+            .as_ref()
+            .map(|h| h.held_at_mono_ms.saturating_add(self.limits.commit_hold_ms))
+    }
+
+    fn replace_held(&mut self, at: u64, new: Option<HeldResult>, fx: &mut Effects) {
+        if let Some(old) = self.held.take() {
+            log(fx, at, "discarded_hold_replaced", Some(&old.req_id), None);
+        }
+        self.held = new;
+    }
+
+    /// Called at the end of every tick: drops an expired hold, or issues the held
+    /// `commit` once the session may commit again and the route has not changed.
+    pub fn release_held(
+        &mut self,
+        now: u64,
+        gate: CommitGate,
+        current_route_key: Option<&RouteKey>,
+        fx: &mut Effects,
+    ) {
+        let Some(deadline) = self.hold_deadline() else {
+            return;
+        };
+        if now > deadline {
+            let h = self.held.take().expect("deadline implies hold");
+            log(fx, now, "discarded_hold_expired", Some(&h.req_id), None);
+            return;
+        }
+        match gate {
+            CommitGate::Hold => return,
+            CommitGate::Denied => {
+                let h = self.held.take().expect("deadline implies hold");
+                log(
+                    fx,
+                    now,
+                    "discarded_not_tracking",
+                    Some(&h.req_id),
+                    Some("from_hold".into()),
+                );
+                return;
+            }
+            CommitGate::Allowed => {}
+        }
+        let h = self.held.take().expect("deadline implies hold");
+        if Some(&h.route_key) == current_route_key {
+            fx.planner_cmds.push(PlannerCmd::Commit {
+                req_id: h.req_id.clone(),
+                route_key: h.route_key,
+            });
+            log(
+                fx,
+                now,
+                "commit_issued",
+                Some(&h.req_id),
+                Some("from_hold".into()),
+            );
+        } else {
+            log(
+                fx,
+                now,
+                "discarded_stale_route_key",
+                Some(&h.req_id),
+                Some("from_hold".into()),
+            );
         }
     }
 
@@ -415,6 +527,10 @@ impl SearchPlanner {
             .as_ref()
             .is_some_and(|p| p.priority == SearchPriority::Reroute)
             || self.reroute_in_slot()
+            || self
+                .held
+                .as_ref()
+                .is_some_and(|h| h.priority == SearchPriority::Reroute)
     }
 
     /// The slot holds a reroute (running, being cancelled or stuck): `horizon.status`
@@ -438,6 +554,21 @@ impl SearchPlanner {
             let p = self.pending.take().expect("checked");
             let detail = format!("priority={}", priority_name(p.priority));
             log(fx, now, "pending_dropped_route_changed", None, Some(detail));
+        }
+        if self
+            .held
+            .as_ref()
+            .is_some_and(|h| h.route_key != *route_key)
+        {
+            let h = self.held.take().expect("checked");
+            let detail = "from_hold".to_owned();
+            log(
+                fx,
+                now,
+                "discarded_stale_route_key",
+                Some(&h.req_id),
+                Some(detail),
+            );
         }
     }
 
@@ -524,7 +655,7 @@ impl SearchPlanner {
         outcome: SearchOutcome,
         facts_ref: Option<&str>,
         current_route_key: Option<&RouteKey>,
-        commit_allowed: bool,
+        gate: CommitGate,
         fx: &mut Effects,
     ) {
         let (req, cancelled, stuck) = match &self.slot {
@@ -564,11 +695,11 @@ impl SearchPlanner {
             SearchOutcome::Ok if Some(route_key) != current_route_key => {
                 log(fx, at, "discarded_stale_route_key", Some(req_id), None)
             }
-            // 04 §3 / 03 §3.1 "status=tracking": the session must be following the vehicle
-            // with confidence (not uncertain / finished; off_route / rerouting is the state
-            // a reroute was started for). Decided by the session (`commit_allowed`).
+            // 04 §3 / 03 §3.1: commit only while tracking / off_route / rerouting (the state
+            // a reroute was started for). `uncertain` holds the result, `finished` drops it.
+            // Decided by the session (`gate`).
             SearchOutcome::Ok
-                if !commit_allowed
+                if gate == CommitGate::Denied
                     && matches!(
                         req.priority,
                         SearchPriority::Reroute | SearchPriority::ExplicitPlan
@@ -577,11 +708,28 @@ impl SearchPlanner {
                 log(fx, at, "discarded_not_tracking", Some(req_id), None)
             }
             SearchOutcome::Ok
+                if gate == CommitGate::Hold
+                    && matches!(
+                        req.priority,
+                        SearchPriority::Reroute | SearchPriority::ExplicitPlan
+                    ) =>
+            {
+                let held = HeldResult {
+                    req_id: req_id.to_owned(),
+                    priority: req.priority,
+                    route_key: req.route_key.clone(),
+                    held_at_mono_ms: at,
+                };
+                self.replace_held(at, Some(held), fx);
+                log(fx, at, "commit_held_uncertain", Some(req_id), None)
+            }
+            SearchOutcome::Ok
                 if matches!(
                     req.priority,
                     SearchPriority::Reroute | SearchPriority::ExplicitPlan
                 ) =>
             {
+                self.replace_held(at, None, fx);
                 fx.planner_cmds.push(PlannerCmd::Commit {
                     req_id: req_id.to_owned(),
                     route_key: req.route_key.clone(),
@@ -659,11 +807,16 @@ impl SearchPlanner {
 
     /// Earliest deadline Kotlin must honour via `next_wake_mono_ms`: the watchdog deadline
     /// or the comparison budget of the current plan, whichever comes first.
+    /// Also the first instant a held result counts as expired.
     pub fn next_wake(&self) -> Option<u64> {
-        match (self.watchdog_deadline(), self.comparison_deadline()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [
+            self.watchdog_deadline(),
+            self.comparison_deadline(),
+            self.hold_deadline().map(|d| d.saturating_add(1)),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 }
 

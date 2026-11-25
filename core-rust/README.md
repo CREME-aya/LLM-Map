@@ -48,6 +48,10 @@ route's key when the search started (not the new route's); `dc_route_commit` re-
 returns `E_STALE` if the route was replaced meanwhile. An avoid-chip `ok` is never committed
 (it needs `dc_avoid_offer_eval` and consent; not wired yet). "経路を確認中" for a search in
 progress is `horizon.status` (`off_route` / `rerouting`), not a per-result UiCmd.
+A committable `ok` that returns while `uncertain` is held (one at most; a newer one replaces it,
+`discarded_hold_replaced`) and its `commit` is issued when the status is back to `tracking` /
+`off_route` / `rerouting` and the route_key still matches; after `commit_hold_ms` (config,
+10 s provisional) it is `discarded_hold_expired`. While `finished` it is `discarded_not_tracking`.
 ## Route bundle and on-route alignment (docs 04 §3.1)
 
 - `schema/route-bundle.schema.json` (mirror: `contracts::route`): `legs[{leg_index,
