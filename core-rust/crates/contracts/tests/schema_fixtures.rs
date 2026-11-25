@@ -828,6 +828,34 @@ fn rust_mirror_agrees_on_route_bundle() {
     }
 }
 
+/// core-rust/tests/fixtures/route/*.json (GPX-like alignment cases): the bundle passes
+/// route-bundle.schema.json and every tick input passes TickInput, both also via serde.
+#[test]
+fn route_fixtures_pass_schemas() {
+    use contracts::route::RouteBundle;
+    use contracts::tick::TickInput;
+    let bundle = compile("route-bundle");
+    let input = tick_def("TickInput");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/route");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    assert!(files.len() >= 8, "{files:?}");
+    for p in files {
+        let fx = load(&p);
+        let f = p.display();
+        assert_eq!(errors(&bundle, &fx["bundle"]), Vec::<String>::new(), "{f}");
+        serde_json::from_value::<RouteBundle>(fx["bundle"].clone()).unwrap();
+        for t in fx["ticks"].as_array().into_iter().flatten() {
+            assert_eq!(errors(&input, &t["input"]), Vec::<String>::new(), "{f}");
+            serde_json::from_value::<TickInput>(t["input"].clone()).unwrap();
+        }
+    }
+}
+
 /// contracts::horizon::ManeuverHorizon agrees with maneuver-horizon.schema.json on every
 /// fixture (valid: parse + identical round trip; invalid: rejected by serde too).
 #[test]
