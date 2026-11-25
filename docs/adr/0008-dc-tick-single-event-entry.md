@@ -19,7 +19,7 @@
 
 ```
 TickInput  = { now_mono_ms, fix?: Fix, events: [Event] }          // events は at_mono_ms 昇順（Rust が検証）
-Fix        = { at_mono_ms, lat_e7, lon_e7, acc_m, bearing?, speed? }   // 緯度経度は e7 の整数（04 §3.1）
+Fix        = { at_mono_ms, lat_e7, lon_e7, acc_cm, bearing_cdeg?, speed_cm_s? }   // すべて整数（e7・cm・センチ度・cm/s。Kotlin が一度だけ丸める。04 §3.1）
 Event = { at_mono_ms } & (
   | tts_started{token} | tts_done{token} | tts_stopped{token}
   | asr_started{utterance_id}
