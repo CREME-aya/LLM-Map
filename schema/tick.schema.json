@@ -577,6 +577,10 @@
             "candidate_id": {
               "type": "string",
               "description": "CandidateRequest of the current plan to run (Session::plan_candidates output). Absent for searches outside a plan. Team decision 2026-11-25, not in docs yet."
+            },
+            "fix": {
+              "$ref": "#/$defs/Fix",
+              "description": "Current position for a reroute: the fix that confirmed the vehicle left the route (04 §3.1); Valhalla uses it as the new origin. Absent for other searches."
             }
           }
         },
@@ -648,20 +652,8 @@
       ]
     },
     "UiCmd": {
-      "description": "Only what docs v1.2 names. Display state already in ManeuverHorizon (3-ahead cards, HorizonEntry.avoid_offer) is not repeated here: TickOutput.horizon is the single source (04 §1). TODO(schema-v1): further items are listed in core-rust/README.md.",
+      "description": "Only what docs v1.2 names. Display state already in ManeuverHorizon (3-ahead cards, HorizonEntry.avoid_offer, \"経路を確認中\" = horizon.status off_route / rerouting) is not repeated here; show_checking_route is abolished (ADR-0008): TickOutput.horizon is the single source (04 §1). TODO(schema-v1): further items are listed in core-rust/README.md.",
       "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "ui"
-          ],
-          "properties": {
-            "ui": {
-              "const": "show_checking_route"
-            }
-          }
-        },
         {
           "type": "object",
           "additionalProperties": false,

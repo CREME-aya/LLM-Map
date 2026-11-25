@@ -396,9 +396,7 @@ impl SearchPlanner {
         fx.planner_cmds.push(PlannerCmd::Cancel {
             req_id: req.req_id.clone(),
         });
-        if checking_route {
-            fx.ui_cmds.push(UiCmd::ShowCheckingRoute {});
-        }
+        let _ = checking_route; // "経路を確認中" is horizon.status (show_checking_route abolished)
         log(fx, now, "search_cancel_requested", Some(&req.req_id), None);
     }
 
@@ -453,6 +451,7 @@ impl SearchPlanner {
             graph_version: route_key.graph_version.clone(),
             route_key: route_key.clone(),
             candidate_id: candidate_id.clone(),
+            fix: None,
         });
         let mut detail = format!("distance_class={}", class_name(distance_class));
         if let Some(c) = &candidate_id {
@@ -585,7 +584,6 @@ impl SearchPlanner {
             Slot::CancelRequested { req } => (req.clone(), true),
             _ => return,
         };
-        fx.ui_cmds.push(UiCmd::ShowCheckingRoute {});
         log(fx, now, "engine_stuck", Some(&req.req_id), None);
         self.slot = Slot::EngineStuck { req, cancel_sent };
     }

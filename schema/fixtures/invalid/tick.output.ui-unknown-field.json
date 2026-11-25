@@ -1,1 +1,1 @@
-{"voice_cmds": [], "ui_cmds": [{"ui": "show_checking_route", "extra": 1}], "planner_cmds": [], "next_wake_mono_ms": null, "log": []}
+{"voice_cmds": [], "ui_cmds": [{"ui": "dismiss", "target_id": "o1", "reason": "expired", "extra": 1}], "planner_cmds": [], "next_wake_mono_ms": null, "log": []}

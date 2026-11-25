@@ -42,7 +42,8 @@
     },
     "matched_progress_cm": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 4294967295
     },
     "upcoming": {
       "type": "array",
@@ -124,7 +125,9 @@
         },
         "along_route_cm": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "u32 cm from the route start (04 §2, at most about 42,900 km)."
         }
       }
     },

@@ -13,6 +13,7 @@ pub mod envelope;
 pub mod horizon;
 pub mod override_types;
 pub mod plan;
+pub mod route;
 pub mod tick;
 
 pub use common::{MonoMs, RouteKey, U64Str};
