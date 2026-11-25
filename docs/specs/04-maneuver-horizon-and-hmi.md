@@ -121,7 +121,7 @@ PassedRef   = { ref, maneuver_id: ManeuverId, passed_at_mono_ms: MonoMs, passed_
   - **複雑窓のきっかけ**（運転者の注意が要る場面。危険かどうかとは別）：同じ `group_id` に 2 つ以上の操作がある / 対向横断のある操作（`right_protected` と `right_entry` も含む）/ 合流 / 狭路への進入。
   - **回避チップの対象**（§4.3）：`right_unprotected`・`right_signal_unknown_protection`・`right_signal_unknown`・`narrow`。`merge` は回避が Phase 2 なので含めない。
 - **`next_complex_window`**：`start = 最初の操作の eta_range.earliest − 準備時刻`、`end = 最後の操作の eta_range.latest + 5 s`（5 s は暫定）。準備時刻は §4.1 の「準備」強調時刻（一般道 30 s / 高速 60 s）をそのまま使い、新しい値を作らない。高速かどうかは、その操作に入る直前の edge の `flags` の高速ビットで決める。早めの見込み（`earliest`）と遅めの見込み（`latest`）で安全側に倒す。回避チップの締切（分岐の 20 s 前）とは別の値。
-- **`eta_range_ms` の計算（暫定）**: `typical` は現在位置からその操作までの残り時間（`edges.cum_time_ms` の差）。`earliest = typical × 0.85`、`latest = typical × 1.25`（係数は整数の千分率で計算し、設定で変えられる。**0.85 / 1.25 は根拠のない仮の値**で、Gate 2・3 のデータで校正する）。係数は経路の始点からの累積時間ではなく **残り時間** に掛ける。
+- **`eta_range_ms` の計算（暫定）**: `typical` は現在位置からその操作までの残り時間（`edges.cum_time_ms` の差）。`earliest = typical × 0.85`、`latest = typical × 1.25`（係数は整数の千分率で計算し、設定で変えられる。**0.85 / 1.25 は根拠のない仮の値**。Gate 7 の実走 GPX で、実際の通過が `earliest` より早かった割合とずれの最大値を記録して校正する）。係数は経路の始点からの累積時間ではなく **残り時間** に掛ける。
   - 使い分け：締切と窓の判定（回避チップの締切・開始条件、`next_complex_window` の開始）は `earliest`、窓の終わりは `latest`。画面の強調時刻（§4.1 の 30 s / 8 s・60 s / 20 s）と距離表示は `typical` のまま。
 - P3（歴史解説）を始めてよいかは [05 §6.2](05-inference-tier-and-audio.md) の `利用可能時間` の式だけで判定する（条件を 2 か所に書かない）。
 
