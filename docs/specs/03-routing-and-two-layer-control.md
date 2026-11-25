@@ -77,7 +77,7 @@ L3 の出力は **L2 本表（`profile_weights` / `avoidance_nodes_edges`）へ�
 |---|---|---|
 | Rust → Kotlin | `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version}` | 探索開始。`priority` は上表の JSON 名、`distance_class` は下記 |
 | Rust → Kotlin | `planner_cmds: cancel{req_id}` | 実行中探索の取消要求 |
-| Rust → Kotlin | `planner_cmds: commit{req_id, route_key}` | 逸脱再探索の結果を確定する指示。Kotlin が `dc_route_commit` を呼ぶ（回避チップは **同意の前には出さない**。同意後に出す） |
+| Rust → Kotlin | `planner_cmds: commit{req_id, route_key, undo_req_id?}` | 逸脱再探索の結果を確定する指示。Kotlin が `dc_route_commit` を呼ぶ（回避チップは **同意の前には出さない**。同意後に出す） |
 | Rust → Kotlin | `planner_cmds: evaluate_offer{req_id, facts_ref, base_facts_ref}` | 回避チップの探索が `ok` で戻ったときの評価指示。Kotlin が `dc_avoid_offer_eval` を呼ぶ `base_facts_ref` は、回避チップの探索の `search_finished` に任意で付けて返す（Kotlin が代わりの経路と同時に作る） |
 | Rust → Kotlin | `planner_cmds: rank{plan_request_id, facts_refs: [string], reason: all_done\|budget_expired}` | 計画の採点指示。Kotlin が `dc_rank` を呼んで比較結果を表示する |
 | Kotlin → Rust | `search_finished{req_id, route_key, graph_version, outcome: ok\|cancelled\|error, facts_ref?, engine_ms}` | **唯一の終端イベント。1 探索につき必ず 1 回**。旧 `reroute_result` / `search_cancelled` は廃止 |
@@ -110,7 +110,9 @@ engine_stuck ──search_finished{req_id}──▶ Idle
   - **計画の外の探索結果の扱い**: 逸脱再探索が `ok` で戻り、`route_key` が一致し、`horizon.status` が `tracking` / `off_route` / `rerouting` のとき（[04 §3](04-maneuver-horizon-and-hmi.md)）だけ、Rust は `planner_cmds: commit{req_id, route_key}` を出す。`req_id` は Kotlin が保持する経路本体を引くキー、`route_key` は **その探索を始めた時点の現行経路の版**（新しく確定する経路の版ではない）。Kotlin は `req_id` に対応する経路本体（Valhalla から受け取って保持）を、`commit` の `route_key` を `expected_route_key` として `dc_route_commit(s, {expected_route_key, bundle})` に渡し（[02 §2.1](02-architecture-and-stack.md)。今の経路があるのに `null` なら `E_STALE`）、`dc_route_commit` はその `route_key` が今も現行経路と一致するかを確かめ直す。`commit` を出した後、`dc_route_commit` が呼ばれる前に経路が差し替わっていたら、経路は差し替えず `E_STALE` を返す（遅れて届いた経路は `horizon` にも `voice_cmds` にも出ない。Gate 7 で確認）。回避チップの探索が `ok` で戻っても、その時点では `commit` は出さず、`dc_avoid_offer_eval` を通して `AvoidOffer` を Horizon に載せ、利用者の同意を待つ（同意なしで経路を変えない）。同意（`user_tap{offer_id, avoid}` または辞書の「はい」）が締切前に届き、`offer_id` と `route_key` が一致したときだけ `commit` を出す。締切を過ぎたら `dismiss{reason: expired}` で取り下げる。同意後 5 秒以内の「戻して」（`undo` / `CXL`）の戻し方は下記。
   - **「戻して」の戻し方**: 同意して `commit` を出すとき、Rust が戻すときに使う ID（`undo-<回避の探索の req_id>`）を決めて `commit` に載せる（元の経路は計画の候補や最初の `dc_route_commit(null)` で入っていることが多く、Rust はその探索の `req_id` を持たないため）。Kotlin は回避した経路を入れるときに、それまでの経路本体をその ID で 5 秒間保持する。Rust は `undo` を受けたら `commit{req_id: undo-…, route_key: <今の版>}` を出す。Kotlin は保持していた経路本体の版を `"0"` に戻して渡し、Rust が今の版 + 1 を付ける（版は戻さない）。
     - 戻すときは、保留中の再探索結果を捨て、位置合わせを新しい経路でやり直す。
-    - 5 秒を過ぎた `undo` / `CXL` は `NO_PENDING_TARGET`。
+    - 戻すときに使う ID は、同意して出す `commit` の `undo_req_id`（`"undo-<req_id>"`）で Kotlin に知らせる。`CXL` で戻すと決めたときの `dc_validate_override` の結果は `Undone { req_id }`。
+    - 5 秒を過ぎた `undo` / `CXL` は `NO_PENDING_TARGET`。`tracking` でないときは `NO_EFFECT`。戻せなかったときは `speak{template_id: undo_unavailable, priority: p2}`。
+    - **同意して `commit` を出したが、回避した経路がまだ入っていない（`dc_route_commit` 前）ときの `undo`**（案）：`NO_EFFECT` にせず、出した `commit` を取り消す。Rust はその `req_id` を待つのをやめ、遅れて届いた `dc_route_commit` は `E_STALE` で断る。経路は変わらないので「戻せた」と同じ扱い。
     - 戻した経路と回避した経路が分かれる地点（分岐）をすでに過ぎていたら戻さない（`NO_EFFECT`）。回避チップは分岐の 20 秒前（早い見込み）までにしか同意できないので、5 秒以内なら通常は分岐の手前にいるが、ETA の見込み外れに備えて Rust が位置で確かめる。分岐点は **回避した経路を入れる `dc_route_commit` のときに 1 回だけ** 求めて持っておく（「戻して」のときに計算し直さない。その時点なら Rust は今の経路と新しい経路の本体を両方持っており、`dc_avoid_offer_eval` の入力（`CandidateFacts`）に edge 列を足さずに済む。「戻して」は commit の後にしか起きないので、提案を作るときに求めても結果は同じ）。探索開始時の位置は `AvoidOffer` に記録しておく。求め方：
       1. 回避した経路の最初の edge（探索開始時の位置で、途中から始まる）を、元の経路の edge 列のうち **探索開始時の位置より先** の部分から探す（「今の位置」ではない。探索中も車は進んでいるため）。
       2. 見つかった場所から、2 本の列を向き付き edge ID で前に向かって比べ、最初に違うところを分岐点とし、**回避した後の経路の** `along_route_cm` で持つ。
@@ -262,6 +264,7 @@ level ::= "L" | "N" | "H"
 ```text
 dc_validate_override(h, { code_line, contract, utterance_id, utterance_mono_ms, ref_frame_seq, pending_offer_id? })
   → Applied  { override_id, override, review_proposal?, route_key, expires_at_mono_ms }
+  | Undone   { req_id }      // CXL で回避チップの経路変更を戻すとき（§3.1）
   | Rejected { code }        // code は上記 7 種
 ```
 - `code_line` は §4.1 の 1 行命令コードそのもの。`utterance_id` は **必須**（`dc_tick` の `asr_started` / `asr_result` と同じ ID。Gate 4 で遅延を突き合わせるため）。`utterance_mono_ms` / `expires_at_mono_ms` は単調時刻（§5「時刻の種類」）。ABI 全体は [02 §2.1](02-architecture-and-stack.md)。
