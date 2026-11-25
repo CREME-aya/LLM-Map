@@ -123,6 +123,17 @@ impl Session {
         self.current_route_key = Some(key);
     }
 
+    /// Remaining ETA on the current route (`None` = unknown / invalidated, e.g. off-route).
+    /// Decides the distance class of searches outside a plan when they start (planner docs).
+    /// Ignored without a committed route; a later route change makes it stale by route_key.
+    /// TODO(drive-core): set from map-matching / the committed route's ETA instead.
+    pub fn set_remaining_eta(&mut self, remaining_eta_s: Option<u64>) {
+        match (&self.current_route_key, remaining_eta_s) {
+            (Some(k), Some(s)) => self.planner.set_route_eta(k.clone(), s),
+            _ => self.planner.invalidate_route_eta(),
+        }
+    }
+
     /// `dc_plan_candidates` body (team decision 2026-11-25): fixes the plan's distance
     /// class (`begin_plan`), builds the ordered `CandidateRequest[]`, queues their searches
     /// and returns the first `start` (one search at a time; the rest start from `dc_tick`

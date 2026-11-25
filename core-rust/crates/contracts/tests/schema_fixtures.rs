@@ -291,6 +291,11 @@ mod tick {
                         serde_json::from_value::<SearchPriority>(step["priority"].clone()).unwrap();
                     }
                     "plan" => {}
+                    // remaining ETA on the current route: seconds or null (invalidated)
+                    "route_eta" => {
+                        let e = &step["remaining_eta_s"];
+                        assert!(e.is_null() || e.is_u64(), "{}", p.display());
+                    }
                     "plan_candidates" => {
                         let snap = compile("trip-plan-snapshot");
                         assert!(snap.is_valid(&fx["snapshot"]), "{}", p.display());

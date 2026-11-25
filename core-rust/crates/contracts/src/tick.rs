@@ -228,8 +228,10 @@ pub struct TickOutput {
 /// `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version,
 /// candidate_id?} | cancel{req_id} | rank{plan_request_id, facts_refs, reason}` (03 §3.1;
 /// `rank` and `candidate_id` are team decisions 2026-11-25, not in docs yet).
-/// `distance_class` is required: the class the Planner fixed for the plan before searching
-/// (searches outside any plan take the latest plan's class, or `long` if there was none).
+/// `distance_class` is required: for a plan's candidate search, the class the Planner fixed
+/// for the plan before searching; for a search outside a plan (reroute / avoid chip), the
+/// class fixed at its start from the valid remaining ETA on the current route (`< 1800 s` →
+/// short; `>= 1800 s`, unknown or invalidated by off-route → long; team decision 2026-11-25).
 /// TODO(abi-v1): tag field name `cmd` is provisional.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case", deny_unknown_fields)]
@@ -290,6 +292,9 @@ pub enum SearchPriority {
 /// from the plan start) and the native watchdog limit (03 §3.1, 07 §1: short 5 s /
 /// long 10 s, counted from each native call's start). Fixed for all candidate searches of
 /// the same plan_request.
+/// Outside a plan (reroute / avoid chip) it is fixed at each search start from the valid
+/// remaining ETA on the current route and selects only the watchdog limit (team decision
+/// 2026-11-25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DistanceClass {

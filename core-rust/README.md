@@ -17,7 +17,7 @@ core-rust/
 |---:|---|---|---|
 | 1 | `dc_abi_version()` | Returns a u32 with the ABI version in the upper 16 bits and the schema version in the lower 16 (currently `0x0001_0001`) | Implemented |
 | 2 | `dc_buf_free(dc_out)` | Frees a `dc_out` allocated by Rust, exactly once. `{NULL,0}` is a no-op | Implemented |
-| 3 | `dc_session_new(config, **out)` | Creates the session state (search slot, deadlines, etc.) from config JSON. On failure sets `*out=NULL` and returns an error envelope | Implemented (config: optional `watchdog_{short,long}_ms` 5 s / 10 s and `comparison_budget_{short,long}_ms` 3 s / 8 s; distance class `short|long` fixed per plan from the pre-search ETA, < 1800 s → short) |
+| 3 | `dc_session_new(config, **out)` | Creates the session state (search slot, deadlines, etc.) from config JSON. On failure sets `*out=NULL` and returns an error envelope | Implemented (config: optional `watchdog_{short,long}_ms` 5 s / 10 s and `comparison_budget_{short,long}_ms` 3 s / 8 s; distance class `short|long` fixed per plan from the pre-search ETA, or per search outside a plan from the remaining ETA, < 1800 s → short) |
 | 4 | `dc_session_free(s)` | Frees the session when the actor explicitly closes it. NULL is safe; double free is undefined | Implemented |
 | 5 | `dc_plan_candidates(snapshot)` | Builds the candidate search requests `CandidateRequest[]` from a `TripPlanSnapshot` | `E_UNIMPLEMENTED` (not wired: the body `Session::plan_candidates(now, eta?, snapshot)` exists and needs the session; the signature change comes first) |
 | 6 | `dc_rank(req)` | Applies L1/L2 3-axis scoring and the detour cap (shared with #11) to `{facts[], policy, profile}` and returns a `RouteComparison` | `E_UNIMPLEMENTED` |
@@ -32,7 +32,11 @@ JSON conventions (docs v1.2 ADR-0008): `*_mono_ms` are JSON numbers; only Web-re
 (`trip_revision`, `route_revision`, edge ids) are decimal strings; enum values are snake_case;
 `dc_validate_override` returns `{"result":"applied"|"rejected", ...}`. `search_finished.outcome` is `ok|cancelled|error`.
 `planner_cmds.start` carries the required `distance_class: short|long` fixed by the Planner,
-and `candidate_id` for a plan's candidate search. A plan ends with exactly one
+and `candidate_id` for a plan's candidate search. A plan's class comes from the pre-search ETA
+estimate and is fixed for the plan; a search outside a plan (reroute / avoid chip) fixes its
+class at its start from the valid remaining ETA on the current route (< 1800 s → short;
+≥ 1800 s, unknown or invalidated by off-route → long; the plan's class is not inherited) and
+uses it only for the watchdog limit (5 s / 10 s); the comparison budget (3 s / 8 s) is for plans. A plan ends with exactly one
 `rank{plan_request_id, facts_refs, reason: all_done|budget_expired}`: Kotlin then calls
 `dc_rank` with the CandidateFacts behind `facts_refs` (`search_finished.facts_ref`,
 formerly `comparison_ref`). On budget expiry queued candidates are dropped and a running one

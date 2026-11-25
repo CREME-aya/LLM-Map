@@ -18,8 +18,14 @@
 //!   pre-search ETA estimate (`< 1800 s` → short; `>= 1800 s` or none → long) for every
 //!   candidate search of that plan_request. It selects the comparison budget (short 3 s /
 //!   long 8 s from the plan start) and the watchdog limit (short 5 s / long 10 s from each
-//!   `start`). Searches requested outside any plan take the latest plan's class (`long`
-//!   when there was none).
+//!   `start`).
+//! - Distance class outside a plan (reroute / avoid chip; team decision 2026-11-25): fixed
+//!   when the search *starts* from the valid remaining ETA on the current route
+//!   (`set_route_eta`): `< 1800 s` → short; `>= 1800 s`, unknown or invalidated (e.g. by
+//!   off-route, `invalidate_route_eta`) → long. The latest plan's class is never inherited.
+//!   Only the watchdog limit (5 s / 10 s) applies to these searches; the comparison budget
+//!   (3 s / 8 s) is for plans only. The avoid chip's own compute budget (1.5 s) and the
+//!   20 s-before-branch deadline are separate and not handled here.
 //! - Plan queue (team decision 2026-11-25): `begin_plan_with` queues the plan's candidate
 //!   searches (baseline `explicit_plan`, the rest `comparison`); they share the single slot
 //!   with ad-hoc requests and start one at a time. The plan ends with exactly one
@@ -130,7 +136,14 @@ pub enum Slot {
 struct Pending {
     priority: SearchPriority,
     route_key: RouteKey,
-    distance_class: DistanceClass,
+}
+
+/// Remaining ETA on a route, as last reported. Valid only for that `route_key` and until
+/// invalidated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteEta {
+    route_key: RouteKey,
+    remaining_eta_s: u64,
 }
 
 #[derive(Debug, Default)]
@@ -147,6 +160,7 @@ pub struct SearchPlanner {
     next_req_seq: u64,
     limits: SearchLimits,
     plan: Option<Plan>,
+    route_eta: Option<RouteEta>,
 }
 
 impl SearchPlanner {
@@ -157,6 +171,7 @@ impl SearchPlanner {
             next_req_seq: 1,
             limits,
             plan: None,
+            route_eta: None,
         }
     }
 
@@ -304,6 +319,32 @@ impl SearchPlanner {
         })
     }
 
+    /// Records the remaining ETA on `route_key` (the current route). Used for the distance
+    /// class of searches outside a plan when they start.
+    pub fn set_route_eta(&mut self, route_key: RouteKey, remaining_eta_s: u64) {
+        self.route_eta = Some(RouteEta {
+            route_key,
+            remaining_eta_s,
+        });
+    }
+
+    /// The remaining ETA is no longer valid (off-route etc.): searches outside a plan
+    /// started from now on are `long` until a new ETA is set.
+    pub fn invalidate_route_eta(&mut self) {
+        self.route_eta = None;
+    }
+
+    /// Distance class of a search outside a plan on `route_key`, decided at its start:
+    /// the valid remaining ETA on that route `< 1800 s` → short, otherwise long.
+    pub fn adhoc_distance_class(&self, route_key: &RouteKey) -> DistanceClass {
+        let eta = self
+            .route_eta
+            .as_ref()
+            .filter(|e| e.route_key == *route_key)
+            .map(|e| e.remaining_eta_s);
+        DistanceClass::from_eta_estimate_s(eta)
+    }
+
     /// Enqueue a search request into the single priority queue.
     pub fn request(
         &mut self,
@@ -312,15 +353,9 @@ impl SearchPlanner {
         route_key: RouteKey,
         fx: &mut Effects,
     ) {
-        // Class is captured at request time: a later plan never reclassifies it.
-        let distance_class = self
-            .plan
-            .as_ref()
-            .map_or(DistanceClass::Long, |p| p.distance_class);
         self.keep_higher(Pending {
             priority,
             route_key,
-            distance_class,
         });
         self.preempt_or_start(now, priority, fx);
     }
@@ -399,7 +434,9 @@ impl SearchPlanner {
             )
         } else {
             let Some(p) = self.pending.take() else { return };
-            (p.priority, p.route_key, p.distance_class, None, None)
+            // Fixed here, at the start, for the whole native call.
+            let class = self.adhoc_distance_class(&p.route_key);
+            (p.priority, p.route_key, class, None, None)
         };
         let req_id = format!("r{}", self.next_req_seq); // TODO(abi-v1): req_id format provisional
         self.next_req_seq += 1;

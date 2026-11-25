@@ -466,7 +466,7 @@
       ]
     },
     "DistanceClass": {
-      "description": "Distance class the Planner fixes before searching, for every candidate search of the same plan: pre-search ETA estimate < 1800 s -> short; >= 1800 s or no estimate -> long; searches outside any plan take the latest plan's class (long when there was none). Selects the comparison budget (3 s / 8 s from the plan start) and the watchdog limit (5 s / 10 s from each start) (03 §3.1, 07 §1).",
+      "description": "Distance class the Planner fixes before searching, for every candidate search of the same plan: pre-search ETA estimate < 1800 s -> short; >= 1800 s or no estimate -> long; selects the comparison budget (3 s / 8 s from the plan start) and the watchdog limit (5 s / 10 s from each start) (03 §3.1, 07 §1). Searches outside a plan (reroute / avoid_chip) fix it at their start from the valid remaining ETA on the current route (< 1800 s -> short; >= 1800 s, unknown or invalidated -> long; the plan's class is not inherited) and use it for the watchdog limit only (team decision 2026-11-25).",
       "enum": [
         "short",
         "long"
