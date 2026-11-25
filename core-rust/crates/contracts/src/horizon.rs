@@ -232,14 +232,49 @@ pub struct ComplexWindow {
     pub end_monotonic_ms: Option<MonoMs>,
 }
 
-/// `JunctionRef` (target of `jp=next`). TODO(schema-v1): `kind` enum.
+/// Junction class derived from a `Maneuver`'s Evidence by drive-core (`junction::classify`;
+/// team decision 2026-11-26: no kind field on `Maneuver`). Names follow
+/// `CandidateFacts.counts` (snake_case in JSON).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JunctionClass {
+    RightUnprotected,
+    RightSignalUnknownProtection,
+    RightSignalUnknown,
+    RightProtected,
+    RightEntry,
+    Merge,
+    Narrow,
+}
+
+impl JunctionClass {
+    /// The JSON / `CandidateFacts.counts` name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RightUnprotected => "right_unprotected",
+            Self::RightSignalUnknownProtection => "right_signal_unknown_protection",
+            Self::RightSignalUnknown => "right_signal_unknown",
+            Self::RightProtected => "right_protected",
+            Self::RightEntry => "right_entry",
+            Self::Merge => "merge",
+            Self::Narrow => "narrow",
+        }
+    }
+
+    /// One of the classes that cross oncoming traffic (`right_*`).
+    pub fn crosses_oncoming(self) -> bool {
+        !matches!(self, Self::Merge | Self::Narrow)
+    }
+}
+
+/// `JunctionRef` (target of `jp=next`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JunctionRef {
     #[serde(rename = "ref")]
     pub ref_: String,
     pub maneuver_id: ManeuverId,
-    pub kind: String,
+    pub kind: JunctionClass,
     pub deadline_mono_ms: MonoMs,
 }
 

@@ -380,6 +380,23 @@ impl LoadedRoute {
         self.group_heads[index].map(|head| &self.maneuvers[head])
     }
 
+    /// `index` belongs to a `group_id` of two or more maneuvers.
+    pub(crate) fn grouped(&self, index: usize) -> bool {
+        self.group_heads[index].is_some()
+    }
+
+    /// Index of the last maneuver of the group of `index` (`index` itself when ungrouped).
+    pub(crate) fn group_last(&self, index: usize) -> usize {
+        let Some(head) = self.group_heads[index] else {
+            return index;
+        };
+        let mut last = index;
+        while self.group_heads.get(last + 1) == Some(&Some(head)) {
+            last += 1;
+        }
+        last
+    }
+
     fn index_p1_deadlines(&mut self) {
         let mut deadlines: Vec<_> = self
             .maneuvers

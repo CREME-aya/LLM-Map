@@ -629,6 +629,7 @@ impl Session {
             self.planner.next_wake(),
             stale_at,
             self.frames.last_ref_expires_at(),
+            self.frames.window_expires_at(),
         ]
         .into_iter()
         .flatten()

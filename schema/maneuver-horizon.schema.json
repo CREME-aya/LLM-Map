@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://slm-map.invalid/schema/maneuver-horizon.schema.json",
   "title": "ManeuverHorizon (v1 skeleton)",
-  "description": "Single source for UI and voice. Source: docs v1.2 04 §2 — U64Str only for trip_revision / route_revision (RouteKey); MonoMs, frame_seq (team agreement 2026-11-24: stays numeric) and the other u64 values are JSON integers; enum values snake_case; refs{next?,last?}; AvoidOffer{offer_id, summary structured (no text)}. TODO(schema-v1): Flag enum, JunctionRef.kind enum.",
+  "description": "Single source for UI and voice. Source: docs v1.2 04 §2 — U64Str only for trip_revision / route_revision (RouteKey); MonoMs, frame_seq (team agreement 2026-11-24: stays numeric) and the other u64 values are JSON integers; enum values snake_case; refs{next?,last?}; AvoidOffer{offer_id, summary structured (no text)}. TODO(schema-v1): Flag enum.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -57,7 +57,7 @@
       "$ref": "common.schema.json#/$defs/MonoMs"
     },
     "next_complex_window": {
-      "description": "04 §2 / 05 §6.2: P3 history commentary starts only outside this window; available time = min(next P1 deadline, start) - TTS preparation - 5 s. TODO(04 §2): docs do not define which maneuvers form the window nor its start / end; drive-core does not produce it yet.",
+      "description": "04 §2 / 05 §6.2: P3 history commentary starts only outside this window; available time = min(next P1 deadline, start) - estimated TTS preparation - 5 s (drive-core horizon::p3_available_ms). Rule (team decision 2026-11-26), only while status = tracking: the window opens at the first unpassed maneuver that crosses oncoming traffic (any right_* class incl. right_protected / right_entry), is a merge, enters a narrow road, or belongs to a group_id of 2+ maneuvers. start_monotonic_ms = its eta_range.earliest - preparation lead (04 §4.1: 30 s, 60 s when the edge approaching it has the motorway flag); end_monotonic_ms = eta_range.latest of the last maneuver of its group (itself when ungrouped) + 5 s. A group is one window. After its last maneuver is passed the window stays until end_monotonic_ms. drive-core always sets end_monotonic_ms (04 §2 keeps it optional).",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -370,7 +370,7 @@
       }
     },
     "JunctionRef": {
-      "description": "Target for jp=next (fixed at utterance time). 04 §2. TODO(schema-v1): kind enum.",
+      "description": "Target for jp=next (fixed at utterance time). 04 §2. kind = junction class (drive-core junction::classify, names of CandidateFacts.counts; drive-core emits right_unprotected only for now).",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -387,8 +387,16 @@
           "$ref": "#/$defs/ManeuverId"
         },
         "kind": {
-          "type": "string",
-          "description": "TODO(schema-v1): closed enum not defined."
+          "enum": [
+            "right_unprotected",
+            "right_signal_unknown_protection",
+            "right_signal_unknown",
+            "right_protected",
+            "right_entry",
+            "merge",
+            "narrow"
+          ],
+          "description": "Junction class derived from the Maneuver Evidence (team decision 2026-11-26). Names follow CandidateFacts.counts (which says merges, and has narrow_m instead of a narrow count)."
         },
         "deadline_mono_ms": {
           "$ref": "common.schema.json#/$defs/MonoMs"

@@ -6,16 +6,24 @@ use std::path::Path;
 
 /// Files on the alignment / horizon path: fixed-point conversion and projection (geo),
 /// route index and ETA (route), alignment and bearing comparison (align), horizon (horizon),
-/// and the session glue that feeds them (session, planner).
-const FILES: [&str; 6] = [
+/// junction classes for the complex window (junction), and the session glue that feeds them
+/// (session, planner).
+const FILES: [&str; 7] = [
     "geo.rs",
     "route.rs",
     "align.rs",
     "horizon.rs",
+    "junction.rs",
     "session.rs",
     "planner.rs",
 ];
-const LINT_GUARDED: [&str; 4] = ["geo.rs", "route.rs", "align.rs", "horizon.rs"];
+const LINT_GUARDED: [&str; 5] = [
+    "geo.rs",
+    "route.rs",
+    "align.rs",
+    "horizon.rs",
+    "junction.rs",
+];
 
 /// Source without comments and string / char literals (good enough for this code base).
 fn code_only(src: &str) -> String {
