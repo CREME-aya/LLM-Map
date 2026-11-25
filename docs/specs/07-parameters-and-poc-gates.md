@@ -106,8 +106,14 @@ t1 fix: 逸脱検知 → cancel{r1}, ui: 経路を確認中
 t2 search_finished{r1, ok} → 結果破棄・枠解放 → start{r2, reroute}
 t3 search_finished{r2, ok} → 原子コミット・新 horizon
 検証: 同時 Running ≤ 1 / r1 由来の表示・発話 0 / (t2−t1),(t3−t1) を記録
+t3 の「原子コミット」は Rust の commit{r2, route_key} → Kotlin の dc_route_commit
 派生: t2 が来ない → 監視期限超過を Rust が検出 → engine_stuck → 実際の戻り後 search_finished{r1}（ok でも discarded_after_stuck）→ 枠解放 → start{r2, reroute}
 ```
+
+計画の外の探索の距離区分（[03 §3.1](03-routing-and-two-layer-control.md)）の境界ケース：
+- 現経路の有効な残り ETA が 29:59 → `short`（監視上限 5 s）
+- 30:00 → `long`（10 s）
+- 直前の計画は `short` だったが、逸脱後に残り ETA が失効 → `long`（旧区分を引き継がない）
 
 ### 2.5 Gate 4 / 7 共通: 提案差し替え系テスト（`pending_offer`）
 
