@@ -384,3 +384,25 @@ fn plan_candidates_through_the_session() {
         dc_session_free(s);
     }
 }
+
+/// Gate 7 case 5 (07 §2.4): Kotlin's `Math.round(359.996 * 100) % 36000` = 0 is accepted;
+/// an unwrapped 36000 is E_SCHEMA through dc_tick.
+#[test]
+fn fix_bearing_range_through_dc_tick() {
+    unsafe {
+        let mut s = ptr::null_mut();
+        take(dc_session_new(din(b"{}"), &mut s));
+        for (bearing, ok) in [(0u32, true), (35_999, true), (36_000, false)] {
+            let t = serde_json::json!({"now_mono_ms": 1, "fix": {"at_mono_ms": 1,
+                "lat_e7": 350000000, "lon_e7": 1390000000, "acc_cm": 300,
+                "bearing_cdeg": bearing, "speed_cm_s": 1000}});
+            let v = take(dc_tick(s, din(&serde_json::to_vec(&t).unwrap())));
+            if ok {
+                assert_eq!(v["ok"], true, "{bearing}: {v}");
+            } else {
+                assert_eq!(v["error"]["code"], "E_SCHEMA", "{bearing}: {v}");
+            }
+        }
+        dc_session_free(s);
+    }
+}
