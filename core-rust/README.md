@@ -48,6 +48,9 @@ route's key when the search started (not the new route's); `dc_route_commit` re-
 returns `E_STALE` if the route was replaced meanwhile. An avoid-chip `ok` is never committed
 (it needs `dc_avoid_offer_eval` and consent; not wired yet). "経路を確認中" for a search in
 progress is `horizon.status` (`off_route` / `rerouting`), not a per-result UiCmd.
+`TickInput.fix` is integers only (docs 04 §3.1, ADR-0008): `{at_mono_ms, lat_e7, lon_e7, acc_cm,
+bearing_cdeg?, speed_cm_s?}`. Kotlin rounds once (`Math.round(deg * 1e7)`,
+`Math.round(deg * 100) % 36000`, cm, cm/s); out-of-range values (e.g. `bearing_cdeg` 36000) → `E_SCHEMA`.
 Unknown fields are rejected with `E_SCHEMA` wherever the schema says `additionalProperties: false`
 (TickInput, Fix, every Event kind, PlannerCmd, VoiceCmd, UiCmd, TickOutput, LogEvent) and in the schema-less
 `dc_validate_override` request and `dc_session_new` config.

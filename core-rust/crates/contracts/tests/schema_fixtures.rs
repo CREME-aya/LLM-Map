@@ -587,7 +587,7 @@ mod tick {
             kinds += 1;
         }
         assert_eq!(kinds, 16);
-        let fix = serde_json::json!({"now_mono_ms":1,"fix":{"at_mono_ms":1,"lat":0.0,"lon":0.0,"acc_m":1.0,"alt":2}});
+        let fix = serde_json::json!({"now_mono_ms":1,"fix":{"at_mono_ms":1,"lat_e7":0,"lon_e7":0,"acc_cm":100,"alt":2}});
         let top = serde_json::json!({"now_mono_ms":1,"extra":true});
         for bad in [fix, top] {
             assert!(!input.is_valid(&bad));

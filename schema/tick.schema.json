@@ -35,32 +35,43 @@
       }
     },
     "Fix": {
+      "description": "GNSS fix, integers only (docs 04 §3.1, ADR-0008). Kotlin rounds the Location doubles once: lat_e7/lon_e7 = Math.round(deg * 1e7); acc_cm = accuracy in cm; bearing_cdeg = Math.round(deg * 100) % 36000 (0..35999, 359.996° -> 0); speed_cm_s = speed in cm/s.",
       "type": "object",
       "additionalProperties": false,
       "required": [
         "at_mono_ms",
-        "lat",
-        "lon",
-        "acc_m"
+        "lat_e7",
+        "lon_e7",
+        "acc_cm"
       ],
       "properties": {
         "at_mono_ms": {
           "$ref": "common.schema.json#/$defs/MonoMs"
         },
-        "lat": {
-          "type": "number"
+        "lat_e7": {
+          "type": "integer",
+          "minimum": -900000000,
+          "maximum": 900000000
         },
-        "lon": {
-          "type": "number"
+        "lon_e7": {
+          "type": "integer",
+          "minimum": -1800000000,
+          "maximum": 1800000000
         },
-        "acc_m": {
-          "type": "number"
+        "acc_cm": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
         },
-        "bearing": {
-          "type": "number"
+        "bearing_cdeg": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 35999
         },
-        "speed": {
-          "type": "number"
+        "speed_cm_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
         }
       }
     },

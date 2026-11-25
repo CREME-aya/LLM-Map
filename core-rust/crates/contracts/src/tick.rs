@@ -21,17 +21,71 @@ pub struct TickInput {
     pub events: Vec<Event>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+/// GNSS fix, integers only (docs 04 §3.1, ADR-0008): Kotlin rounds the `Location` doubles
+/// once, so everything from here on is deterministic integer arithmetic.
+/// - `lat_e7` / `lon_e7` = `Math.round(deg * 1e7)` (WGS84 degrees * 1e7).
+/// - `acc_cm` = horizontal accuracy in cm.
+/// - `bearing_cdeg` = `Math.round(deg * 100) % 36000` (centidegrees clockwise from north,
+///   `0..=35999`; 359.996° rounds to 36000 and wraps to 0). 36000 or more is rejected.
+/// - `speed_cm_s` = ground speed in cm/s.
+///
+/// Out-of-range values are rejected at parse time (→ `E_SCHEMA`), like the schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fix {
     pub at_mono_ms: MonoMs,
-    pub lat: f64,
-    pub lon: f64,
-    pub acc_m: f64,
+    #[serde(deserialize_with = "lat_e7")]
+    pub lat_e7: i32,
+    #[serde(deserialize_with = "lon_e7")]
+    pub lon_e7: i32,
+    pub acc_cm: u32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "bearing_cdeg"
+    )]
+    pub bearing_cdeg: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bearing: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speed: Option<f64>,
+    pub speed_cm_s: Option<u32>,
+}
+
+/// `|lat_e7| <= 900_000_000`.
+pub const LAT_E7_MAX: i32 = 900_000_000;
+/// `|lon_e7| <= 1_800_000_000`.
+pub const LON_E7_MAX: i32 = 1_800_000_000;
+/// Bearings are `0..BEARING_CDEG_FULL` (36000 = 360.00°).
+pub const BEARING_CDEG_FULL: u16 = 36_000;
+
+fn ranged_i32<'de, D: serde::Deserializer<'de>>(
+    d: D,
+    max: i32,
+    what: &str,
+) -> Result<i32, D::Error> {
+    let v = i32::deserialize(d)?;
+    if v < -max || v > max {
+        return Err(serde::de::Error::custom(format!(
+            "{what} out of range: {v}"
+        )));
+    }
+    Ok(v)
+}
+
+fn lat_e7<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
+    ranged_i32(d, LAT_E7_MAX, "lat_e7")
+}
+
+fn lon_e7<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
+    ranged_i32(d, LON_E7_MAX, "lon_e7")
+}
+
+fn bearing_cdeg<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u16>, D::Error> {
+    let v = u16::deserialize(d)?;
+    if v >= BEARING_CDEG_FULL {
+        return Err(serde::de::Error::custom(format!(
+            "bearing_cdeg out of range (0..=35999): {v}"
+        )));
+    }
+    Ok(Some(v))
 }
 
 /// `Event = { at_mono_ms } & (kind-specific fields)`.

@@ -168,7 +168,7 @@ fn unknown_fields_are_e_schema() {
         .unwrap();
         let mut cases: Vec<Value> = vec![
             serde_json::json!({"now_mono_ms": 1, "extra": 1}),
-            serde_json::json!({"now_mono_ms": 1, "fix": {"at_mono_ms": 1, "lat": 0.0, "lon": 0.0, "acc_m": 1.0, "alt": 1}}),
+            serde_json::json!({"now_mono_ms": 1, "fix": {"at_mono_ms": 1, "lat_e7": 0, "lon_e7": 0, "acc_cm": 100, "alt": 1}}),
         ];
         for e in all["events"].as_array().unwrap() {
             // sanity: the event alone is accepted

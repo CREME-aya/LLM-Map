@@ -58,7 +58,9 @@ typedef struct dc_session dc_session;
           * replaced. Loading the route body: TODO E_UNIMPLEMENTED (bundle shape TODO(abi-v1)). */
 /* 10 */ dc_out   dc_tick(dc_session* s, dc_in tick_json);
          /* dc_tick v2:
-          * in : {now_mono_ms, fix?{at_mono_ms, lat, lon, acc_m, bearing?, speed?},
+          * in : {now_mono_ms, fix?{at_mono_ms, lat_e7, lon_e7, acc_cm, bearing_cdeg?, speed_cm_s?},
+          *       // integers only (04 §3.1): lat_e7/lon_e7 = Math.round(deg*1e7), acc_cm in cm,
+          *       // bearing_cdeg = Math.round(deg*100) % 36000 (0..35999; 36000 -> E_SCHEMA), speed_cm_s
           *       events:[{at_mono_ms, kind, ...}]   // ascending at_mono_ms
           *   kind: tts_started|tts_done|tts_stopped{token}
           *       | asr_started{utterance_id} | asr_result{utterance_id, text_class: dict|natural, dict_norm?}

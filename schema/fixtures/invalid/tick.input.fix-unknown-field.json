@@ -1,1 +1,1 @@
-{"now_mono_ms": 10, "fix": {"at_mono_ms": 9, "lat": 35.0, "lon": 139.0, "acc_m": 5.0, "altitude": 3.0}}
+{"now_mono_ms": 10, "fix": {"at_mono_ms": 9, "lat_e7": 350000000, "lon_e7": 1390000000, "acc_cm": 500, "altitude": 3.0}}
