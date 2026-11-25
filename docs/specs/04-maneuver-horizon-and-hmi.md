@@ -118,8 +118,8 @@ Android の単一 `NavigationSession` actor が、GNSS の受け取り・経路�
 
 ### 3.1 経路本体 `route_bundle` と経路上の位置合わせ（Rust）
 - **範囲**: Rust が行うのは **確定した経路の上での位置合わせだけ**。道路網全体へのマップマッチングは行わず、タイルや道路網を Rust に持ち込まない（IO を持たない原則）。経路から外れたと判定したら、Rust は現在位置を付けて `reroute` の `start` を出し、道路網を使う探索はこれまでどおり Valhalla（C++）が受け持つ。
-- **経路本体**: `dc_route_commit` で一度だけ渡す。JSON の形の正本は `schema/route-bundle.schema.json`。構造は `legs: [{ leg_index, shape, edges, maneuvers }]`。累積距離は leg ごとの値と経路全体の `along_route_cm`（u32 cm）の両方を持つ。`edges` は `edge_id`（U64Str）・区間・`length_cm`・`cum_time_ms`（u32）・`flags`。`maneuvers` は §2 の `Maneuver` を `$ref` で使い、別の型を作らない（正規化は §2.1 のとおり C++）。残り ETA は `edges.cum_time_ms` と位置合わせで求めた現在位置から計算する。
-- **座標の契約（三角関数を Rust に入れない）**: 形状は **チャンクごと**（目安 20 km、暫定）に基準点 `origin_e7` と **整数の換算係数** `cm_per_e7_lat` / `cm_per_e7_lon`（固定小数点）を持ち、点はそのチャンクの基準点からの **整数 cm** で表す。係数は経路を作る側の C++ が `cos` を使って一度だけ計算する。`TickInput.fix` の緯度経度は **e7 の整数**（Kotlin が `Location` の double を一度だけ丸める）で、Rust は基準点を引いて係数を掛けるだけで平面に直す（整数の四則演算だけなので x86 と arm64 で同じ結果）。チャンクの境目では Rust が両隣のチャンクで変換して近い方を採る（判断はすべて Rust）。固定小数点の決まりごと（暫定）：
+- **経路本体**: `dc_route_commit` で一度だけ渡す。JSON の形の正本は `schema/route-bundle.schema.json`。構造は `legs: [{ leg_index, along_route_start_cm, length_cm, chunks: [...], edges, maneuvers }]`。形状はチャンク（`chunks[]`）に分け、**チャンクの境目の点は両隣のチャンクで共有** する。累積距離は leg ごとの値と経路全体の `along_route_cm`（u32 cm）の両方を持つ。`edges` は `edge_id`（U64Str）・区間・`length_cm`・`cum_time_ms`（u32。**経路の始点からその edge の終点まで** の累積）・`flags`（ビット：1 トンネル / 2 高速 / 4 有料 / 8 フェリー。暫定）・各線分の `bearing_cdeg`。都市か高速かの判定（§2.1 のグルーピング閾値）は `flags` の高速ビットで行う。`maneuvers` は §2 の `Maneuver` を `$ref` で使い、別の型を作らない（正規化は §2.1 のとおり C++）。残り ETA は `edges.cum_time_ms` と位置合わせで求めた現在位置から計算する。
+- **座標の契約（三角関数を Rust に入れない）**: 形状は **チャンクごと**（目安 20 km、暫定）に基準点 `origin_e7` と **整数の換算係数** `k_lat_q16` / `k_lon_q16`（1e-7 度あたりの cm を Q16 で表す）を持ち、点はそのチャンクの基準点からの **整数 cm** で表す。係数は経路を作る側の C++ が `cos` を使って一度だけ計算する。`TickInput.fix` の緯度経度は **e7 の整数**（Kotlin が `Location` の double を一度だけ丸める）で、Rust は基準点を引いて係数を掛けるだけで平面に直す（整数の四則演算だけなので x86 と arm64 で同じ結果）。チャンクの境目では Rust が両隣のチャンクで変換して近い方を採る（判断はすべて Rust）。固定小数点の決まりごと（暫定）：
   - 係数は 1e-7 度あたりの cm を **Q16（u32）** で表す（緯度方向 ≈ 1.1132 cm → 約 72,955。経度方向はこれに `cos(緯度)` を掛けた値。C++ が一度だけ計算）。
   - 変換は `dx_cm = round_q16((lon_e7 − origin.lon_e7) × k_lon_q16)`、計算途中は **i64**。丸めは `(v + 2^15) >> 16`（算術シフト。ちょうど 0.5 は +∞ 方向）。
   - Kotlin は `Location` の double を `Math.round(deg × 1e7)` で e7 に丸める（決定論が要るのは e7 以降）。
@@ -136,7 +136,7 @@ Android の単一 `NavigationSession` actor が、GNSS の受け取り・経路�
 - **操作通過条件**: 単純な円形半径や GPS 速度だけで通過判定せず、**精度・進行方向・連続性を満たす次の辺上の高信頼マッチ（例：2 サンプル連続）** で通過確定。短い後方ジッタで過去操作を復活させない。
 - **状態ごとの抑制ルール**:
   - 鮮度初期上限は **2.5 秒**。高架・並行道路・トンネル等で確信不足時は `uncertain` とし、距離/秒数更新・P2/P3 音声・3 手先の新規提案を抑制。
-  - `off_route` / `rerouting` 時は旧方向案内を保留し「経路を確認中」を表示（再探索の応答は終端イベント `search_finished`（[03 §3.1](03-routing-and-two-layer-control.md)）で受け、**`outcome=ok` かつ `route_key`（`trip_revision` / `route_revision` / `graph_version` を含む）が現行一致、`status=tracking` のときのみ** 原子コミット。cancel 後に届いた `ok` は `discarded_late`、`engine_stuck` の後に届いた `ok` は `discarded_after_stuck` として記録し、どちらも結果は使わない。`engine_stuck` の後も逸脱再探索が必要なら直後に新しい `start` を出す）。
+  - `off_route` / `rerouting` 時は旧方向案内を保留し「経路を確認中」を表示（再探索の応答は終端イベント `search_finished`（[03 §3.1](03-routing-and-two-layer-control.md)）で受け、**`outcome=ok` かつ `route_key`（`trip_revision` / `route_revision` / `graph_version` を含む）が現行一致、`status` が `tracking` / `off_route` / `rerouting` のいずれか（`uncertain` と `finished` では出さない）のときのみ** 原子コミット（`commit` を出す）。`uncertain` のあいだに戻った結果は捨てず保留し、`uncertain` を抜けた時点で `route_key` がまだ一致していれば `commit` を出す。保留の上限時間と、上限を超えたら捨てて逸脱再探索をやり直すかは未決（Gate 7 で決める）。cancel 後に届いた `ok` は `discarded_late`、`engine_stuck` の後に届いた `ok` は `discarded_after_stuck` として記録し、どちらも結果は使わない。`engine_stuck` の後も逸脱再探索が必要なら直後に新しい `start` を出す）。
   - `finished` 時は先読み配列 `upcoming` を空にする。
   - `next_p1_deadline_monotonic_ms` には画面が省く中間案内ステップや連続グループ内側の締切も含める。
 
