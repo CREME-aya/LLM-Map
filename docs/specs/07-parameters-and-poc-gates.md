@@ -24,6 +24,7 @@
 | **位置・鮮度** | 経路から外れたと判定する閾値（横方向の許容 / 進行方向の許容 / 確定に要る連続 Fix 数） | `lateral_tol_cm` 3000（30 m） / `heading_tol_deg` 60（速度 1.4 m/s 未満では方位を使わない） / `confirm_fixes` 3 | 暫定（根拠なし、推測）。経路の上だけで位置合わせをするため、**近くを並行する道路（側道など、間隔が許容幅より狭い道）では逸脱の検出が遅れることがある**（仕様上の制約。分岐後に離れていけば `confirm_fixes` で検出する）。Gate 0・7 で校正。 方針値として `dc_session_new` の設定で渡す。経路ごとには持たない（[04 §3.1](04-maneuver-horizon-and-hmi.md)） |
 | **位置・鮮度** | 位置合わせに使う測位精度の上限 `max_acc_cm` | 3000（30 m、`lateral_tol_cm` と同じ） | 暫定。`acc_cm`（68% 信頼水準の推定値）がこれより大きい Fix が来たら逸脱の連続カウントを **0 に戻す**（「有効な範囲外 Fix が連続 `confirm_fixes` 回」という条件を守るため）。そういう Fix が `confirm_fixes` 回続いたら `status=uncertain`。`SessionConfig` で渡す（[04 §3.1](04-maneuver-horizon-and-hmi.md)） |
 | **位置・鮮度** | 位置合わせの探索範囲 | 空間索引のグリッド 500 m / 前方を探す範囲 = 50 m/s × 前回 Fix からの経過時間 + 200 m | 暫定（実装で決めた値、根拠なし）。見失ったときはグリッドで再捕捉（[04 §3.1](04-maneuver-horizon-and-hmi.md)） |
+| **位置・鮮度** | `uncertain` 中に戻った再探索結果の保留上限 | 10 秒 | 暫定（根拠なし）。保留は 1 件、超過で `discarded_hold_expired`（[04 §3](04-maneuver-horizon-and-hmi.md)） |
 | **位置・鮮度** | 経路形状のチャンク長（基準点ごとの区間） | 目安 20 km | 暫定。チャンクごとに `origin_e7` と整数の換算係数を持つ（[04 §3.1](04-maneuver-horizon-and-hmi.md)）。縮尺誤差が外れ判定に影響しないかは Gate 0 の長距離リプレイで確認 |
 | **3 手先 HMI** | 連続分岐グルーピング閾値 | 都市 `120 m` / 高速 `200 m` / 最早 ETA 差 `12 秒`（先頭 2 操作） | 音声は `HorizonEntry.group_id` のみ参照（[04 §2.1](04-maneuver-horizon-and-hmi.md)） |
 | **3 手先 HMI** | 強調タイミング（準備 / まもなく） | 一般道: 30 秒前 / 8 秒前<br>高速道路: 60 秒前 / 20 秒前 | 距離丸め・UI 更新 1 Hz 上限 |
