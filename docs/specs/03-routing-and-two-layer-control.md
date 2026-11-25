@@ -77,6 +77,7 @@ L3 の出力は **L2 本表（`profile_weights` / `avoidance_nodes_edges`）へ�
 |---|---|---|
 | Rust → Kotlin | `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version}` | 探索開始。`priority` は上表の JSON 名、`distance_class` は下記 |
 | Rust → Kotlin | `planner_cmds: cancel{req_id}` | 実行中探索の取消要求 |
+| Rust → Kotlin | `planner_cmds: commit{req_id, route_key}` | 逸脱再探索の結果を確定する指示。Kotlin が `dc_route_commit` を呼ぶ（回避チップには出さない） |
 | Rust → Kotlin | `planner_cmds: rank{plan_request_id, facts_refs: [string], reason: all_done\|budget_expired}` | 計画の採点指示。Kotlin が `dc_rank` を呼んで比較結果を表示する |
 | Kotlin → Rust | `search_finished{req_id, route_key, graph_version, outcome: ok\|cancelled\|error, facts_ref?, engine_ms}` | **唯一の終端イベント。1 探索につき必ず 1 回**。旧 `reroute_result` / `search_cancelled` は廃止 |
 
@@ -104,7 +105,8 @@ engine_stuck ──search_finished{req_id}──▶ Idle
   - **比較予算** = `min(距離区分の予算 3 s / 8 s, TripPlanSnapshot.budget.deadline_ms)`。`deadline_ms` は呼び出し側が予算を **短くする方向にだけ** 使え、無ければ距離区分の予算をそのまま使う。
   - **新しい計画が来たら**、古い計画は打ち切り、古い計画の `rank` は出さない（実行中の探索は `search_finished` まで枠を占有し、戻った結果は `discarded_late`）。
   - 計画の中の探索の `route_key.route_revision` は現状 `"0"` の仮の値（未決。経路確定前の revision の付け方を決めるまで）。
-  - **計画の外の探索（逸脱再探索・回避チップ）の `distance_class`**: 未決。案は「走行中の現経路の残り ETA が 30 分未満なら `short`、不明なら `long`」（現実装は直前の計画の区分を引き継ぎ、計画が無ければ `long`）。
+  - **計画の外の探索（逸脱再探索・回避チップ）の `distance_class`**: 探索開始時点で、現在の経路に対する **有効な残り ETA が 30 分未満なら `short`、30 分以上・不明・失効なら `long`**。その探索の間は固定し、直前の計画の区分は引き継がない（逸脱で残り ETA が失効したら、直前の計画が `short` でも `long`）。計画の外でこの区分が選ぶのは **監視上限 5 s / 10 s だけ**（3 s / 8 s は出発前の計画の比較予算）。回避チップは引き続き **計算予算 1.5 s・分岐 20 s 前の締切** で提示を判断し、監視上限まで待って提示してよいという意味ではない。
+  - **計画の外の探索結果の扱い**: 逸脱再探索が `ok` で戻り、`route_key` が一致し状態が有効なときだけ、Rust は `planner_cmds: commit{req_id, route_key}` を出す。Kotlin は `req_id` に対応する経路本体（Valhalla から受け取って保持）を `dc_route_commit` に渡す。回避チップの探索が `ok` で戻っても `commit` は出さず、`dc_avoid_offer_eval` を通して利用者の同意を待つ（同意なしで経路を変えない）。「経路を確認中」の表示は `horizon.status` だけで出す。
   - `rank` を出した時点で Rust はその計画を **終了** とし、以後その計画の `start` を出さない。完了を知らせるイベントは無い。`rank` 後に同じ計画の `search_finished` が戻ったら `discarded_late` として記録し、枠の解放にだけ使う。
 
 - **結果を採用する条件**: `outcome=ok` **かつ** `route_key` が現行と一致 **かつ** 走行状態が `tracking` のときのみ。それ以外は破棄（表示・発話に使わない）。
