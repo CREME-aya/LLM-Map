@@ -53,9 +53,16 @@ typedef struct dc_session dc_session;
           * (skeleton: SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only, else E_UNIMPLEMENTED) */
 /* 8  */ dc_out   dc_trip_score(dc_in trip_summary_json);                      /* TODO: E_UNIMPLEMENTED */
 /* 9  */ dc_out   dc_route_commit(dc_session* s, dc_in route_bundle_json);     /* route body only here */
-         /* in: {route_key, ...}: route_key from planner_cmds commit (the current route's key when
-          * the search started). Re-checked against the current route: changed -> E_STALE, nothing
-          * replaced. Loading the route body: TODO E_UNIMPLEMENTED (bundle shape TODO(abi-v1)). */
+         /* in : {route_key: RouteKey|null, bundle: RouteBundle}   (schema/route-bundle.schema.json)
+          *      route_key = guard: from planner_cmds commit (the current route's key when the
+          *      search started), or null for the first route. Must equal the current route
+          *      (null = none) -> otherwise E_STALE, nothing replaced (checked first).
+          *      bundle = {route_key (new), eta_ms, length_cm, legs[{leg_index, along_route_start_cm,
+          *      length_cm, chunks[{first_shape_index, origin_e7{lat,lon}, k_lat_q16, k_lon_q16,
+          *      points_cm[[dx,dy]], seg_along_cm[], bearing_cdeg[]}], edges[{edge_id, from_pt, to_pt,
+          *      length_cm, cum_time_ms, flags}], maneuvers[Maneuver]}]}; invalid -> E_SCHEMA.
+          * out: {route_key, legs, segments, maneuvers}. The next dc_tick returns the new horizon
+          *      (uncertain until a fix is aligned on the new route). */
 /* 10 */ dc_out   dc_tick(dc_session* s, dc_in tick_json);
          /* dc_tick v2:
           * in : {now_mono_ms, fix?{at_mono_ms, lat_e7, lon_e7, acc_cm, bearing_cdeg?, speed_cm_s?},
@@ -80,14 +87,17 @@ typedef struct dc_session dc_session;
           * out: {horizon? (only when frame_seq changed),
           *       voice_cmds[speak{token, priority: p0|p1|p2|p3, template_id, params{name: int}}
           *                 | stop{token}],
-          *       ui_cmds[show_checking_route
-          *              | show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}
+          *       ui_cmds[show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}
           *              | dismiss{target_id, reason: expired|cancelled|route_changed|superseded}],
           *       planner_cmds[start{req_id, priority, distance_class: short|long, route_key,
-          *                    graph_version, candidate_id?} | cancel{req_id}
+          *                    graph_version, candidate_id?, fix?} | cancel{req_id}
           *                  | rank{plan_request_id, facts_refs[], reason: all_done|budget_expired}
           *                  | commit{req_id, route_key}],
-          *   commit: only for a reroute / ad-hoc explicit_plan ok with a valid state; Kotlin calls
+          *   "経路を確認中" is horizon.status off_route / rerouting (show_checking_route is abolished).
+          *   start.fix: for a reroute, the fix that confirmed off-route (Rust aligns the vehicle on
+          *   the committed route only; Valhalla searches the road network from that position).
+          *   commit: only for a reroute / ad-hoc explicit_plan ok with a valid state (not
+          *   cancelled / stuck, route_key current, horizon.status not uncertain / finished); Kotlin calls
           *   dc_route_commit with that search's route body (never for avoid_chip / plan candidates).
           *   rank: once per plan; Kotlin calls dc_rank with the CandidateFacts behind facts_refs
           *   (may be empty). The plan is over: no more start for it, a late search_finished

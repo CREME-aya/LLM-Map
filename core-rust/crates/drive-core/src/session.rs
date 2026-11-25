@@ -1,18 +1,24 @@
 //! `dc_session` state. Single-threaded: called only from the NavigationSession actor.
 
+use crate::align::{AlignConfig, AlignStats, Aligner, FixResult, Mode};
 use crate::command_line::{self, Command, JpRef};
+use crate::horizon::{arrived, HorizonFrames};
 use crate::planner::{Effects, PlanSearch, SearchLimits, SearchPlanner};
+use crate::route::LoadedRoute;
+use contracts::horizon::{HorizonStatus, ManeuverHorizon};
 use contracts::override_types::{RejectCode, ValidateOverrideRequest, ValidateOverrideResult};
 use contracts::plan::{PlanCandidates, TripPlanSnapshot};
+use contracts::route::{RouteCommitRequest, RouteCommitResult};
 use contracts::tick::{
-    DistanceClass, EventBody, LogEvent, SearchPriority, ThermalStatus, TickInput, TickOutput,
+    DistanceClass, EventBody, Fix, LogEvent, SearchPriority, ThermalStatus, TickInput, TickOutput,
 };
 use contracts::{ErrorCode, RouteKey};
 use serde::Deserialize;
 
 /// `dc_session_new` config. TODO(abi-v1): config contents are not specified anywhere;
-/// only the provisional search limits (03 §3.1 / 07 §1) can be overridden, each defaulting
-/// to the 07 §1 initial value. Unknown fields are rejected.
+/// the provisional search limits (03 §3.1 / 07 §1) and the off-route thresholds (07 §1,
+/// 04 §3.1: policy values, not per route) can be overridden, each defaulting to the 07 §1
+/// initial value. Unknown fields are rejected.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SessionConfig {
@@ -22,21 +28,62 @@ pub struct SessionConfig {
     /// Comparison budget from the plan start, short / long distance (3 s / 8 s).
     pub comparison_budget_short_ms: u64,
     pub comparison_budget_long_ms: u64,
+    /// Lateral tolerance for "on the route" (cm; 3000 = 30 m, provisional).
+    pub lateral_tol_cm: u32,
+    /// Heading tolerance (degrees; 60, provisional), compared in centidegrees.
+    pub heading_tol_deg: u16,
+    /// Below this speed the bearing is not used (cm/s; 140 = 1.4 m/s).
+    pub heading_min_speed_cm_s: u32,
+    /// Consecutive valid off-route fixes to confirm off-route; also the number of
+    /// consecutive low-accuracy fixes that make the position uncertain (3, provisional).
+    pub confirm_fixes: u32,
+    /// Fixes with `acc_cm` above this are not used (default: `lateral_tol_cm`).
+    pub max_acc_cm: Option<u32>,
+    /// Fix freshness limit (ms; 07 §1: 2.5 s).
+    pub fix_stale_ms: u64,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
         let l = SearchLimits::default();
+        let a = AlignConfig::default();
         Self {
             watchdog_short_ms: l.watchdog_short_ms,
             watchdog_long_ms: l.watchdog_long_ms,
             comparison_budget_short_ms: l.comparison_budget_short_ms,
             comparison_budget_long_ms: l.comparison_budget_long_ms,
+            lateral_tol_cm: a.lateral_tol_cm,
+            heading_tol_deg: a.heading_tol_deg,
+            heading_min_speed_cm_s: a.heading_min_speed_cm_s,
+            confirm_fixes: a.confirm_fixes,
+            max_acc_cm: None,
+            fix_stale_ms: a.fix_stale_ms,
         }
     }
 }
 
 impl SessionConfig {
+    pub fn align(&self) -> AlignConfig {
+        AlignConfig {
+            lateral_tol_cm: self.lateral_tol_cm,
+            heading_tol_deg: self.heading_tol_deg,
+            heading_min_speed_cm_s: self.heading_min_speed_cm_s,
+            confirm_fixes: self.confirm_fixes,
+            max_acc_cm: self.max_acc_cm.unwrap_or(self.lateral_tol_cm),
+            fix_stale_ms: self.fix_stale_ms,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.confirm_fixes == 0 {
+            return Err("confirm_fixes must be >= 1".into());
+        }
+        if self.heading_tol_deg > 180 {
+            return Err("heading_tol_deg must be <= 180".into());
+        }
+        Ok(())
+    }
+
     fn limits(&self) -> SearchLimits {
         SearchLimits {
             watchdog_short_ms: self.watchdog_short_ms,
@@ -92,22 +139,102 @@ pub struct Session {
     last_now_mono_ms: Option<u64>,
     current_route_key: Option<RouteKey>,
     thermal: ThermalLevel,
+    align_cfg: AlignConfig,
+    /// Geometry of the current route (set by `route_commit`).
+    route: Option<LoadedRoute>,
+    aligner: Aligner,
+    finished: bool,
+    frames: HorizonFrames,
+    /// `at_mono_ms` of the latest fix used (horizon `sampled_at_monotonic_ms`).
+    last_fix_at: Option<u64>,
 }
 
 impl Session {
     pub fn new(config: SessionConfig) -> Self {
+        let align_cfg = config.align();
         Self {
             planner: SearchPlanner::new(config.limits()),
             last_now_mono_ms: None,
             current_route_key: None,
             thermal: ThermalLevel::None,
+            align_cfg,
+            route: None,
+            aligner: Aligner::new(align_cfg),
+            finished: false,
+            frames: HorizonFrames::default(),
+            last_fix_at: None,
         }
     }
 
     pub fn from_json(config_json: &[u8]) -> Result<Self, CoreError> {
         let cfg: SessionConfig = serde_json::from_slice(config_json)
             .map_err(|e| CoreError::new(ErrorCode::Schema, format!("config: {e}")))?;
+        cfg.validate()
+            .map_err(|e| CoreError::new(ErrorCode::Schema, format!("config: {e}")))?;
         Ok(Self::new(cfg))
+    }
+
+    pub fn aligner(&self) -> &Aligner {
+        &self.aligner
+    }
+
+    pub fn align_stats(&self) -> AlignStats {
+        self.aligner.stats()
+    }
+
+    pub fn route(&self) -> Option<&LoadedRoute> {
+        self.route.as_ref()
+    }
+
+    pub fn frame_seq(&self) -> u64 {
+        self.frames.frame_seq()
+    }
+
+    /// `horizon.status` at `now` (`None` without route geometry).
+    pub fn horizon_status(&self, now: u64) -> Option<HorizonStatus> {
+        self.route.as_ref()?;
+        Some(if self.finished {
+            HorizonStatus::Finished
+        } else if self.aligner.off_confirmed() {
+            if self.planner.reroute_in_slot() {
+                HorizonStatus::Rerouting
+            } else {
+                HorizonStatus::OffRoute
+            }
+        } else if self.aligner.tracking(now) {
+            HorizonStatus::Tracking
+        } else {
+            HorizonStatus::Uncertain
+        })
+    }
+
+    /// Remaining ETA on the current route at `now` (ms), only while tracking.
+    pub fn remaining_eta_ms(&self, now: u64) -> Option<u32> {
+        let r = self.route.as_ref()?;
+        if self.horizon_status(now) != Some(HorizonStatus::Tracking) {
+            return None;
+        }
+        self.aligner.progress_cm().map(|p| r.remaining_ms(p))
+    }
+
+    /// A reroute / ad-hoc explicit_plan result may be committed (03 §3.1 / 04 §3
+    /// "status=tracking", read as "the session follows the vehicle with confidence"):
+    /// not `uncertain` / `finished`. `off_route` / `rerouting` is the state a reroute was
+    /// started for. Without route geometry there is no horizon to gate on.
+    fn commit_allowed(&self, now: u64) -> bool {
+        !matches!(
+            self.horizon_status(now),
+            Some(HorizonStatus::Uncertain | HorizonStatus::Finished)
+        )
+    }
+
+    /// The remaining ETA the planner uses for the distance class of searches outside a
+    /// plan: valid only while tracking the current route (otherwise invalidated → long).
+    fn refresh_eta(&mut self, now: u64) {
+        match (self.remaining_eta_ms(now), &self.current_route_key) {
+            (Some(ms), Some(k)) => self.planner.set_route_eta(k.clone(), u64::from(ms) / 1000),
+            _ => self.planner.invalidate_route_eta(),
+        }
     }
 
     pub fn planner(&self) -> &SearchPlanner {
@@ -118,9 +245,15 @@ impl Session {
         self.thermal
     }
 
-    /// TODO(abi-v1): will be set by dc_route_commit (not implemented yet).
+    /// Test hook: replaces the current route key without geometry (stands in for a
+    /// `dc_route_commit` in planner tests). Any loaded geometry is dropped.
+    #[doc(hidden)]
     pub fn set_current_route_key(&mut self, key: RouteKey) {
         self.current_route_key = Some(key);
+        self.route = None;
+        self.aligner = Aligner::new(self.align_cfg);
+        self.finished = false;
+        self.frames.reset_route();
     }
 
     /// `dc_route_commit` guard (team decision 2026-11-25): `route_key` is the one from
@@ -128,27 +261,50 @@ impl Session {
     /// If the current route is no longer that one (replaced after the commit was issued,
     /// or none), the late route is refused with `E_STALE` and nothing is replaced, so it
     /// never reaches the horizon or voice_cmds.
-    /// TODO(abi-v1): loading the route body (operations normalization) is not implemented;
-    /// `dc_route_commit` returns E_UNIMPLEMENTED after this check passes.
     pub fn check_route_commit(&self, route_key: &RouteKey) -> Result<(), CoreError> {
-        match &self.current_route_key {
-            Some(k) if k == route_key => Ok(()),
-            _ => Err(CoreError::new(
+        self.check_route_guard(Some(route_key))
+    }
+
+    /// Same guard with `null` allowed: `None` passes only when no route is committed yet.
+    pub fn check_route_guard(&self, route_key: Option<&RouteKey>) -> Result<(), CoreError> {
+        if self.current_route_key.as_ref() == route_key {
+            Ok(())
+        } else {
+            Err(CoreError::new(
                 ErrorCode::Stale,
                 "route_key no longer matches the current route",
-            )),
+            ))
         }
     }
 
-    /// Remaining ETA on the current route (`None` = unknown / invalidated, e.g. off-route).
-    /// Decides the distance class of searches outside a plan when they start (planner docs).
-    /// Ignored without a committed route; a later route change makes it stale by route_key.
-    /// TODO(drive-core): set from map-matching / the committed route's ETA instead.
-    pub fn set_remaining_eta(&mut self, remaining_eta_s: Option<u64>) {
-        match (&self.current_route_key, remaining_eta_s) {
-            (Some(k), Some(s)) => self.planner.set_route_eta(k.clone(), s),
-            _ => self.planner.invalidate_route_eta(),
-        }
+    /// `dc_route_commit` body (04 §3.1): re-checks the guard `route_key` (`E_STALE`, nothing
+    /// replaced), validates and indexes the bundle (`E_SCHEMA`), then makes it the current
+    /// route. Alignment starts over (status `uncertain` until a fix matches; the first fix
+    /// is located through the spatial index). The next `dc_tick` returns the new horizon.
+    pub fn route_commit(
+        &mut self,
+        req: &RouteCommitRequest,
+    ) -> Result<RouteCommitResult, CoreError> {
+        self.check_route_guard(req.route_key.as_ref())?;
+        let loaded = LoadedRoute::load(&req.bundle)
+            .map_err(|e| CoreError::new(ErrorCode::Schema, format!("route_bundle: {e}")))?;
+        let result = RouteCommitResult {
+            route_key: loaded.route_key.clone(),
+            legs: req.bundle.legs.len() as u32,
+            segments: loaded.segs.len() as u32,
+            maneuvers: loaded.maneuvers.len() as u32,
+        };
+        let now = self.last_now_mono_ms.unwrap_or(0);
+        let mut fx = Effects::default();
+        self.planner
+            .on_route_changed(now, &loaded.route_key, &mut fx);
+        self.planner.invalidate_route_eta();
+        self.current_route_key = Some(loaded.route_key.clone());
+        self.route = Some(loaded);
+        self.aligner = Aligner::new(self.align_cfg);
+        self.finished = false;
+        self.frames.reset_route();
+        Ok(result)
     }
 
     /// `dc_plan_candidates` body (team decision 2026-11-25): fixes the plan's distance
@@ -169,6 +325,7 @@ impl Session {
         let mut fx = Effects::default();
         let mut extra_log = Vec::new();
         let now = self.clamp_now(now_mono_ms, &mut extra_log);
+        self.refresh_eta(now);
         let candidates = crate::candidates::candidate_requests(snapshot);
         let route_key = RouteKey {
             trip_id: snapshot.trip_id.clone(),
@@ -191,7 +348,7 @@ impl Session {
             searches,
             &mut fx,
         );
-        let out = self.finish(fx, extra_log);
+        let out = self.finish(now, fx, extra_log);
         PlanCandidates {
             plan_request_id: snapshot.plan_request_id.clone(),
             distance_class,
@@ -214,13 +371,12 @@ impl Session {
         let c = self
             .planner
             .begin_plan(now_mono_ms, plan_request_id, eta_estimate_s, &mut fx);
-        (c, self.finish(fx, Vec::new()))
+        (c, self.finish(now_mono_ms, fx, Vec::new()))
     }
 
-    /// Internal hook for triggers that are not wired yet (off-route detection from `fix`,
-    /// avoid-chip look-ahead). Effects are returned as a TickOutput fragment so the
-    /// deterministic replay tests can drive the planner.
-    /// TODO(drive-core): call this from map-matching inside `tick` instead.
+    /// Internal hook for triggers that are not wired yet (avoid-chip look-ahead, explicit
+    /// requests). Effects are returned as a TickOutput fragment so the deterministic replay
+    /// tests can drive the planner. Reroutes come from the alignment inside `tick`.
     pub fn request_search(
         &mut self,
         now_mono_ms: u64,
@@ -231,8 +387,10 @@ impl Session {
             .clone()
             .ok_or_else(|| CoreError::new(ErrorCode::Stale, "no committed route"))?;
         let mut fx = Effects::default();
-        self.planner.request(now_mono_ms, priority, key, &mut fx);
-        Ok(self.finish(fx, Vec::new()))
+        self.refresh_eta(now_mono_ms);
+        self.planner
+            .request(now_mono_ms, priority, key, None, &mut fx);
+        Ok(self.finish(now_mono_ms, fx, Vec::new()))
     }
 
     /// Pure state transition: `TickInput → TickOutput`.
@@ -243,6 +401,9 @@ impl Session {
         // Time never goes backwards inside the core: clamp to the previous value and
         // record clock_regression (02 §2.1 / team decision 2026-11-24).
         let now = self.clamp_now(input.now_mono_ms, &mut extra_log);
+        // Status and remaining ETA as of `now`, before this tick's events / fix.
+        self.refresh_eta(now);
+        let commit_allowed = self.commit_allowed(now);
 
         let mut prev_at: Option<u64> = None;
         for ev in input.events {
@@ -277,6 +438,7 @@ impl Session {
                         outcome,
                         facts_ref.as_deref(),
                         self.current_route_key.as_ref(),
+                        commit_allowed,
                         &mut fx,
                     );
                 }
@@ -293,8 +455,77 @@ impl Session {
                 _ => {}
             }
         }
+        if let Some(fix) = input.fix {
+            self.on_fix(now, fix, &mut fx, &mut extra_log);
+        }
         self.planner.on_now(now, &mut fx);
-        self.finish(fx, extra_log)
+        self.refresh_eta(now);
+        self.finish(now, fx, extra_log)
+    }
+
+    /// On-route alignment of one fix (04 §3.1); confirms off-route and requests the reroute
+    /// with this fix as the new origin.
+    fn on_fix(&mut self, now: u64, fix: Fix, fx: &mut Effects, log: &mut Vec<LogEvent>) {
+        let Some(route) = self.route.as_ref() else {
+            return;
+        };
+        if self.finished {
+            return;
+        }
+        let was_tracking = self.aligner.tracking(now);
+        let at = fix.at_mono_ms;
+        let r = self.aligner.on_fix(route, &fix);
+        if r != FixResult::OutOfOrder {
+            self.last_fix_at = Some(at);
+        }
+        match r {
+            FixResult::OnRoute { along_cm, mode, .. } => {
+                if !was_tracking {
+                    let how = if mode == Mode::Grid { "grid" } else { "local" };
+                    log.push(log_at(
+                        at,
+                        "align_acquired",
+                        Some(format!("mode={how} along_cm={along_cm}")),
+                    ));
+                }
+                if arrived(route, along_cm) {
+                    self.finished = true;
+                    log.push(log_at(at, "route_finished", None));
+                }
+            }
+            FixResult::Ambiguous { parts } => {
+                if was_tracking || parts > 1 {
+                    log.push(log_at(
+                        at,
+                        "align_ambiguous",
+                        Some(format!("parts={parts}")),
+                    ));
+                }
+            }
+            FixResult::Off { run, confirmed_now } => {
+                if confirmed_now {
+                    log.push(log_at(
+                        at,
+                        "off_route_confirmed",
+                        Some(format!("run={run}")),
+                    ));
+                }
+            }
+            FixResult::LowAccuracy { run } => {
+                if run == self.align_cfg.confirm_fixes {
+                    log.push(log_at(at, "fix_low_accuracy", Some(format!("run={run}"))));
+                }
+            }
+            FixResult::OutOfOrder => log.push(log_at(at, "fix_out_of_order", None)),
+        }
+        // Off-route invalidates the remaining ETA before the reroute starts (→ long).
+        self.refresh_eta(now);
+        if self.aligner.off_confirmed() && !self.planner.has_reroute() {
+            if let Some(key) = self.current_route_key.clone() {
+                self.planner
+                    .request(now, SearchPriority::Reroute, key, Some(fix), fx);
+            }
+        }
     }
 
     /// Clamp `now_mono_ms` to the previous value (time never goes backwards in the core).
@@ -314,18 +545,40 @@ impl Session {
         now
     }
 
-    fn finish(&self, fx: Effects, mut extra_log: Vec<LogEvent>) -> TickOutput {
+    fn finish(&mut self, now: u64, fx: Effects, mut extra_log: Vec<LogEvent>) -> TickOutput {
         let mut log = fx.log;
         log.append(&mut extra_log);
         log.sort_by_key(|l| l.at_mono_ms); // stable: deterministic order
+        let horizon = self.next_horizon(now);
+        // The freshness limit can turn tracking into uncertain without new input.
+        let stale_at = self.route.as_ref().and_then(|_| self.aligner.stale_at(now));
+        let next_wake_mono_ms = match (self.planner.next_wake(), stale_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         TickOutput {
-            horizon: None, // TODO(drive-core): ManeuverHorizon normalization
+            horizon,
             voice_cmds: Vec::new(),
             ui_cmds: fx.ui_cmds,
             planner_cmds: fx.planner_cmds,
-            next_wake_mono_ms: self.planner.next_wake(),
+            next_wake_mono_ms,
             log,
         }
+    }
+
+    /// The horizon frame for `now`, only when its content changed.
+    fn next_horizon(&mut self, now: u64) -> Option<ManeuverHorizon> {
+        let status = self.horizon_status(now)?;
+        let route = self.route.as_ref()?;
+        let progress = self.aligner.progress_cm();
+        let sampled = self.last_fix_at.unwrap_or(now);
+        self.frames.next(
+            route,
+            status,
+            progress,
+            sampled,
+            self.align_cfg.fix_stale_ms,
+        )
     }
 
     /// `dc_validate_override` skeleton. Implemented: SYNTAX, NO_PENDING_TARGET, UNKNOWN_REF
