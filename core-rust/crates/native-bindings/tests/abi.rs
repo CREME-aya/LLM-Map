@@ -272,9 +272,11 @@ fn route_commit_loads_the_bundle() {
         // again with null: a route is current now → E_STALE
         let v = take(dc_route_commit(s, din(&serde_json::to_vec(&req).unwrap())));
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
-        // right guard, broken body → E_SCHEMA; wrong guard with a broken body → E_STALE
+        // right guard and revision (current + 1), broken body → E_SCHEMA; wrong guard with
+        // a broken body → E_STALE
         let mut broken = req.clone();
         broken["expected_route_key"] = rk.clone();
+        broken["bundle"]["route_key"]["route_revision"] = "9".into();
         broken["bundle"]["length_cm"] = 1.into();
         let v = take(dc_route_commit(
             s,
@@ -285,6 +287,14 @@ fn route_commit_loads_the_bundle() {
         let v = take(dc_route_commit(
             s,
             din(&serde_json::to_vec(&broken).unwrap()),
+        ));
+        assert_eq!(v["error"]["code"], "E_STALE", "{v}");
+        // right guard, valid body with the same route_revision (not current + 1) → E_STALE
+        let mut same_rev = req.clone();
+        same_rev["expected_route_key"] = rk.clone();
+        let v = take(dc_route_commit(
+            s,
+            din(&serde_json::to_vec(&same_rev).unwrap()),
         ));
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
         // unknown field in the request

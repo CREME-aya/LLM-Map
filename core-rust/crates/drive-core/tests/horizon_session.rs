@@ -210,18 +210,59 @@ fn reroute_from_fix_then_commit() {
     assert_eq!(h.status, HorizonStatus::Tracking);
 }
 
-/// "status=tracking" for adoption: an ok while the position is uncertain is discarded.
-#[test]
-fn ok_while_uncertain_is_not_committed() {
+fn whats(o: &TickOutput) -> Vec<&str> {
+    o.log.iter().map(|l| l.what.as_str()).collect()
+}
+
+fn commit_of(o: &TickOutput) -> Vec<(&str, &RouteKey)> {
+    o.planner_cmds
+        .iter()
+        .filter_map(|c| match c {
+            PlannerCmd::Commit { req_id, route_key } => Some((req_id.as_str(), route_key)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Tracking at 0, an explicit-plan search r1 from 100, no fix until 3 s → uncertain.
+fn uncertain_with_search() -> (Session, RouteBundle) {
     let (mut s, b) = committed();
     tick(&mut s, 0, Some(fix_xy(&b, 0, 10_000, 0)));
     s.request_search(100, SearchPriority::ExplicitPlan).unwrap();
-    // no fix for 3 s → uncertain
     assert_eq!(s.horizon_status(3_000), Some(HorizonStatus::Uncertain));
+    (s, b)
+}
+
+/// 04 §3: an ok returned while `uncertain` is held (not committed, not discarded) and
+/// committed once the status is back to tracking, with the start-time route_key.
+#[test]
+fn ok_while_uncertain_is_held_and_committed_on_tracking() {
+    let (mut s, b) = uncertain_with_search();
     let o = s.tick(finished("r1", &b.route_key, 3_000));
     assert!(o.planner_cmds.is_empty());
-    assert!(o.log.iter().any(|l| l.what == "discarded_not_tracking"));
-    // while tracking the same ok is committed
+    assert!(whats(&o).contains(&"commit_held_uncertain"));
+    assert!(!whats(&o).contains(&"discarded_not_tracking"));
+    assert_eq!(s.planner().held().map(|h| h.req_id.as_str()), Some("r1"));
+    // the hold expiry is a wake-up time (held_at + 10 s + 1 ms)
+    assert!(o.next_wake_mono_ms.is_some_and(|w| w <= 13_001));
+    // still uncertain: nothing yet
+    let o = tick(&mut s, 3_500, None);
+    assert!(o.planner_cmds.is_empty());
+    // a fix back on the route → tracking → commit{r1, route_key at the start}
+    let o = tick(&mut s, 4_000, Some(fix_xy(&b, 4_000, 16_000, 0)));
+    assert_eq!(s.horizon_status(4_000), Some(HorizonStatus::Tracking));
+    assert_eq!(commit_of(&o), vec![("r1", &b.route_key)]);
+    let l = o.log.iter().find(|l| l.what == "commit_issued").unwrap();
+    assert_eq!(l.detail.as_deref(), Some("from_hold"));
+    assert!(s.planner().held().is_none());
+    // only once
+    let o = tick(&mut s, 5_000, Some(fix_xy(&b, 5_000, 17_500, 0)));
+    assert!(commit_of(&o).is_empty());
+}
+
+/// While tracking the same ok is committed right away (no hold).
+#[test]
+fn ok_while_tracking_is_committed_at_once() {
     let (mut s, b) = committed();
     tick(&mut s, 0, Some(fix_xy(&b, 0, 10_000, 0)));
     s.request_search(100, SearchPriority::ExplicitPlan).unwrap();
@@ -229,6 +270,89 @@ fn ok_while_uncertain_is_not_committed() {
     assert_eq!(s.horizon_status(1_500), Some(HorizonStatus::Tracking));
     let o = s.tick(finished("r1", &b.route_key, 1_500));
     assert!(matches!(&o.planner_cmds[..], [PlannerCmd::Commit { .. }]));
+    assert!(s.planner().held().is_none());
+}
+
+/// The hold lasts 10 s (inclusive); past it the result is `discarded_hold_expired` and a
+/// later return to tracking commits nothing.
+#[test]
+fn held_result_expires_after_hold_limit() {
+    // exactly 10 s after the hold: still committed
+    let (mut s, b) = uncertain_with_search();
+    s.tick(finished("r1", &b.route_key, 3_000));
+    let o = tick(&mut s, 13_000, Some(fix_xy(&b, 13_000, 20_000, 0)));
+    assert_eq!(commit_of(&o), vec![("r1", &b.route_key)]);
+    // 10 s + 1 ms: expired, even if the same tick brings tracking back
+    let (mut s, b) = uncertain_with_search();
+    s.tick(finished("r1", &b.route_key, 3_000));
+    let o = tick(&mut s, 13_001, Some(fix_xy(&b, 13_001, 20_000, 0)));
+    assert!(commit_of(&o).is_empty());
+    assert!(whats(&o).contains(&"discarded_hold_expired"));
+    // expiry without input (the wake-up tick), then tracking: nothing
+    let (mut s, b) = uncertain_with_search();
+    s.tick(finished("r1", &b.route_key, 3_000));
+    let o = tick(&mut s, 13_001, None);
+    assert!(whats(&o).contains(&"discarded_hold_expired"));
+    let o = tick(&mut s, 14_000, Some(fix_xy(&b, 14_000, 20_000, 0)));
+    assert!(commit_of(&o).is_empty());
+}
+
+/// The hold limit comes from SessionConfig (`commit_hold_ms`).
+#[test]
+fn hold_limit_is_configurable() {
+    let mut s = Session::from_json(br#"{"commit_hold_ms": 2000}"#).unwrap();
+    let b = main_line();
+    s.route_commit(&RouteCommitRequest {
+        expected_route_key: None,
+        bundle: b.clone(),
+    })
+    .unwrap();
+    tick(&mut s, 0, Some(fix_xy(&b, 0, 10_000, 0)));
+    s.request_search(100, SearchPriority::ExplicitPlan).unwrap();
+    s.tick(finished("r1", &b.route_key, 3_000));
+    let o = tick(&mut s, 5_001, Some(fix_xy(&b, 5_001, 16_000, 0)));
+    assert!(commit_of(&o).is_empty());
+    assert!(whats(&o).contains(&"discarded_hold_expired"));
+}
+
+/// Only one result is held: a newer ok replaces the older one.
+#[test]
+fn newer_ok_replaces_the_held_one() {
+    let (mut s, b) = uncertain_with_search();
+    s.tick(finished("r1", &b.route_key, 3_000));
+    s.request_search(3_100, SearchPriority::ExplicitPlan)
+        .unwrap();
+    let o = s.tick(finished("r2", &b.route_key, 3_200));
+    assert!(o
+        .log
+        .iter()
+        .any(|l| l.what == "discarded_hold_replaced" && l.req_id.as_deref() == Some("r1")));
+    assert_eq!(s.planner().held().map(|h| h.req_id.as_str()), Some("r2"));
+    let o = tick(&mut s, 4_000, Some(fix_xy(&b, 4_000, 16_000, 0)));
+    assert_eq!(commit_of(&o), vec![("r2", &b.route_key)]);
+}
+
+/// The route changed while the result was held: its route_key no longer matches, no
+/// commit (the hold is dropped on the route change).
+#[test]
+fn held_result_for_a_replaced_route_is_not_committed() {
+    let (mut s, b) = uncertain_with_search();
+    s.tick(finished("r1", &b.route_key, 3_000));
+    let mut b2 = b.clone();
+    b2.route_key.route_revision = contracts::U64Str(b.route_key.route_revision.0 + 1);
+    for leg in &mut b2.legs {
+        for m in &mut leg.maneuvers {
+            m.id.route_key = b2.route_key.clone();
+        }
+    }
+    s.route_commit(&RouteCommitRequest {
+        expected_route_key: Some(b.route_key.clone()),
+        bundle: b2.clone(),
+    })
+    .unwrap();
+    assert!(s.planner().held().is_none());
+    let o = tick(&mut s, 4_000, Some(fix_xy(&b2, 4_000, 16_000, 0)));
+    assert!(commit_of(&o).is_empty());
 }
 
 /// engine_stuck: no UiCmd. A stuck reroute stays `rerouting`; a stuck avoid chip leaves the
@@ -477,4 +601,102 @@ fn roundabout_exit_still_has_a_p1_deadline_after_entrance_passage() {
         frame.next_p1_deadline_monotonic_ms,
         Some(41_000 + u64::from(exit_eta) - 8_000)
     );
+}
+
+/// (crossing, approach_signal, right_turn_protection), all confirmed.
+type JunctionEvidence = (&'static str, &'static str, &'static str);
+
+/// 04 §2 / 03 §4.1: `refs` point at difficult junctions (難所) only. Docs define no
+/// junction kind for ordinary intersections, so passing or approaching them creates no
+/// `JunctionRef` / `PassedRef`; they still carry the P1 guidance deadline (04 §3).
+/// Main difficult kinds (unsignalled right across oncoming, narrow, merge) are not part
+/// of this test.
+#[test]
+fn ordinary_junctions_create_no_refs_but_keep_p1_deadlines() {
+    let ev = |value: &str| -> contracts::horizon::Evidence {
+        serde_json::from_value(
+            serde_json::json!({"kind":"confirmed","value":value,"source_ref":"test"}),
+        )
+        .unwrap()
+    };
+    let cases: Vec<(&str, Arrow, Option<JunctionEvidence>)> = vec![
+        ("left", Arrow::Left, None),
+        ("slight_left", Arrow::SlightLeft, None),
+        ("keep_left", Arrow::KeepLeft, None),
+        ("fork_right", Arrow::ForkRight, None),
+        ("straight_decision", Arrow::StraightDecision, None),
+        (
+            "roundabout",
+            Arrow::Roundabout {
+                exit_number: Some(2),
+            },
+            None,
+        ),
+        (
+            "right_no_crossing",
+            Arrow::Right,
+            Some(("no_crossing", "absent", "unprotected")),
+        ),
+        (
+            "right_signalled_protected",
+            Arrow::Right,
+            Some(("across_oncoming", "present", "protected")),
+        ),
+    ];
+    for (name, arrow, evidence) in cases {
+        let mut b = main_line();
+        for m in &mut b.legs[0].maneuvers[..3] {
+            m.arrow = arrow;
+            if let Some((c, sig, p)) = evidence {
+                m.crossing = ev(c);
+                m.approach_signal = ev(sig);
+                m.right_turn_protection = ev(p);
+            }
+        }
+        let mut s = Session::new(SessionConfig {
+            fix_stale_ms: 200_000,
+            ..Default::default()
+        });
+        s.route_commit(&RouteCommitRequest {
+            expected_route_key: None,
+            bundle: b.clone(),
+        })
+        .unwrap();
+        let mut seen = 0;
+        for (t, x) in [(1_000, 140_000), (2_000, 150_100), (3_000, 150_200)] {
+            if let Some(h) = tick(&mut s, t, Some(fix_xy(&b, t, x, 0))).horizon {
+                seen += 1;
+                assert_eq!(h.status, HorizonStatus::Tracking, "{name}");
+                assert_eq!(h.refs.next, None, "{name}");
+                assert_eq!(h.refs.last, None, "{name}: passing is not a PassedRef");
+                assert!(h.next_p1_deadline_monotonic_ms.is_some(), "{name}");
+                assert_eq!(h.next_complex_window, None, "{name}");
+            }
+        }
+        assert!(seen > 0, "{name}");
+    }
+}
+
+/// 04 §2 / 05 §6.2: `next_complex_window` has no start / end rule in the docs, so it is
+/// not produced in any status (TODO in horizon.rs) — never a made-up window that would
+/// block or allow the P3 history commentary.
+#[test]
+fn complex_window_is_not_produced_without_a_documented_rule() {
+    let (mut s, b) = committed();
+    let mut frames = vec![tick(&mut s, 0, None).horizon.unwrap()]; // uncertain
+    frames.push(
+        tick(&mut s, 1_000, Some(fix_xy(&b, 1_000, 10_000, 0)))
+            .horizon
+            .unwrap(),
+    ); // tracking
+    for t in [2_000u64, 3_000, 4_000] {
+        if let Some(h) = tick(&mut s, t, Some(fix_xy(&b, t, 10_000, 100_000))).horizon {
+            frames.push(h); // off_route / rerouting
+        }
+    }
+    let statuses: Vec<_> = frames.iter().map(|h| h.status).collect();
+    assert!(statuses.contains(&HorizonStatus::Uncertain));
+    assert!(statuses.contains(&HorizonStatus::Tracking));
+    assert!(statuses.contains(&HorizonStatus::Rerouting));
+    assert!(frames.iter().all(|h| h.next_complex_window.is_none()));
 }

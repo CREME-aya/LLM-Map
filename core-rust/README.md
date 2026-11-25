@@ -23,7 +23,7 @@ core-rust/
 | 6 | `dc_rank(req)` | Applies L1/L2 3-axis scoring and the detour cap (shared with #11) to `{facts[], policy, profile}` and returns a `RouteComparison` | `E_UNIMPLEMENTED` |
 | 7 | `dc_validate_override(s, req)` | Parses and validates the SLM's 1-line command code in Rust and returns `Applied` or `Rejected{code}` | SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only; everything else `E_UNIMPLEMENTED` |
 | 8 | `dc_trip_score(summary)` | Computes the trip score (long-distance/trip detection) from a trip summary | `E_UNIMPLEMENTED` |
-| 9 | `dc_route_commit(s, req)` | Loads the confirmed route body (the only place it is passed) | Implemented: `{expected_route_key: RouteKey\|null, bundle: RouteBundle}` — the guard `expected_route_key` (from `commit`, `null` for the first route) is re-checked first (`E_STALE`, nothing replaced), then the bundle is validated (`E_SCHEMA`) and indexed |
+| 9 | `dc_route_commit(s, req)` | Loads the confirmed route body (the only place it is passed) | Implemented: `{expected_route_key: RouteKey\|null, bundle: RouteBundle}` — the guard `expected_route_key` (from `commit`, `null` for the first route) is re-checked first (`E_STALE`, nothing replaced), then a replacement must carry `route_revision` = current + 1 (`E_STALE`; the first route: any), then the bundle is validated (`E_SCHEMA`) and indexed |
 | 10 | `dc_tick(s, tick)` | The only event entry point. Takes `TickInput` and returns `horizon?/voice_cmds/ui_cmds/planner_cmds/next_wake_mono_ms/log` | Search planner (incl. watchdog → `engine_stuck` detected from `now_mono_ms`), on-route alignment of `fix` (off-route → `reroute` start with the fix), remaining ETA, `ManeuverHorizon` (3 ahead, `frame_seq` only on change), time clamping and thermal collapse |
 | 11 | `dc_avoid_offer_eval(s, req)` | Decides whether to show an `AvoidOffer` from `{now_mono_ms, alt_facts}`, using the same detour-cap function as #6 | `E_UNIMPLEMENTED` |
 | 12 | `dc_exchange_validate(req)` | Validates `{kind, payload}` received via `exchange-v1` | `E_UNIMPLEMENTED` |
@@ -48,6 +48,10 @@ route's key when the search started (not the new route's); `dc_route_commit` re-
 returns `E_STALE` if the route was replaced meanwhile. An avoid-chip `ok` is never committed
 (it needs `dc_avoid_offer_eval` and consent; not wired yet). "経路を確認中" for a search in
 progress is `horizon.status` (`off_route` / `rerouting`), not a per-result UiCmd.
+A committable `ok` that returns while `uncertain` is held (one at most; a newer one replaces it,
+`discarded_hold_replaced`) and its `commit` is issued when the status is back to `tracking` /
+`off_route` / `rerouting` and the route_key still matches; after `commit_hold_ms` (config,
+10 s provisional) it is `discarded_hold_expired`. While `finished` it is `discarded_not_tracking`.
 ## Route bundle and on-route alignment (docs 04 §3.1)
 
 - `schema/route-bundle.schema.json` (mirror: `contracts::route`): `legs[{leg_index,

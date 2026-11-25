@@ -3,7 +3,7 @@
 use crate::align::{AlignConfig, AlignStats, Aligner, FixResult, Mode};
 use crate::command_line::{self, Command, JpRef};
 use crate::horizon::{arrived, HorizonFrames};
-use crate::planner::{Effects, PlanSearch, SearchLimits, SearchPlanner};
+use crate::planner::{CommitGate, Effects, PlanSearch, SearchLimits, SearchPlanner};
 use crate::route::LoadedRoute;
 use contracts::horizon::{HorizonStatus, ManeuverHorizon};
 use contracts::override_types::{RejectCode, ValidateOverrideRequest, ValidateOverrideResult};
@@ -41,6 +41,9 @@ pub struct SessionConfig {
     pub max_acc_cm: Option<u32>,
     /// Fix freshness limit (ms; 07 §1: 2.5 s).
     pub fix_stale_ms: u64,
+    /// How long a reroute / explicit-plan ok returned while `uncertain` is held for a
+    /// later commit (ms; 10 s, provisional: 04 §3 leaves it to Gate 7).
+    pub commit_hold_ms: u64,
 }
 
 impl Default for SessionConfig {
@@ -58,6 +61,7 @@ impl Default for SessionConfig {
             confirm_fixes: a.confirm_fixes,
             max_acc_cm: None,
             fix_stale_ms: a.fix_stale_ms,
+            commit_hold_ms: l.commit_hold_ms,
         }
     }
 }
@@ -90,6 +94,7 @@ impl SessionConfig {
             watchdog_long_ms: self.watchdog_long_ms,
             comparison_budget_short_ms: self.comparison_budget_short_ms,
             comparison_budget_long_ms: self.comparison_budget_long_ms,
+            commit_hold_ms: self.commit_hold_ms,
         }
     }
 }
@@ -219,11 +224,13 @@ impl Session {
 
     /// Reroute and ad-hoc explicit plan results may commit while tracking, off route,
     /// or rerouting (03 §3.1 / 04 §3). Without geometry there is no horizon to gate on.
-    fn commit_allowed(&self, now: u64) -> bool {
-        !matches!(
-            self.horizon_status(now),
-            Some(HorizonStatus::Uncertain | HorizonStatus::Finished)
-        )
+    /// `uncertain` holds a result (planner `release_held`), `finished` drops it.
+    fn commit_gate(&self, now: u64) -> CommitGate {
+        match self.horizon_status(now) {
+            Some(HorizonStatus::Uncertain) => CommitGate::Hold,
+            Some(HorizonStatus::Finished) => CommitGate::Denied,
+            _ => CommitGate::Allowed,
+        }
     }
 
     /// The remaining ETA the planner uses for the distance class of searches outside a
@@ -280,11 +287,32 @@ impl Session {
     /// replaced), validates and indexes the bundle (`E_SCHEMA`), then makes it the current
     /// route. Alignment starts over (status `uncertain` until a fix matches; the first fix
     /// is located through the spatial index). The next `dc_tick` returns the new horizon.
+    ///
+    /// Revision rule (task decision 2026-11-26, not written in docs): a replacement route
+    /// must carry `route_revision` = current + 1 (`E_STALE` otherwise); the first route of
+    /// the session may carry any revision. The guard compares the whole `RouteKey`
+    /// (`trip_id` / `trip_revision` / `route_revision` / `graph_version`, 04 §3).
+    /// TODO(04 §3 / 02 §2.1): docs say nothing about the new bundle's `trip_id`,
+    /// `trip_revision` or `graph_version` relative to the current route (e.g. a re-plan with
+    /// a new `trip_revision`, or plan searches with `route_revision` "0", 03 §3.1); they are
+    /// not checked.
     pub fn route_commit(
         &mut self,
         req: &RouteCommitRequest,
     ) -> Result<RouteCommitResult, CoreError> {
         self.check_route_guard(req.expected_route_key.as_ref())?;
+        if let Some(cur) = &self.current_route_key {
+            let want = cur.route_revision.0.checked_add(1);
+            if want != Some(req.bundle.route_key.route_revision.0) {
+                return Err(CoreError::new(
+                    ErrorCode::Stale,
+                    format!(
+                        "bundle route_revision {} != current {} + 1",
+                        req.bundle.route_key.route_revision.0, cur.route_revision.0
+                    ),
+                ));
+            }
+        }
         let loaded = LoadedRoute::load(&req.bundle)
             .map_err(|e| CoreError::new(ErrorCode::Schema, format!("route_bundle: {e}")))?;
         let result = RouteCommitResult {
@@ -403,7 +431,7 @@ impl Session {
         let now = self.clamp_now(input.now_mono_ms, &mut extra_log);
         // Status and remaining ETA as of `now`, before this tick's events / fix.
         self.refresh_eta(now);
-        let commit_allowed = self.commit_allowed(now);
+        let gate = self.commit_gate(now);
 
         let mut prev_at: Option<u64> = None;
         for ev in input.events {
@@ -438,7 +466,7 @@ impl Session {
                         outcome,
                         facts_ref.as_deref(),
                         self.current_route_key.as_ref(),
-                        commit_allowed,
+                        gate,
                         &mut fx,
                     );
                 }
@@ -459,6 +487,10 @@ impl Session {
             self.on_fix(now, fix, &mut fx, &mut extra_log);
         }
         self.planner.on_now(now, &mut fx);
+        // A result held while uncertain is committed once the session may commit again.
+        let gate = self.commit_gate(now);
+        self.planner
+            .release_held(now, gate, self.current_route_key.as_ref(), &mut fx);
         self.refresh_eta(now);
         self.finish(now, fx, extra_log)
     }

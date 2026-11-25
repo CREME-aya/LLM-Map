@@ -57,6 +57,8 @@ typedef struct dc_session dc_session;
           *      expected_route_key = guard: from planner_cmds commit (the current route's key when the
           *      search started), or null for the first route. Must equal the current route
           *      (null = none) -> otherwise E_STALE, nothing replaced (checked first).
+          *      A replacement bundle.route_key.route_revision must be current + 1 (the first
+          *      route: any) -> otherwise E_STALE, nothing replaced (checked second).
           *      bundle = {route_key (new), eta_ms, length_cm, legs[{leg_index, along_route_start_cm,
           *      length_cm, chunks[{first_shape_index, origin_e7{lat,lon}, k_lat_q16, k_lon_q16,
           *      points_cm[[dx,dy]], seg_along_cm[], bearing_cdeg[]}], edges[{edge_id, from_pt, to_pt,
