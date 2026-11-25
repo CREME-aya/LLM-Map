@@ -314,9 +314,9 @@ mod tick {
                     // with a bundle: a full RouteCommitRequest; without: the guard only
                     "route_commit" => {
                         let req = if step.get("bundle").is_some() {
-                            serde_json::json!({"route_key": step["route_key"], "bundle": step["bundle"]})
+                            serde_json::json!({"expected_route_key": step["expected_route_key"], "bundle": step["bundle"]})
                         } else {
-                            serde_json::json!({"route_key": step["route_key"], "bundle": minimal_bundle()})
+                            serde_json::json!({"expected_route_key": step["expected_route_key"], "bundle": minimal_bundle()})
                         };
                         let c = route_def("RouteCommitRequest");
                         assert_eq!(errors(&c, &req), Vec::<String>::new(), "{}", p.display());
@@ -800,22 +800,26 @@ fn rust_mirror_agrees_on_route_bundle() {
         }
     }
     assert!(n >= 5, "route-bundle fixtures found: {n}");
-    // RouteCommitRequest: route_key is required and nullable; unknown fields rejected.
+    // RouteCommitRequest: expected_route_key is required and nullable; unknown fields rejected.
     let req = route_def("RouteCommitRequest");
     let rk = serde_json::json!({"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"g"});
     for (v, ok) in [
         (
-            serde_json::json!({"route_key": null, "bundle": minimal_bundle()}),
+            serde_json::json!({"expected_route_key": null, "bundle": minimal_bundle()}),
             true,
         ),
         (
-            serde_json::json!({"route_key": rk, "bundle": minimal_bundle()}),
+            serde_json::json!({"expected_route_key": rk, "bundle": minimal_bundle()}),
             true,
         ),
         (serde_json::json!({"bundle": minimal_bundle()}), false),
-        (serde_json::json!({"route_key": null}), false),
         (
-            serde_json::json!({"route_key": null, "bundle": minimal_bundle(), "x": 1}),
+            serde_json::json!({"route_key": null, "bundle": minimal_bundle()}),
+            false,
+        ),
+        (serde_json::json!({"expected_route_key": null}), false),
+        (
+            serde_json::json!({"expected_route_key": null, "bundle": minimal_bundle(), "x": 1}),
             false,
         ),
     ] {

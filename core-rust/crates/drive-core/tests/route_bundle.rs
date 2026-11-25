@@ -26,7 +26,7 @@ fn min_bundle() -> RouteBundle {
 
 fn commit(s: &mut Session, guard: Option<RouteKey>, b: RouteBundle) -> Result<(), ErrorCode> {
     s.route_commit(&RouteCommitRequest {
-        route_key: guard,
+        expected_route_key: guard,
         bundle: b,
     })
     .map(|_| ())

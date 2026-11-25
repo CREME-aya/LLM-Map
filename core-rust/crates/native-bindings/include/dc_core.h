@@ -53,8 +53,8 @@ typedef struct dc_session dc_session;
           * (skeleton: SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only, else E_UNIMPLEMENTED) */
 /* 8  */ dc_out   dc_trip_score(dc_in trip_summary_json);                      /* TODO: E_UNIMPLEMENTED */
 /* 9  */ dc_out   dc_route_commit(dc_session* s, dc_in route_bundle_json);     /* route body only here */
-         /* in : {route_key: RouteKey|null, bundle: RouteBundle}   (schema/route-bundle.schema.json)
-          *      route_key = guard: from planner_cmds commit (the current route's key when the
+         /* in : {expected_route_key: RouteKey|null, bundle: RouteBundle}   (schema/route-bundle.schema.json)
+          *      expected_route_key = guard: from planner_cmds commit (the current route's key when the
           *      search started), or null for the first route. Must equal the current route
           *      (null = none) -> otherwise E_STALE, nothing replaced (checked first).
           *      bundle = {route_key (new), eta_ms, length_cm, legs[{leg_index, along_route_start_cm,

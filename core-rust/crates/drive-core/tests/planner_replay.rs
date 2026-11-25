@@ -60,7 +60,7 @@ fn start_fix(b: &RouteBundle, at_mono_ms: u64) -> Fix {
 fn commit(s: &mut Session, b: &RouteBundle) {
     let guard = s.route().map(|r| r.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        route_key: guard,
+        expected_route_key: guard,
         bundle: b.clone(),
     })
     .unwrap();
@@ -134,11 +134,12 @@ fn run_with_wakes(name: &str) -> (Session, Vec<TickOutput>, usize, Vec<Option<u6
                 let want = step["expect_error"].as_str();
                 let got = if step.get("bundle").is_some() {
                     let req: RouteCommitRequest = serde_json::from_value(serde_json::json!({
-                        "route_key": step["route_key"], "bundle": step["bundle"]}))
+                        "expected_route_key": step["expected_route_key"], "bundle": step["bundle"]}))
                     .unwrap();
                     s.route_commit(&req).err().map(|e| e.code.as_str())
                 } else {
-                    let key: RouteKey = serde_json::from_value(step["route_key"].clone()).unwrap();
+                    let key: RouteKey =
+                        serde_json::from_value(step["expected_route_key"].clone()).unwrap();
                     s.check_route_commit(&key).err().map(|e| e.code.as_str())
                 };
                 assert_eq!(got, want, "{name}: step {step}");

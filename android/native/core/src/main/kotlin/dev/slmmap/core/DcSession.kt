@@ -20,9 +20,9 @@ import java.io.Closeable
 //                    359.996° rounds to 36000 and wraps to 0; Rust rejects >= 36000 with E_SCHEMA)
 //     speed_cm_s   = Math.round(location.speed * 100.0)          (only if hasSpeed(); m/s -> cm/s)
 // - planner_cmds commit{req_id, route_key}: call routeCommit() with
-//   {route_key, bundle}: that route_key (the route's key when the search started) and the
+//   {expected_route_key, bundle}: that route_key (the route's key when the search started) and the
 //   route bundle of search req_id (schema/route-bundle.schema.json, built by C++). The first
-//   route of a session goes in with route_key = null. E_STALE means the route was replaced
+//   route of a session goes in with expected_route_key = null. E_STALE means the route was replaced
 //   meanwhile: drop the result (nothing was replaced).
 // - planner_cmds start{priority: reroute, fix}: Rust decided the vehicle left the route
 //   (on-route alignment is in Rust, docs 04 §3.1); search from that fix.

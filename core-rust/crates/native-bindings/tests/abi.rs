@@ -241,7 +241,7 @@ fn tick_input_fixtures_agree_with_dc_tick() {
     }
 }
 
-/// dc_route_commit `{route_key, bundle}`: the first route with `route_key: null`, then the
+/// dc_route_commit `{expected_route_key, bundle}`: the first route with `expected_route_key: null`, then the
 /// next dc_tick returns its horizon; a fix aligns it (tracking). A replacement needs the
 /// current key (`E_STALE` otherwise, nothing replaced); a broken bundle is `E_SCHEMA`.
 #[test]
@@ -254,7 +254,7 @@ fn route_commit_loads_the_bundle() {
         let rk = bundle["route_key"].clone();
         let mut s = ptr::null_mut();
         take(dc_session_new(din(b"{}"), &mut s));
-        let req = serde_json::json!({"route_key": null, "bundle": bundle});
+        let req = serde_json::json!({"expected_route_key": null, "bundle": bundle});
         let v = take(dc_route_commit(s, din(&serde_json::to_vec(&req).unwrap())));
         assert_eq!(v["ok"], true, "{v}");
         assert_eq!(v["data"]["route_key"], rk);
@@ -274,14 +274,14 @@ fn route_commit_loads_the_bundle() {
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
         // right guard, broken body → E_SCHEMA; wrong guard with a broken body → E_STALE
         let mut broken = req.clone();
-        broken["route_key"] = rk.clone();
+        broken["expected_route_key"] = rk.clone();
         broken["bundle"]["length_cm"] = 1.into();
         let v = take(dc_route_commit(
             s,
             din(&serde_json::to_vec(&broken).unwrap()),
         ));
         assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
-        broken["route_key"]["route_revision"] = "1".into();
+        broken["expected_route_key"]["route_revision"] = "1".into();
         let v = take(dc_route_commit(
             s,
             din(&serde_json::to_vec(&broken).unwrap()),
@@ -289,7 +289,7 @@ fn route_commit_loads_the_bundle() {
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
         // unknown field in the request
         let mut extra = req.clone();
-        extra["route_key"] = rk;
+        extra["expected_route_key"] = rk;
         extra["x"] = 1.into();
         let v = take(dc_route_commit(
             s,
@@ -310,10 +310,15 @@ fn route_commit_rechecks_route_key() {
         take(dc_session_new(din(b"{}"), &mut s));
         let v = take(dc_route_commit(
             s,
-            din(br#"{"route_key":{"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"}}"#),
+            din(br#"{"expected_route_key":{"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"}}"#),
         ));
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
-        for bad in [&b"{}"[..], b"{", br#"{"route_key":{"trip_id":"t"}}"#] {
+        for bad in [
+            &br#"{"route_key":null,"bundle":{}}"#[..],
+            &b"{}"[..],
+            b"{",
+            br#"{"expected_route_key":{"trip_id":"t"}}"#,
+        ] {
             let v = take(dc_route_commit(s, din(bad)));
             assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
         }

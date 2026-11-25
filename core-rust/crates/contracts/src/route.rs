@@ -15,9 +15,9 @@ use crate::common::{RouteKey, U64Str};
 use crate::horizon::Maneuver;
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// `dc_route_commit` input: `{ route_key, bundle }`.
+/// `dc_route_commit` input: `{ expected_route_key, bundle }`.
 ///
-/// `route_key` is the guard: the current route's key from `commit{req_id, route_key}` (the
+/// `expected_route_key` is the guard: the current route's key from `commit{req_id, route_key}` (the
 /// current route when the search started), or `null` when no route is committed yet (the
 /// first route of the session). It must equal the current route (`null` = none), otherwise
 /// `E_STALE` and nothing is replaced. `bundle.route_key` is the key of the new route.
@@ -25,7 +25,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct RouteCommitRequest {
     #[serde(deserialize_with = "crate::common::required_nullable")]
-    pub route_key: Option<RouteKey>,
+    pub expected_route_key: Option<RouteKey>,
     pub bundle: RouteBundle,
 }
 

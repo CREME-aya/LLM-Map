@@ -278,7 +278,7 @@ impl Session {
         }
     }
 
-    /// `dc_route_commit` body (04 §3.1): re-checks the guard `route_key` (`E_STALE`, nothing
+    /// `dc_route_commit` body (04 §3.1): re-checks the guard `expected_route_key` (`E_STALE`, nothing
     /// replaced), validates and indexes the bundle (`E_SCHEMA`), then makes it the current
     /// route. Alignment starts over (status `uncertain` until a fix matches; the first fix
     /// is located through the spatial index). The next `dc_tick` returns the new horizon.
@@ -286,7 +286,7 @@ impl Session {
         &mut self,
         req: &RouteCommitRequest,
     ) -> Result<RouteCommitResult, CoreError> {
-        self.check_route_guard(req.route_key.as_ref())?;
+        self.check_route_guard(req.expected_route_key.as_ref())?;
         let loaded = LoadedRoute::load(&req.bundle)
             .map_err(|e| CoreError::new(ErrorCode::Schema, format!("route_bundle: {e}")))?;
         let result = RouteCommitResult {

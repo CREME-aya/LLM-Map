@@ -98,8 +98,8 @@ pub fn plan_candidates(s: &mut Session, input: &[u8]) -> Vec<u8> {
     }
 }
 
-/// `dc_route_commit`: `{route_key, bundle}` (`contracts::route::RouteCommitRequest`).
-/// `route_key` (from `commit`, or `null` for the first route) is re-checked against the
+/// `dc_route_commit`: `{expected_route_key, bundle}` (`contracts::route::RouteCommitRequest`).
+/// `expected_route_key` (from `commit`, or `null` for the first route) is re-checked against the
 /// current route first (`E_STALE`, nothing replaced); then the bundle is validated
 /// (`E_SCHEMA`) and becomes the current route.
 pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
@@ -109,13 +109,18 @@ pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
     };
     // The guard is checked before the body so a late route is refused as E_STALE even if
     // its body would not parse.
-    let key = match v.get("route_key").cloned() {
+    let key = match v.get("expected_route_key").cloned() {
         Some(serde_json::Value::Null) => None,
         Some(k) => match serde_json::from_value::<RouteKey>(k) {
             Ok(k) => Some(k),
             Err(e) => return envelope_err(ErrorCode::Schema, &format!("route_commit: {e}")),
         },
-        None => return envelope_err(ErrorCode::Schema, "route_commit: missing field `route_key`"),
+        None => {
+            return envelope_err(
+                ErrorCode::Schema,
+                "route_commit: missing field `expected_route_key`",
+            )
+        }
     };
     if let Err(e) = s.check_route_guard(key.as_ref()) {
         return err(e);

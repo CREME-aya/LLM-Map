@@ -46,7 +46,7 @@ fn committed() -> (Session, RouteBundle) {
     let mut s = Session::new(SessionConfig::default());
     let b = main_line();
     s.route_commit(&RouteCommitRequest {
-        route_key: None,
+        expected_route_key: None,
         bundle: b.clone(),
     })
     .unwrap();
@@ -184,7 +184,7 @@ fn reroute_from_fix_then_commit() {
     }
     let b2: RouteBundle = serde_json::from_value(v).unwrap();
     s.route_commit(&RouteCommitRequest {
-        route_key: Some(b.route_key.clone()),
+        expected_route_key: Some(b.route_key.clone()),
         bundle: b2.clone(),
     })
     .unwrap();
@@ -337,7 +337,7 @@ fn group_limits_and_voice_lead_use_the_approach_edge() {
         }
         let mut s = Session::new(SessionConfig::default());
         s.route_commit(&RouteCommitRequest {
-            route_key: None,
+            expected_route_key: None,
             bundle: b.clone(),
         })
         .unwrap();
@@ -384,7 +384,7 @@ fn last_junction_expires_after_either_inclusive_limit() {
             ..Default::default()
         });
         s.route_commit(&RouteCommitRequest {
-            route_key: None,
+            expected_route_key: None,
             bundle: b.clone(),
         })
         .unwrap();

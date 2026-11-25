@@ -434,13 +434,13 @@ def gen_adhoc_distance_class():
         return {"at_mono_ms": t, "kind": "search_finished", "req_id": req, "route_key": rk,
                 "graph_version": GRAPH, "outcome": "error", "engine_ms": 1000}
     steps = [
-        {"step": "route_commit", "route_key": None, "bundle": a},
+        {"step": "route_commit", "expected_route_key": None, "bundle": a},
         {"step": "tick", "input": {"now_mono_ms": 900, "fix": start}},
         {"step": "request", "now_mono_ms": 1000, "priority": "reroute",
          "expect_starts": [{"req_id": "r1", "priority": "reroute", "distance_class": "short"}],
          "expect_watchdog": 6000},
         {"step": "tick", "input": {"now_mono_ms": 2000, "events": [fin(2000, "r1", rk_a)]}},
-        {"step": "route_commit", "route_key": rk_a, "bundle": b2},
+        {"step": "route_commit", "expected_route_key": rk_a, "bundle": b2},
         {"step": "tick", "input": {"now_mono_ms": 2900, "fix": dict(start, at_mono_ms=2900)}},
         {"step": "request", "now_mono_ms": 3000, "priority": "avoid_chip",
          "expect_starts": [{"req_id": "r2", "priority": "avoid_chip", "distance_class": "long"}],

@@ -11,15 +11,15 @@
       "maximum": 4294967295
     },
     "RouteCommitRequest": {
-      "description": "dc_route_commit input. route_key = guard: the current route's key from planner_cmds commit{req_id, route_key} (the current route when the search started), or null when no route is committed yet. Must equal the current route (null = none), otherwise E_STALE and nothing is replaced. bundle.route_key is the new route's key.",
+      "description": "dc_route_commit input. expected_route_key = guard: the current route's key from planner_cmds commit{req_id, route_key} (the current route when the search started), or null when no route is committed yet. Must equal the current route (null = none), otherwise E_STALE and nothing is replaced. bundle.route_key is the new route's key.",
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "route_key",
+        "expected_route_key",
         "bundle"
       ],
       "properties": {
-        "route_key": {
+        "expected_route_key": {
           "oneOf": [
             {
               "$ref": "common.schema.json#/$defs/RouteKey"
