@@ -20,8 +20,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// `expected_route_key` is the guard: the current route's key from `commit{req_id, route_key}` (the
 /// current route when the search started), or `null` when no route is committed yet (the
 /// first route of the session). It must equal the current route (`null` = none), otherwise
-/// `E_STALE` and nothing is replaced. `bundle.route_key` is the key of the new route; when it
-/// replaces a route its `route_revision` must be the current one + 1 (`E_STALE` otherwise).
+/// `E_STALE` and nothing is replaced. `bundle.route_key` (and every `ManeuverId.route_key` in
+/// the bundle) carries `route_revision` "0" (`E_SCHEMA` otherwise): Rust assigns the
+/// revision (current + 1, the first route: 1) and returns the new key in
+/// `RouteCommitResult.route_key`. While a route is current, the bundle's `trip_revision` /
+/// `graph_version` must equal it (`E_STALE` otherwise). Team decision 2026-11-26.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteCommitRequest {
@@ -34,7 +37,9 @@ pub struct RouteCommitRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteBundle {
-    /// Key of this (new) route.
+    /// Key of this (new) route, with `route_revision` "0" (Rust assigns the revision in
+    /// `dc_route_commit`; any other value is rejected → `E_SCHEMA`).
+    #[serde(deserialize_with = "bundle_route_key")]
     pub route_key: RouteKey,
     /// Total travel time (ms) = `cum_time_ms` of the last edge of the last leg.
     pub eta_ms: u32,
@@ -126,6 +131,17 @@ pub const EDGE_FLAG_FERRY: u32 = 1 << 3;
 /// 1.1132): keeps `(delta_e7 as i64) * k` well inside i64.
 pub const K_Q16_MAX: u32 = 1 << 20;
 
+fn bundle_route_key<'de, D: Deserializer<'de>>(d: D) -> Result<RouteKey, D::Error> {
+    let k = RouteKey::deserialize(d)?;
+    if k.route_revision.0 != 0 {
+        return Err(serde::de::Error::custom(format!(
+            "route_key.route_revision must be \"0\" (assigned by Rust), got {}",
+            k.route_revision.0
+        )));
+    }
+    Ok(k)
+}
+
 fn lat_e7<'de, D: Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
     let v = i32::deserialize(d)?;
     if !(-crate::tick::LAT_E7_MAX..=crate::tick::LAT_E7_MAX).contains(&v) {
@@ -142,7 +158,8 @@ fn lon_e7<'de, D: Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
     Ok(v)
 }
 
-/// `dc_route_commit` output data: the new current route and what was loaded.
+/// `dc_route_commit` output data: the new current route (with the revision Rust assigned)
+/// and what was loaded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteCommitResult {

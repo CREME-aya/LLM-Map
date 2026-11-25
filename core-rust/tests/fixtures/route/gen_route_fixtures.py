@@ -46,6 +46,17 @@ def route_key(rev, trip="t1", trip_rev="3"):
     return {"trip_id": trip, "trip_revision": trip_rev, "route_revision": str(rev), "graph_version": GRAPH}
 
 
+# A bundle passed to dc_route_commit always carries route_revision "0" (team decision
+# 2026-11-26): Rust assigns current + 1 (the first route of a session: 1) and rewrites
+# every route_key inside the bundle. BUNDLE_KEY is that "0" key.
+BUNDLE_KEY = route_key(0)
+
+
+def committed(rk, rev):
+    """The key Rust assigns when the bundle with key rk becomes route revision rev."""
+    return dict(rk, route_revision=str(rev))
+
+
 def evidence_unknown():
     return {"kind": "unknown", "reason": "missing"}
 
@@ -220,7 +231,7 @@ def straight(length_m, step_m=250.0):
 # ---------------------------------------------------------------------------------------
 def gen_straight_base():
     """Base route for tests that only need a route with a known remaining ETA."""
-    rk = route_key(7)
+    rk = BUNDLE_KEY
     pts = straight(3000.0)
     b = build_bundle(rk, [{"pts": pts, "maneuvers": [(len(pts) - 1, "arrive")]}], speed_mps=10.0)
     write("straight-3km.json", {
@@ -231,7 +242,7 @@ def gen_straight_base():
 
 def gen_chunk_boundary():
     """Two legs, several chunks, bends; continuous along distance across boundaries."""
-    rk = route_key(7)
+    rk = BUNDLE_KEY
     leg0 = densify([(0, 0), (1200, 900), (2400, 900), (3000, 2200)], 100.0)
     leg1 = densify([(3000, 2200), (4200, 2600), (5200, 1800)], 100.0)
     # maneuvers at the bends (shape indices of the vertices)
@@ -261,7 +272,7 @@ def gen_chunk_boundary():
     })
 
 
-def main_line_bundle(rev=7, length_m=4000.0, maneuver_xs=(1500.0, 2500.0, 3500.0)):
+def main_line_bundle(rev=0, length_m=4000.0, maneuver_xs=(1500.0, 2500.0, 3500.0)):
     rk = route_key(rev)
     pts = straight(length_m, 100.0)
     mans = [(int(x // 100), arrow) for x, arrow in zip(maneuver_xs, ("left", "right", "left"))]
@@ -372,7 +383,7 @@ def gen_off_lowacc_alternating():
 
 
 def gen_parallel_ambiguous():
-    rk = route_key(7)
+    rk = BUNDLE_KEY
     # out on y=0 to x=2000, U-turn 20 m north, back west on y=20 (two carriageways 20 m apart)
     pts = densify([(0, 0), (2000, 0), (2000, 20), (0, 20)], 100.0)
     mans = [(20, "u_turn_left"), (len(pts) - 1, "arrive")]
@@ -391,7 +402,7 @@ def gen_parallel_ambiguous():
 
 
 def gen_tunnel():
-    rk = route_key(7)
+    rk = BUNDLE_KEY
     pts = straight(6000.0, 100.0)
     mans = [(25, "left"), (50, "right"), (55, "keep_left"), (len(pts) - 1, "arrive")]
     b = build_bundle(rk, [{"pts": pts, "maneuvers": mans}], speed_mps=25.0, pts_per_edge=5,
@@ -427,9 +438,9 @@ def gen_adhoc_distance_class():
         pts = straight(3000.0)
         return build_bundle(route_key(rev), [{"pts": pts, "maneuvers": [(len(pts) - 1, "arrive")]}],
                             speed_mps=10.0, eta_ms=eta_ms)
-    a, b2 = bundle(7, 1_799_000), bundle(8, 1_800_000)
+    a, b2 = bundle(0, 1_799_000), bundle(0, 1_800_000)
     start = fix(900, 0.0, 0.0, 5.0, 90.0, 0.0)
-    rk_a, rk_b = a["route_key"], b2["route_key"]
+    rk_a, rk_b = committed(a["route_key"], 1), committed(b2["route_key"], 2)
     def fin(t, req, rk):
         return {"at_mono_ms": t, "kind": "search_finished", "req_id": req, "route_key": rk,
                 "graph_version": GRAPH, "outcome": "error", "engine_ms": 1000}
@@ -473,8 +484,8 @@ def _parallel_bundle(rev):
 def _held_reroute_steps():
     """Shared start of the hold fixtures: tracking, off-route -> reroute r1, then an
     ambiguous fix between the parallel carriageways -> uncertain while r1 runs."""
-    a = _parallel_bundle(7)
-    rk_a = a["route_key"]
+    a = _parallel_bundle(0)
+    rk_a = committed(a["route_key"], 1)
     steps = [
         {"step": "route_commit", "expected_route_key": None, "bundle": a},
         {"step": "tick", "input": {"now_mono_ms": 1000, "fix": fix(1000, 100.0, 0.0, 5.0, 90.0, 10.0)}},
@@ -494,7 +505,7 @@ def _held_reroute_steps():
 def gen_reroute_held_uncertain():
     """Planner fixture (tick/ dir): a reroute ok returned while uncertain is held."""
     a, rk_a, steps = _held_reroute_steps()
-    b = _parallel_bundle(8)
+    b = _parallel_bundle(0)
     steps += [
         {"step": "tick", "input": {"now_mono_ms": 6500}, "expect_cmds": []},
         # moving east at 10 m/s: the bearing decides -> tracking -> the held commit
@@ -505,7 +516,7 @@ def gen_reroute_held_uncertain():
          "expect_cmds": []},
     ]
     write("gate7-reroute-held-uncertain.json", {
-        "description": "Gate 7 / 04 §3 (hold while uncertain): parallel carriageways 20 m apart (as gate7-parallel-ambiguous). Tracking at 1000; three valid fixes 1 km off confirm off-route and start the reroute r1 (long: the remaining ETA is invalidated). At 5000 a fix between both carriageways at 0.5 m/s is ambiguous -> uncertain while r1 runs. r1 returns ok at 6000: not committed and not discarded but held (commit_held_uncertain), no second reroute starts. At 7000 the vehicle moves east at 10 m/s -> tracking -> commit{r1, route_key at the start (rev 7)}, once. Kotlin's dc_route_commit(expected rev 7, bundle rev 8 = current + 1) succeeds.",
+        "description": "Gate 7 / 04 §3 (hold while uncertain): parallel carriageways 20 m apart (as gate7-parallel-ambiguous). Tracking at 1000; three valid fixes 1 km off confirm off-route and start the reroute r1 (long: the remaining ETA is invalidated). At 5000 a fix between both carriageways at 0.5 m/s is ambiguous -> uncertain while r1 runs. r1 returns ok at 6000: not committed and not discarded but held (commit_held_uncertain), no second reroute starts. At 7000 the vehicle moves east at 10 m/s -> tracking -> commit{r1, route_key at the start (rev 1)}, once. Kotlin's dc_route_commit(expected rev 1, bundle rev \"0\") succeeds and Rust assigns rev 2.",
         "route_key": rk_a,
         "steps": steps,
     }, directory=TICK_DIR)
@@ -529,28 +540,35 @@ def gen_reroute_hold_expired():
 
 
 def gen_commit_route_revision():
-    """Planner fixture (tick/ dir): dc_route_commit route_revision = current + 1."""
-    def bundle(rev):
+    """Planner fixture (tick/ dir): dc_route_commit assigns route_revision (current + 1)."""
+    def bundle(rev=0, trip_rev="3", graph=GRAPH):
         pts = straight(3000.0)
-        return build_bundle(route_key(rev), [{"pts": pts, "maneuvers": [(len(pts) - 1, "arrive")]}],
+        rk = dict(route_key(rev, trip_rev=trip_rev), graph_version=graph)
+        return build_bundle(rk, [{"pts": pts, "maneuvers": [(len(pts) - 1, "arrive")]}],
                             speed_mps=10.0)
-    a = bundle(7)
-    rk_a = a["route_key"]
+    a = bundle()
+    rk_a = committed(a["route_key"], 1)
     rk_other_trip = dict(rk_a, trip_revision="4")
     rk_other_graph = dict(rk_a, graph_version="jp-2026.12.0")
     steps = [
-        {"step": "route_commit", "expected_route_key": None, "bundle": a},
-        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(7), "expect_error": "E_STALE"},
-        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(9), "expect_error": "E_STALE"},
-        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(6), "expect_error": "E_STALE"},
-        {"step": "route_commit", "expected_route_key": rk_other_trip, "bundle": bundle(8), "expect_error": "E_STALE"},
-        {"step": "route_commit", "expected_route_key": rk_other_graph, "bundle": bundle(8), "expect_error": "E_STALE"},
+        # the first route: rev "0" in, rev 1 assigned
+        {"step": "route_commit", "expected_route_key": None, "bundle": a, "expect_route_key": rk_a},
+        # a bundle must carry "0": any other revision is E_SCHEMA (nothing replaced)
+        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(2), "expect_error": "E_SCHEMA"},
+        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(1), "expect_error": "E_SCHEMA"},
+        # bundle trip_revision / graph_version must equal the current route's
+        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(trip_rev="4"), "expect_error": "E_STALE"},
+        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(graph="jp-2026.12.0"), "expect_error": "E_STALE"},
+        # the guard compares the whole RouteKey
+        {"step": "route_commit", "expected_route_key": rk_other_trip, "bundle": bundle(), "expect_error": "E_STALE"},
+        {"step": "route_commit", "expected_route_key": rk_other_graph, "bundle": bundle(), "expect_error": "E_STALE"},
         {"step": "tick", "input": {"now_mono_ms": 1000, "fix": fix(1000, 100.0, 0.0, 5.0, 90.0, 10.0)}},
-        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(8)},
+        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(),
+         "expect_route_key": committed(a["route_key"], 2)},
         {"step": "tick", "input": {"now_mono_ms": 2000, "fix": fix(2000, 110.0, 0.0, 5.0, 90.0, 10.0)}},
     ]
     write("gate7-commit-route-revision.json", {
-        "description": "Gate 7 (commit versioning): the first route (rev 7) may carry any revision. A replacement must carry route_revision = current + 1: rev 7 (same), 9 (skipped) and 6 (older) are E_STALE and nothing is replaced. The guard expected_route_key compares the whole RouteKey (04 §3): a guard differing only in trip_revision or graph_version is E_STALE. rev 8 with the right guard replaces the route; the next horizon carries rev 8. The rule 'current + 1' is a task decision (2026-11-26), not written in docs.",
+        "description": "Gate 7 (commit versioning, team decision 2026-11-26): every bundle carries route_revision \"0\" and Rust assigns current + 1 (the first route: 1), rewriting the bundle's route_key and every ManeuverId.route_key. A bundle with another revision (2, 1) is E_SCHEMA. While a route is current, a bundle whose trip_revision or graph_version differs from it is E_STALE. The guard expected_route_key compares the whole RouteKey (04 §3): a guard differing only in trip_revision or graph_version is E_STALE. Nothing is replaced on any error. The valid replacement becomes rev 2; the next horizon carries rev 2.",
         "route_key": rk_a,
         "steps": steps,
     }, directory=TICK_DIR)

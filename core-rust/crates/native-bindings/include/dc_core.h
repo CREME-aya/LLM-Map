@@ -57,13 +57,16 @@ typedef struct dc_session dc_session;
           *      expected_route_key = guard: from planner_cmds commit (the current route's key when the
           *      search started), or null for the first route. Must equal the current route
           *      (null = none) -> otherwise E_STALE, nothing replaced (checked first).
-          *      A replacement bundle.route_key.route_revision must be current + 1 (the first
-          *      route: any) -> otherwise E_STALE, nothing replaced (checked second).
-          *      bundle = {route_key (new), eta_ms, length_cm, legs[{leg_index, along_route_start_cm,
+          *      bundle.route_key.route_revision (and every ManeuverId.route_key) must be "0"
+          *      -> otherwise E_SCHEMA. Rust assigns current + 1 (the first route: 1) and
+          *      rewrites the bundle's route_keys to it. While a route is current, the bundle's
+          *      trip_revision / graph_version must equal it -> otherwise E_STALE.
+          *      Nothing is replaced on any error.
+          *      bundle = {route_key (new, route_revision "0"), eta_ms, length_cm, legs[{leg_index, along_route_start_cm,
           *      length_cm, chunks[{first_shape_index, origin_e7{lat,lon}, k_lat_q16, k_lon_q16,
           *      points_cm[[dx,dy]], seg_along_cm[], bearing_cdeg[]}], edges[{edge_id, from_pt, to_pt,
           *      length_cm, cum_time_ms, flags}], maneuvers[Maneuver]}]}; invalid -> E_SCHEMA.
-          * out: {route_key, legs, segments, maneuvers}. The next dc_tick returns the new horizon
+          * out: {route_key (with the assigned route_revision), legs, segments, maneuvers}. The next dc_tick returns the new horizon
           *      (uncertain until a fix is aligned on the new route). */
 /* 10 */ dc_out   dc_tick(dc_session* s, dc_in tick_json);
          /* dc_tick v2:

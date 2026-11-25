@@ -100,8 +100,10 @@ pub fn plan_candidates(s: &mut Session, input: &[u8]) -> Vec<u8> {
 
 /// `dc_route_commit`: `{expected_route_key, bundle}` (`contracts::route::RouteCommitRequest`).
 /// `expected_route_key` (from `commit`, or `null` for the first route) is re-checked against the
-/// current route first (`E_STALE`, nothing replaced); then the bundle is validated
-/// (`E_SCHEMA`) and becomes the current route.
+/// current route first (`E_STALE`, nothing replaced); then the request is parsed
+/// (`E_SCHEMA`, including a bundle `route_revision` other than "0"), and
+/// `Session::route_commit` checks trip / graph (`E_STALE`) and the bundle body (`E_SCHEMA`),
+/// assigns the revision (current + 1) and makes it the current route.
 pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
     let v: serde_json::Value = match serde_json::from_slice(input) {
         Ok(v) => v,

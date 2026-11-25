@@ -42,6 +42,19 @@ fn tick(s: &mut Session, now: u64, fix: Option<Fix>) -> TickOutput {
     })
 }
 
+/// `b` with the route key Rust assigned on commit (route and every ManeuverId), i.e. the
+/// bundle as the session now holds it.
+fn as_committed(s: &Session, mut b: RouteBundle) -> RouteBundle {
+    let key = s.route().unwrap().route_key.clone();
+    for leg in &mut b.legs {
+        for m in &mut leg.maneuvers {
+            m.id.route_key = key.clone();
+        }
+    }
+    b.route_key = key;
+    b
+}
+
 fn committed() -> (Session, RouteBundle) {
     let mut s = Session::new(SessionConfig::default());
     let b = main_line();
@@ -50,6 +63,8 @@ fn committed() -> (Session, RouteBundle) {
         bundle: b.clone(),
     })
     .unwrap();
+    let b = as_committed(&s, b);
+    assert_eq!(b.route_key.route_revision.0, 1, "the first route is rev 1");
     (s, b)
 }
 
@@ -190,17 +205,16 @@ fn reroute_from_fix_then_commit() {
         }]
     );
     // Kotlin commits the new route: horizon of the new route, uncertain until a fix
-    let mut v = serde_json::to_value(&b).unwrap();
-    v["route_key"]["route_revision"] = "8".into();
-    for m in v["legs"][0]["maneuvers"].as_array_mut().unwrap() {
-        m["id"]["route_key"]["route_revision"] = "8".into();
-    }
-    let b2: RouteBundle = serde_json::from_value(v).unwrap();
-    s.route_commit(&RouteCommitRequest {
-        expected_route_key: Some(b.route_key.clone()),
-        bundle: b2.clone(),
-    })
-    .unwrap();
+    let b2 = main_line();
+    let r = s
+        .route_commit(&RouteCommitRequest {
+            expected_route_key: Some(b.route_key.clone()),
+            bundle: b2.clone(),
+        })
+        .unwrap();
+    let b2 = as_committed(&s, b2);
+    assert_eq!(r.route_key, b2.route_key);
+    assert_eq!(b2.route_key.route_revision.0, 2, "current + 1");
     let h = tick(&mut s, 6_500, None).horizon.unwrap();
     assert_eq!(h.route_key, b2.route_key);
     assert_eq!(h.status, HorizonStatus::Uncertain);
@@ -307,6 +321,7 @@ fn hold_limit_is_configurable() {
         bundle: b.clone(),
     })
     .unwrap();
+    let b = as_committed(&s, b);
     tick(&mut s, 0, Some(fix_xy(&b, 0, 10_000, 0)));
     s.request_search(100, SearchPriority::ExplicitPlan).unwrap();
     s.tick(finished("r1", &b.route_key, 3_000));
@@ -338,18 +353,13 @@ fn newer_ok_replaces_the_held_one() {
 fn held_result_for_a_replaced_route_is_not_committed() {
     let (mut s, b) = uncertain_with_search();
     s.tick(finished("r1", &b.route_key, 3_000));
-    let mut b2 = b.clone();
-    b2.route_key.route_revision = contracts::U64Str(b.route_key.route_revision.0 + 1);
-    for leg in &mut b2.legs {
-        for m in &mut leg.maneuvers {
-            m.id.route_key = b2.route_key.clone();
-        }
-    }
+    let b2 = main_line();
     s.route_commit(&RouteCommitRequest {
         expected_route_key: Some(b.route_key.clone()),
         bundle: b2.clone(),
     })
     .unwrap();
+    let b2 = as_committed(&s, b2);
     assert!(s.planner().held().is_none());
     let o = tick(&mut s, 4_000, Some(fix_xy(&b2, 4_000, 16_000, 0)));
     assert!(commit_of(&o).is_empty());

@@ -132,11 +132,31 @@ fn run_with_wakes(name: &str) -> (Session, Vec<TickOutput>, usize, Vec<Option<u6
             // route_key re-check of a `commit`.
             "route_commit" => {
                 let want = step["expect_error"].as_str();
-                let got = if step.get("bundle").is_some() {
-                    let req: RouteCommitRequest = serde_json::from_value(serde_json::json!({
-                        "expected_route_key": step["expected_route_key"], "bundle": step["bundle"]}))
-                    .unwrap();
-                    s.route_commit(&req).err().map(|e| e.code.as_str())
+                // A request serde rejects (e.g. bundle route_revision != "0") is E_SCHEMA,
+                // as dc_route_commit reports it.
+                let parsed = serde_json::from_value::<RouteCommitRequest>(serde_json::json!({
+                    "expected_route_key": step["expected_route_key"], "bundle": step["bundle"]}));
+                let got = if let (Some(_), Err(_)) = (step.get("bundle"), &parsed) {
+                    Some("E_SCHEMA")
+                } else if let (Some(_), Ok(req)) = (step.get("bundle"), &parsed) {
+                    match s.route_commit(req) {
+                        Ok(r) => {
+                            // the key Rust assigned (rev current + 1), when the fixture says
+                            if let Some(k) = step.get("expect_route_key") {
+                                let k: RouteKey = serde_json::from_value(k.clone()).unwrap();
+                                assert_eq!(r.route_key, k, "{name}: step {step}");
+                                assert_eq!(s.route().unwrap().route_key, k);
+                                assert!(s
+                                    .route()
+                                    .unwrap()
+                                    .maneuvers
+                                    .iter()
+                                    .all(|m| m.id.route_key == k));
+                            }
+                            None
+                        }
+                        Err(e) => Some(e.code.as_str()),
+                    }
                 } else {
                     let key: RouteKey =
                         serde_json::from_value(step["expected_route_key"].clone()).unwrap();
@@ -463,12 +483,22 @@ fn session_with_route() -> Session {
     s
 }
 
+/// `test_rk()` as a bundle carries it: route_revision "0" (Rust assigns 1 on the first
+/// commit, so the committed route is `test_rk()`).
+fn bundle_rk() -> RouteKey {
+    RouteKey {
+        route_revision: contracts::U64Str(0),
+        ..test_rk()
+    }
+}
+
 /// A committed route of `test_rk()` whose remaining ETA at `now = 0` is `eta_s` (matched
 /// at its start), or unknown (`None`: committed, no fix yet → uncertain).
 fn session_tracking(eta_s: Option<u64>) -> Session {
     let mut s = Session::new(SessionConfig::default());
-    let b = straight_bundle(&test_rk(), (eta_s.unwrap_or(600) * 1000) as u32);
+    let b = straight_bundle(&bundle_rk(), (eta_s.unwrap_or(600) * 1000) as u32);
     commit(&mut s, &b);
+    assert_eq!(s.route().unwrap().route_key, test_rk());
     if eta_s.is_some() {
         tick_fix(&mut s, 0, start_fix(&b, 0));
     }
@@ -767,7 +797,7 @@ fn status_of(s: &Session, now: u64) -> Option<contracts::horizon::HorizonStatus>
 
 /// Gate 7 / 04 §3: a reroute ok returned while uncertain (ambiguous parallel carriageways)
 /// is held and committed once tracking, with the start-time route_key; Kotlin's
-/// dc_route_commit with rev current + 1 then succeeds. See
+/// dc_route_commit (bundle rev "0") then succeeds and Rust assigns rev 2. See
 /// tests/fixtures/tick/gate7-reroute-held-uncertain.json.
 #[test]
 fn reroute_held_while_uncertain_commits_on_tracking() {
@@ -785,10 +815,10 @@ fn reroute_held_while_uncertain_commits_on_tracking() {
     assert!(o[6].next_wake_mono_ms.is_some_and(|w| w <= 16_001));
     let l = o[8].log.iter().find(|l| l.what == "commit_issued").unwrap();
     assert_eq!(l.detail.as_deref(), Some("from_hold"));
-    assert_eq!(s.route().unwrap().route_key.route_revision.0, 8);
+    assert_eq!(s.route().unwrap().route_key.route_revision.0, 2);
     assert_eq!(
         o[10].horizon.as_ref().unwrap().route_key.route_revision.0,
-        8
+        2
     );
     assert_eq!(status_of(&s, 8_000), Some(HorizonStatus::Tracking));
 }
@@ -809,13 +839,20 @@ fn reroute_hold_expires_after_10s() {
         .all(|c| !matches!(c, PlannerCmd::Commit { .. })));
 }
 
-/// Gate 7 (commit versioning): route_revision = current + 1; guard mismatches in
-/// trip_revision / graph_version are E_STALE. See gate7-commit-route-revision.json.
+/// Gate 7 (commit versioning, team decision 2026-11-26): bundles carry route_revision "0"
+/// (else E_SCHEMA) and Rust assigns current + 1 (first route: 1); a bundle trip_revision /
+/// graph_version differing from the current route, and guard mismatches, are E_STALE.
+/// See gate7-commit-route-revision.json.
 #[test]
-fn commit_route_revision_must_be_current_plus_one() {
+fn commit_assigns_route_revision_current_plus_one() {
     let (s, o, _) = run("gate7-commit-route-revision.json");
-    assert_eq!(s.route().unwrap().route_key.route_revision.0, 8);
-    // the tick right after the refused commits still shows rev 7
-    assert_eq!(o[6].horizon.as_ref().unwrap().route_key.route_revision.0, 7);
-    assert_eq!(o[8].horizon.as_ref().unwrap().route_key.route_revision.0, 8);
+    assert_eq!(s.route().unwrap().route_key.route_revision.0, 2);
+    // the tick right after the refused commits still shows rev 1
+    assert_eq!(o[7].horizon.as_ref().unwrap().route_key.route_revision.0, 1);
+    let h = o[9].horizon.as_ref().unwrap();
+    assert_eq!(h.route_key.route_revision.0, 2);
+    assert!(h
+        .upcoming
+        .iter()
+        .all(|e| e.maneuver.id.route_key == h.route_key));
 }

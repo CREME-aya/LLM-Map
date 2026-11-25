@@ -327,6 +327,15 @@ impl LoadedRoute {
         Ok(route)
     }
 
+    /// Replaces the route key of the route and of every `ManeuverId` (the revision Rust
+    /// assigns in `dc_route_commit`). Group heads are indices, so `group_id`s follow.
+    pub fn assign_route_key(&mut self, key: RouteKey) {
+        for m in &mut self.maneuvers {
+            m.id.route_key = key.clone();
+        }
+        self.route_key = key;
+    }
+
     pub(crate) fn motorway_approach(&self, along: u32) -> bool {
         let edge = self.edges.partition_point(|e| e.along_end < along);
         self.edges

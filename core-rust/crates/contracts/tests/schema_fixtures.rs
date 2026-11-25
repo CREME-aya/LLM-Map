@@ -319,9 +319,18 @@ mod tick {
                             serde_json::json!({"expected_route_key": step["expected_route_key"], "bundle": minimal_bundle()})
                         };
                         let c = route_def("RouteCommitRequest");
-                        assert_eq!(errors(&c, &req), Vec::<String>::new(), "{}", p.display());
-                        serde_json::from_value::<contracts::route::RouteCommitRequest>(req)
-                            .unwrap();
+                        // E_SCHEMA steps (e.g. a bundle route_revision other than "0") must
+                        // fail both the schema and serde
+                        let parsed = serde_json::from_value::<contracts::route::RouteCommitRequest>(
+                            req.clone(),
+                        );
+                        if step["expect_error"] == "E_SCHEMA" {
+                            assert!(!c.is_valid(&req), "{}", p.display());
+                            assert!(parsed.is_err(), "{}", p.display());
+                        } else {
+                            assert_eq!(errors(&c, &req), Vec::<String>::new(), "{}", p.display());
+                            parsed.unwrap();
+                        }
                     }
                     "plan_candidates" => {
                         let snap = compile("trip-plan-snapshot");

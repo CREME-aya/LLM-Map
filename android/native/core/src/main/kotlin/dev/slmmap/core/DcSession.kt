@@ -22,9 +22,11 @@ import java.io.Closeable
 // - planner_cmds commit{req_id, route_key}: call routeCommit() with
 //   {expected_route_key, bundle}: that route_key (the route's key when the search started) and the
 //   route bundle of search req_id (schema/route-bundle.schema.json, built by C++). The first
-//   route of a session goes in with expected_route_key = null. E_STALE means the route was replaced
-//   meanwhile, or the bundle's route_revision is not the current one + 1: drop the result
-//   (nothing was replaced).
+//   route of a session goes in with expected_route_key = null. The bundle always carries
+//   route_revision "0": Rust assigns current + 1 (first route: 1) and returns the new key in the
+//   result's route_key (use that key from then on). E_STALE means the route was replaced
+//   meanwhile, or the bundle's trip_revision / graph_version differ from the current route:
+//   drop the result (nothing was replaced). A non-"0" route_revision is E_SCHEMA.
 // - planner_cmds start{priority: reroute, fix}: Rust decided the vehicle left the route
 //   (on-route alignment is in Rust, docs 04 §3.1); search from that fix.
 // - "経路を確認中" is horizon.status off_route / rerouting; there is no show_checking_route UiCmd.

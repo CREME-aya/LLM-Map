@@ -288,33 +288,66 @@ impl Session {
     /// route. Alignment starts over (status `uncertain` until a fix matches; the first fix
     /// is located through the spatial index). The next `dc_tick` returns the new horizon.
     ///
-    /// Revision rule (task decision 2026-11-26, not written in docs): a replacement route
-    /// must carry `route_revision` = current + 1 (`E_STALE` otherwise); the first route of
-    /// the session may carry any revision. The guard compares the whole `RouteKey`
-    /// (`trip_id` / `trip_revision` / `route_revision` / `graph_version`, 04 §3).
-    /// TODO(04 §3 / 02 §2.1): docs say nothing about the new bundle's `trip_id`,
-    /// `trip_revision` or `graph_version` relative to the current route (e.g. a re-plan with
-    /// a new `trip_revision`, or plan searches with `route_revision` "0", 03 §3.1); they are
-    /// not checked.
+    /// Revision rule (team decision 2026-11-26; 02 §2.1 still says the bundle carries
+    /// current + 1): the bundle always carries `route_revision` "0" (`E_SCHEMA` otherwise)
+    /// and Rust assigns current + 1 (the first route of the session: 1). The assigned key
+    /// replaces the bundle's `route_key` and every `ManeuverId.route_key` in it, and is
+    /// returned in the result. While a route is current, the bundle's `trip_revision` and
+    /// `graph_version` must equal the current route's (`E_STALE` otherwise; 06 §3: the
+    /// route in progress stays pinned to its graph version). Order of checks: guard
+    /// (`E_STALE`), revision "0" (`E_SCHEMA`), trip / graph (`E_STALE`), bundle body
+    /// (`E_SCHEMA`); nothing is replaced on any error.
+    /// TODO(02 §2.1 / 04 §3): `trip_id` of the bundle is not compared with the current
+    /// route (only the guard compares it); a re-plan with a new `trip_revision` cannot
+    /// replace the current route through this entry.
     pub fn route_commit(
         &mut self,
         req: &RouteCommitRequest,
     ) -> Result<RouteCommitResult, CoreError> {
         self.check_route_guard(req.expected_route_key.as_ref())?;
-        if let Some(cur) = &self.current_route_key {
-            let want = cur.route_revision.0.checked_add(1);
-            if want != Some(req.bundle.route_key.route_revision.0) {
-                return Err(CoreError::new(
-                    ErrorCode::Stale,
-                    format!(
-                        "bundle route_revision {} != current {} + 1",
-                        req.bundle.route_key.route_revision.0, cur.route_revision.0
-                    ),
-                ));
-            }
+        let bundle_key = &req.bundle.route_key;
+        if bundle_key.route_revision.0 != 0 {
+            return Err(CoreError::new(
+                ErrorCode::Schema,
+                format!(
+                    "bundle route_revision must be \"0\" (Rust assigns it), got {}",
+                    bundle_key.route_revision.0
+                ),
+            ));
         }
-        let loaded = LoadedRoute::load(&req.bundle)
+        let revision = match &self.current_route_key {
+            None => 1,
+            Some(cur) => {
+                if bundle_key.trip_revision != cur.trip_revision {
+                    return Err(CoreError::new(
+                        ErrorCode::Stale,
+                        format!(
+                            "bundle trip_revision {} != current {}",
+                            bundle_key.trip_revision.0, cur.trip_revision.0
+                        ),
+                    ));
+                }
+                if bundle_key.graph_version != cur.graph_version {
+                    return Err(CoreError::new(
+                        ErrorCode::Stale,
+                        format!(
+                            "bundle graph_version {} != current {}",
+                            bundle_key.graph_version, cur.graph_version
+                        ),
+                    ));
+                }
+                cur.route_revision
+                    .0
+                    .checked_add(1)
+                    .ok_or_else(|| CoreError::new(ErrorCode::Stale, "route_revision exhausted"))?
+            }
+        };
+        let mut loaded = LoadedRoute::load(&req.bundle)
             .map_err(|e| CoreError::new(ErrorCode::Schema, format!("route_bundle: {e}")))?;
+        loaded.assign_route_key(RouteKey {
+            route_revision: contracts::U64Str(revision),
+            ..bundle_key.clone()
+        });
         let result = RouteCommitResult {
             route_key: loaded.route_key.clone(),
             legs: req.bundle.legs.len() as u32,
