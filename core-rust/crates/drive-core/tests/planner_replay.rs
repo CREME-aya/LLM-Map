@@ -760,3 +760,62 @@ fn no_commit_for_error_cancelled_or_stale() {
     s.set_current_route_key(rk(2));
     assert!(s.tick(fin("ok", 1)).planner_cmds.is_empty());
 }
+
+fn status_of(s: &Session, now: u64) -> Option<contracts::horizon::HorizonStatus> {
+    s.horizon_status(now)
+}
+
+/// Gate 7 / 04 §3: a reroute ok returned while uncertain (ambiguous parallel carriageways)
+/// is held and committed once tracking, with the start-time route_key; Kotlin's
+/// dc_route_commit with rev current + 1 then succeeds. See
+/// tests/fixtures/tick/gate7-reroute-held-uncertain.json.
+#[test]
+fn reroute_held_while_uncertain_commits_on_tracking() {
+    use contracts::horizon::HorizonStatus;
+    let (s, o, max_running) = run("gate7-reroute-held-uncertain.json");
+    assert_eq!(max_running, 1);
+    // [0] commit A, [1] tracking, [2..=4] off → r1, [5] ambiguous, [6] r1 ok, [7] wait,
+    // [8] tracking → commit, [9] route_commit B, [10] tick on B
+    assert!(whats(&o[4]).contains(&"off_route_confirmed"));
+    assert!(whats(&o[5]).contains(&"align_ambiguous"));
+    assert!(whats(&o[6]).contains(&"commit_held_uncertain"));
+    assert!(!whats(&o[6]).contains(&"discarded_not_tracking"));
+    // the held reroute counts as the reroute: no second start while held
+    assert!(o[5..8].iter().all(|x| x.planner_cmds.is_empty()));
+    assert!(o[6].next_wake_mono_ms.is_some_and(|w| w <= 16_001));
+    let l = o[8].log.iter().find(|l| l.what == "commit_issued").unwrap();
+    assert_eq!(l.detail.as_deref(), Some("from_hold"));
+    assert_eq!(s.route().unwrap().route_key.route_revision.0, 8);
+    assert_eq!(
+        o[10].horizon.as_ref().unwrap().route_key.route_revision.0,
+        8
+    );
+    assert_eq!(status_of(&s, 8_000), Some(HorizonStatus::Tracking));
+}
+
+/// Gate 7 / 04 §3: the hold ends after commit_hold_ms (10 s): discarded_hold_expired at
+/// 16001, nothing committed afterwards. See gate7-reroute-hold-expired.json.
+#[test]
+fn reroute_hold_expires_after_10s() {
+    let (s, o, max_running) = run("gate7-reroute-hold-expired.json");
+    assert_eq!(max_running, 1);
+    assert!(whats(&o[6]).contains(&"commit_held_uncertain"));
+    assert!(!whats(&o[7]).contains(&"discarded_hold_expired"));
+    assert!(whats(&o[8]).contains(&"discarded_hold_expired"));
+    assert!(s.planner().held().is_none());
+    assert!(o[9]
+        .planner_cmds
+        .iter()
+        .all(|c| !matches!(c, PlannerCmd::Commit { .. })));
+}
+
+/// Gate 7 (commit versioning): route_revision = current + 1; guard mismatches in
+/// trip_revision / graph_version are E_STALE. See gate7-commit-route-revision.json.
+#[test]
+fn commit_route_revision_must_be_current_plus_one() {
+    let (s, o, _) = run("gate7-commit-route-revision.json");
+    assert_eq!(s.route().unwrap().route_key.route_revision.0, 8);
+    // the tick right after the refused commits still shows rev 7
+    assert_eq!(o[6].horizon.as_ref().unwrap().route_key.route_revision.0, 7);
+    assert_eq!(o[8].horizon.as_ref().unwrap().route_key.route_revision.0, 8);
+}

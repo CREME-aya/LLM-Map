@@ -464,6 +464,98 @@ def gen_adhoc_distance_class():
     }, directory=TICK_DIR)
 
 
+def _parallel_bundle(rev):
+    pts = densify([(0, 0), (2000, 0), (2000, 20), (0, 20)], 100.0)
+    mans = [(20, "u_turn_left"), (len(pts) - 1, "arrive")]
+    return build_bundle(route_key(rev), [{"pts": pts, "maneuvers": mans}], speed_mps=10.0)
+
+
+def _held_reroute_steps():
+    """Shared start of the hold fixtures: tracking, off-route -> reroute r1, then an
+    ambiguous fix between the parallel carriageways -> uncertain while r1 runs."""
+    a = _parallel_bundle(7)
+    rk_a = a["route_key"]
+    steps = [
+        {"step": "route_commit", "expected_route_key": None, "bundle": a},
+        {"step": "tick", "input": {"now_mono_ms": 1000, "fix": fix(1000, 100.0, 0.0, 5.0, 90.0, 10.0)}},
+    ]
+    for i, t in enumerate((2000, 3000, 4000)):
+        st = {"step": "tick", "input": {"now_mono_ms": t, "fix": fix(t, 110.0 + 10.0 * i, 1000.0, 5.0, 90.0, 10.0)}}
+        if t == 4000:
+            st["expect_starts"] = [{"req_id": "r1", "priority": "reroute", "distance_class": "long"}]
+        steps.append(st)
+    steps.append({"step": "tick", "input": {"now_mono_ms": 5000, "fix": fix(5000, 1000.0, 10.0, 5.0, 90.0, 0.5)}})
+    ok = {"at_mono_ms": 6000, "kind": "search_finished", "req_id": "r1", "route_key": rk_a,
+          "graph_version": GRAPH, "outcome": "ok", "facts_ref": "facts-r1", "engine_ms": 2000}
+    steps.append({"step": "tick", "input": {"now_mono_ms": 6000, "events": [ok]}, "expect_cmds": []})
+    return a, rk_a, steps
+
+
+def gen_reroute_held_uncertain():
+    """Planner fixture (tick/ dir): a reroute ok returned while uncertain is held."""
+    a, rk_a, steps = _held_reroute_steps()
+    b = _parallel_bundle(8)
+    steps += [
+        {"step": "tick", "input": {"now_mono_ms": 6500}, "expect_cmds": []},
+        # moving east at 10 m/s: the bearing decides -> tracking -> the held commit
+        {"step": "tick", "input": {"now_mono_ms": 7000, "fix": fix(7000, 1010.0, 9.0, 5.0, 90.0, 10.0)},
+         "expect_cmds": [{"cmd": "commit", "req_id": "r1", "route_key": rk_a}]},
+        {"step": "route_commit", "expected_route_key": rk_a, "bundle": b},
+        {"step": "tick", "input": {"now_mono_ms": 8000, "fix": fix(8000, 1020.0, 9.0, 5.0, 90.0, 10.0)},
+         "expect_cmds": []},
+    ]
+    write("gate7-reroute-held-uncertain.json", {
+        "description": "Gate 7 / 04 §3 (hold while uncertain): parallel carriageways 20 m apart (as gate7-parallel-ambiguous). Tracking at 1000; three valid fixes 1 km off confirm off-route and start the reroute r1 (long: the remaining ETA is invalidated). At 5000 a fix between both carriageways at 0.5 m/s is ambiguous -> uncertain while r1 runs. r1 returns ok at 6000: not committed and not discarded but held (commit_held_uncertain), no second reroute starts. At 7000 the vehicle moves east at 10 m/s -> tracking -> commit{r1, route_key at the start (rev 7)}, once. Kotlin's dc_route_commit(expected rev 7, bundle rev 8 = current + 1) succeeds.",
+        "route_key": rk_a,
+        "steps": steps,
+    }, directory=TICK_DIR)
+
+
+def gen_reroute_hold_expired():
+    """Planner fixture (tick/ dir): the hold ends after commit_hold_ms (10 s)."""
+    a, rk_a, steps = _held_reroute_steps()
+    steps += [
+        # 10 s after the hold (inclusive) it is still held; Kotlin wakes at 16001
+        {"step": "tick", "input": {"now_mono_ms": 16000}, "expect_cmds": []},
+        {"step": "tick", "input": {"now_mono_ms": 16001}, "expect_cmds": []},
+        {"step": "tick", "input": {"now_mono_ms": 17000, "fix": fix(17000, 1010.0, 9.0, 5.0, 90.0, 10.0)},
+         "expect_cmds": []},
+    ]
+    write("gate7-reroute-hold-expired.json", {
+        "description": "Gate 7 / 04 §3 (hold limit, provisional 10 s = SessionConfig commit_hold_ms): same start as gate7-reroute-held-uncertain (r1 ok held at 6000 while uncertain). The status stays uncertain (no fix); at 16000 the result is still held, at 16001 it is discarded_hold_expired (next_wake_mono_ms). Back to tracking at 17000: no commit. Whether an expired hold restarts the reroute is undecided (04 §3, Gate 7); nothing is restarted.",
+        "route_key": rk_a,
+        "steps": steps,
+    }, directory=TICK_DIR)
+
+
+def gen_commit_route_revision():
+    """Planner fixture (tick/ dir): dc_route_commit route_revision = current + 1."""
+    def bundle(rev):
+        pts = straight(3000.0)
+        return build_bundle(route_key(rev), [{"pts": pts, "maneuvers": [(len(pts) - 1, "arrive")]}],
+                            speed_mps=10.0)
+    a = bundle(7)
+    rk_a = a["route_key"]
+    rk_other_trip = dict(rk_a, trip_revision="4")
+    rk_other_graph = dict(rk_a, graph_version="jp-2026.12.0")
+    steps = [
+        {"step": "route_commit", "expected_route_key": None, "bundle": a},
+        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(7), "expect_error": "E_STALE"},
+        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(9), "expect_error": "E_STALE"},
+        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(6), "expect_error": "E_STALE"},
+        {"step": "route_commit", "expected_route_key": rk_other_trip, "bundle": bundle(8), "expect_error": "E_STALE"},
+        {"step": "route_commit", "expected_route_key": rk_other_graph, "bundle": bundle(8), "expect_error": "E_STALE"},
+        {"step": "tick", "input": {"now_mono_ms": 1000, "fix": fix(1000, 100.0, 0.0, 5.0, 90.0, 10.0)}},
+        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(8)},
+        {"step": "tick", "input": {"now_mono_ms": 2000, "fix": fix(2000, 110.0, 0.0, 5.0, 90.0, 10.0)}},
+    ]
+    write("gate7-commit-route-revision.json", {
+        "description": "Gate 7 (commit versioning): the first route (rev 7) may carry any revision. A replacement must carry route_revision = current + 1: rev 7 (same), 9 (skipped) and 6 (older) are E_STALE and nothing is replaced. The guard expected_route_key compares the whole RouteKey (04 §3): a guard differing only in trip_revision or graph_version is E_STALE. rev 8 with the right guard replaces the route; the next horizon carries rev 8. The rule 'current + 1' is a task decision (2026-11-26), not written in docs.",
+        "route_key": rk_a,
+        "steps": steps,
+    }, directory=TICK_DIR)
+
+
 if __name__ == "__main__":
     gen_straight_base()
     gen_chunk_boundary()
@@ -476,3 +568,6 @@ if __name__ == "__main__":
     gen_parallel_ambiguous()
     gen_tunnel()
     gen_adhoc_distance_class()
+    gen_reroute_held_uncertain()
+    gen_reroute_hold_expired()
+    gen_commit_route_revision()
