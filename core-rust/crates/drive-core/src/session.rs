@@ -217,10 +217,8 @@ impl Session {
         self.aligner.progress_cm().map(|p| r.remaining_ms(p))
     }
 
-    /// A reroute / ad-hoc explicit_plan result may be committed (03 §3.1 / 04 §3
-    /// "status=tracking", read as "the session follows the vehicle with confidence"):
-    /// not `uncertain` / `finished`. `off_route` / `rerouting` is the state a reroute was
-    /// started for. Without route geometry there is no horizon to gate on.
+    /// Reroute and ad-hoc explicit plan results may commit while tracking, off route,
+    /// or rerouting (03 §3.1 / 04 §3). Without geometry there is no horizon to gate on.
     fn commit_allowed(&self, now: u64) -> bool {
         !matches!(
             self.horizon_status(now),

@@ -166,6 +166,7 @@ fn reroute_from_fix_then_commit() {
     let o = tick(&mut s, 5_000, Some(fix_xy(&b, 5_000, 14_000, 10_000)));
     assert!(o.planner_cmds.is_empty());
     // ok → commit with the key the search started with
+    assert_eq!(s.horizon_status(6_000), Some(HorizonStatus::Rerouting));
     let o = s.tick(finished("r1", &b.route_key, 6_000));
     assert_eq!(
         o.planner_cmds,
@@ -176,6 +177,18 @@ fn reroute_from_fix_then_commit() {
     );
     // slot free, still off: status off_route until the new route is committed
     assert_eq!(s.horizon_status(6_000), Some(HorizonStatus::OffRoute));
+    // An explicit plan can finish while off route even after the reroute slot was released.
+    s.request_search(6_100, SearchPriority::ExplicitPlan)
+        .unwrap();
+    assert_eq!(s.horizon_status(6_200), Some(HorizonStatus::OffRoute));
+    let o = s.tick(finished("r2", &b.route_key, 6_200));
+    assert_eq!(
+        o.planner_cmds,
+        vec![PlannerCmd::Commit {
+            req_id: "r2".into(),
+            route_key: b.route_key.clone()
+        }]
+    );
     // Kotlin commits the new route: horizon of the new route, uncertain until a fix
     let mut v = serde_json::to_value(&b).unwrap();
     v["route_key"]["route_revision"] = "8".into();
@@ -213,6 +226,7 @@ fn ok_while_uncertain_is_not_committed() {
     tick(&mut s, 0, Some(fix_xy(&b, 0, 10_000, 0)));
     s.request_search(100, SearchPriority::ExplicitPlan).unwrap();
     tick(&mut s, 1_000, Some(fix_xy(&b, 1_000, 11_000, 0)));
+    assert_eq!(s.horizon_status(1_500), Some(HorizonStatus::Tracking));
     let o = s.tick(finished("r1", &b.route_key, 1_500));
     assert!(matches!(&o.planner_cmds[..], [PlannerCmd::Commit { .. }]));
 }
@@ -420,4 +434,17 @@ fn last_junction_expires_after_either_inclusive_limit() {
                 .is_none());
         }
     }
+}
+
+#[test]
+fn ok_after_arrival_is_not_committed() {
+    let (mut s, b) = committed();
+    tick(&mut s, 1_000, Some(fix_xy(&b, 1_000, 400_100, 0)));
+    s.request_search(1_000, SearchPriority::ExplicitPlan)
+        .unwrap();
+    tick(&mut s, 2_000, Some(fix_xy(&b, 2_000, 400_100, 0)));
+    assert_eq!(s.horizon_status(2_100), Some(HorizonStatus::Finished));
+    let o = s.tick(finished("r1", &b.route_key, 2_100));
+    assert!(o.planner_cmds.is_empty());
+    assert!(o.log.iter().any(|l| l.what == "discarded_not_tracking"));
 }
