@@ -407,7 +407,7 @@
             "outcome": {
               "$ref": "#/$defs/SearchOutcome"
             },
-            "comparison_ref": {
+            "facts_ref": {
               "type": "string"
             },
             "engine_ms": {
@@ -466,10 +466,17 @@
       ]
     },
     "DistanceClass": {
-      "description": "Distance class the Planner fixes before searching, for every candidate search of the same plan: pre-search ETA estimate < 1800 s -> short; >= 1800 s or no estimate -> long; searches outside any plan are long. Selects the comparison budget (3 s / 8 s from the plan start) and the watchdog limit (5 s / 10 s from each start) (03 §3.1, 07 §1).",
+      "description": "Distance class the Planner fixes before searching, for every candidate search of the same plan: pre-search ETA estimate < 1800 s -> short; >= 1800 s or no estimate -> long; searches outside any plan take the latest plan's class (long when there was none). Selects the comparison budget (3 s / 8 s from the plan start) and the watchdog limit (5 s / 10 s from each start) (03 §3.1, 07 §1).",
       "enum": [
         "short",
         "long"
+      ]
+    },
+    "RankReason": {
+      "description": "Why rank was emitted: all_done = every candidate search returned; budget_expired = the comparison budget (short 3 s / long 8 s from the plan start, 03 §3.1 item 3) passed first.",
+      "enum": [
+        "all_done",
+        "budget_expired"
       ]
     },
     "TickOutput": {
@@ -554,6 +561,10 @@
             },
             "graph_version": {
               "type": "string"
+            },
+            "candidate_id": {
+              "type": "string",
+              "description": "CandidateRequest of the current plan to run (Session::plan_candidates output). Absent for searches outside a plan. Team decision 2026-11-25, not in docs yet."
             }
           }
         },
@@ -570,6 +581,34 @@
             },
             "req_id": {
               "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cmd",
+            "plan_request_id",
+            "facts_refs",
+            "reason"
+          ],
+          "description": "Kotlin calls dc_rank with the CandidateFacts behind facts_refs (facts_ref of each candidate search that returned ok, in request order; may be empty). Exactly one per plan; the plan is over afterwards (its late search_finished only frees the slot as discarded_late). Team decision 2026-11-25, not in docs yet.",
+          "properties": {
+            "cmd": {
+              "const": "rank"
+            },
+            "plan_request_id": {
+              "type": "string"
+            },
+            "facts_refs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "reason": {
+              "$ref": "#/$defs/RankReason"
             }
           }
         }
@@ -604,7 +643,7 @@
             "req_id": {
               "type": "string"
             },
-            "comparison_ref": {
+            "facts_ref": {
               "type": [
                 "string",
                 "null"

@@ -8,9 +8,9 @@
     { "step": "tick", "input": { "now_mono_ms": 12000, "events": [ { "at_mono_ms": 11500, "kind": "engine_reset" } ] } },
     { "expect_starts": [{"req_id": "r2", "priority": "reroute", "distance_class": "long"}], "step": "tick", "input": { "now_mono_ms": 15000, "events": [
       { "at_mono_ms": 14900, "kind": "search_finished", "req_id": "r1", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"},
-        "graph_version": "jp-2026.11.0", "outcome": "ok", "comparison_ref": "cmp-r1", "engine_ms": 13900 } ] } },
+        "graph_version": "jp-2026.11.0", "outcome": "ok", "facts_ref": "facts-r1", "engine_ms": 13900 } ] } },
     { "step": "tick", "input": { "now_mono_ms": 17100, "events": [
       { "at_mono_ms": 17000, "kind": "search_finished", "req_id": "r2", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"},
-        "graph_version": "jp-2026.11.0", "outcome": "ok", "comparison_ref": "cmp-r2", "engine_ms": 2000 } ] } }
+        "graph_version": "jp-2026.11.0", "outcome": "ok", "facts_ref": "facts-r2", "engine_ms": 2000 } ] } }
   ]
 }

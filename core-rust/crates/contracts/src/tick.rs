@@ -149,8 +149,11 @@ pub enum EventBody {
         route_key: RouteKey,
         graph_version: String,
         outcome: SearchOutcome,
+        /// Reference to the CandidateFacts JSON C++ produced once for this search (Kotlin
+        /// keeps the bytes; Rust only collects the refs and hands them back in `rank`).
+        /// Renamed from `comparison_ref` (team decision 2026-11-25; docs still say comparison_ref).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        comparison_ref: Option<String>,
+        facts_ref: Option<String>,
         /// Wall time of the Valhalla call (measurement only, never used for decisions).
         engine_ms: u64,
     },
@@ -222,9 +225,11 @@ pub struct TickOutput {
     pub log: Vec<LogEvent>,
 }
 
-/// `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version}
-/// | cancel{req_id}` (03 §3.1). `distance_class` is required: the class the Planner fixed
-/// for the plan before searching (searches outside any plan are `long`).
+/// `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version,
+/// candidate_id?} | cancel{req_id} | rank{plan_request_id, facts_refs, reason}` (03 §3.1;
+/// `rank` and `candidate_id` are team decisions 2026-11-25, not in docs yet).
+/// `distance_class` is required: the class the Planner fixed for the plan before searching
+/// (searches outside any plan take the latest plan's class, or `long` if there was none).
 /// TODO(abi-v1): tag field name `cmd` is provisional.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case", deny_unknown_fields)]
@@ -235,10 +240,36 @@ pub enum PlannerCmd {
         distance_class: DistanceClass,
         route_key: RouteKey,
         graph_version: String,
+        /// Which `CandidateRequest` of the current plan to run (`Session::plan_candidates`
+        /// output). Absent for searches outside a plan (reroute / avoid chip).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<String>,
     },
     Cancel {
         req_id: String,
     },
+    /// Rank the plan's completed candidates now: Kotlin calls `dc_rank` with the
+    /// CandidateFacts behind `facts_refs` (the `facts_ref` of every search of this plan that
+    /// returned `ok`, in request order; may be empty). After `rank` the plan is over: no
+    /// more `start` for it, and its late `search_finished` only frees the slot
+    /// (`discarded_late`). Emitted even when `facts_refs` is empty.
+    /// Team decision 2026-11-25 (not in docs yet).
+    Rank {
+        plan_request_id: String,
+        facts_refs: Vec<String>,
+        reason: RankReason,
+    },
+}
+
+/// Why `rank` was emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RankReason {
+    /// Every candidate search of the plan has returned.
+    AllDone,
+    /// The comparison budget (03 §3.1 item 3: short 3 s / long 8 s from the plan start)
+    /// passed first: remaining queued candidates are dropped, a running one is cancelled.
+    BudgetExpired,
 }
 
 /// Single priority queue order (03 §3.1 table; team decision 2026-11-24 for the JSON names).
@@ -288,7 +319,7 @@ pub enum UiCmd {
     /// Adopted search result; Kotlin performs the atomic commit via dc_route_commit.
     SearchResultReady {
         req_id: String,
-        comparison_ref: Option<String>,
+        facts_ref: Option<String>,
     },
 }
 

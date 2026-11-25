@@ -97,9 +97,11 @@ fn enums_are_snake_case_on_the_wire() {
         )
         .unwrap(),
         graph_version: "g".into(),
+        candidate_id: None,
     })
     .unwrap();
     assert_eq!(v["cmd"], "start");
+    assert!(v.get("candidate_id").is_none(), "absent, not null");
     assert_eq!(v["priority"], "avoid_chip");
     assert_eq!(v["distance_class"], "short");
     assert_eq!(

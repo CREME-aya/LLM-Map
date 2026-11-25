@@ -64,7 +64,7 @@ fn run(name: &str) -> (Session, Vec<TickOutput>, usize) {
                 } => Some(serde_json::json!({
                     "req_id": req_id, "priority": priority, "distance_class": distance_class
                 })),
-                PlannerCmd::Cancel { .. } => None,
+                PlannerCmd::Cancel { .. } | PlannerCmd::Rank { .. } => None,
             })
             .collect();
         let want = step["expect_starts"]
@@ -114,7 +114,7 @@ fn cancel_then_reroute() {
         o[3].ui_cmds,
         vec![UiCmd::SearchResultReady {
             req_id: "r2".into(),
-            comparison_ref: Some("cmp-r2".into())
+            facts_ref: Some("facts-r2".into())
         }]
     );
     assert_eq!(*s.planner().slot(), Slot::Idle);
@@ -157,7 +157,7 @@ fn timeout_engine_stuck_keeps_slot_until_native_returns() {
         o[5].ui_cmds,
         vec![UiCmd::SearchResultReady {
             req_id: "r2".into(),
-            comparison_ref: Some("cmp-r2".into())
+            facts_ref: Some("facts-r2".into())
         }]
     );
     assert_eq!(*s.planner().slot(), Slot::Idle);

@@ -129,6 +129,35 @@ fn invalid_fixtures_fail() {
     }
 }
 
+/// contracts::plan::TripPlanSnapshot (input of Session::plan_candidates) agrees with
+/// trip-plan-snapshot.schema.json on every fixture, including unknown fields.
+#[test]
+fn rust_mirror_agrees_on_trip_plan_snapshot() {
+    let mut seen = 0;
+    for kind in ["valid", "invalid"] {
+        for (schema, path) in fixtures(kind) {
+            if schema != "trip-plan-snapshot" {
+                continue;
+            }
+            seen += 1;
+            let v = load(&path);
+            let by_schema = compile(&schema).is_valid(&v);
+            let by_serde =
+                serde_json::from_value::<contracts::plan::TripPlanSnapshot>(v.clone()).is_ok();
+            assert_eq!(by_schema, by_serde, "{}", path.display());
+            if kind == "valid" {
+                let mut extra = v.clone();
+                extra["budget"]["extra"] = serde_json::json!(1);
+                assert!(!compile(&schema).is_valid(&extra));
+                assert!(
+                    serde_json::from_value::<contracts::plan::TripPlanSnapshot>(extra).is_err()
+                );
+            }
+        }
+    }
+    assert!(seen >= 2);
+}
+
 #[test]
 fn rust_mirror_agrees_on_personal_routing_override() {
     for (schema, path) in fixtures("valid") {
@@ -179,7 +208,8 @@ fn rust_mirror_agrees_on_avoid_offer() {
 mod tick {
     use super::*;
     use contracts::tick::{
-        DistanceClass, Event, LogEvent, PlannerCmd, SearchPriority, TickInput, TickOutput, UiCmd,
+        DistanceClass, Event, LogEvent, PlannerCmd, RankReason, SearchPriority, TickInput,
+        TickOutput, UiCmd,
     };
 
     fn rk() -> contracts::RouteKey {
@@ -230,7 +260,8 @@ mod tick {
     }
 
     /// core-rust/tests/fixtures/tick/*: every `tick` step input is a valid TickInput and
-    /// parses with serde; `request` priorities are SearchPriority values.
+    /// parses with serde; `request` priorities are SearchPriority values; `expect_cmds`
+    /// are valid PlannerCmds; a `plan_candidates` snapshot is a valid TripPlanSnapshot.
     #[test]
     fn replay_fixtures_pass_tick_schema() {
         let input = tick_def("TickInput");
@@ -260,7 +291,17 @@ mod tick {
                         serde_json::from_value::<SearchPriority>(step["priority"].clone()).unwrap();
                     }
                     "plan" => {}
+                    "plan_candidates" => {
+                        let snap = compile("trip-plan-snapshot");
+                        assert!(snap.is_valid(&fx["snapshot"]), "{}", p.display());
+                    }
                     o => panic!("{}: unknown step {o}", p.display()),
+                }
+                // expected planner_cmds are valid PlannerCmd values
+                let cmd = tick_def("PlannerCmd");
+                for c in step["expect_cmds"].as_array().into_iter().flatten() {
+                    assert_eq!(errors(&cmd, c), Vec::<String>::new(), "{}", p.display());
+                    serde_json::from_value::<PlannerCmd>(c.clone()).unwrap();
                 }
                 // expected starts use the schema's priority / distance_class names
                 for e in step["expect_starts"].as_array().into_iter().flatten() {
@@ -292,8 +333,27 @@ mod tick {
                     distance_class,
                     route_key: rk(),
                     graph_version: "g".into(),
+                    candidate_id: None,
+                });
+                planner_cmds.push(PlannerCmd::Start {
+                    req_id: "r3".into(),
+                    priority,
+                    distance_class,
+                    route_key: rk(),
+                    graph_version: "g".into(),
+                    candidate_id: Some("c2".into()),
                 });
             }
+        }
+        for (facts_refs, reason) in [
+            (vec![], RankReason::BudgetExpired),
+            (vec!["f1".to_string(), "f2".into()], RankReason::AllDone),
+        ] {
+            planner_cmds.push(PlannerCmd::Rank {
+                plan_request_id: "p1".into(),
+                facts_refs,
+                reason,
+            });
         }
         let horizon = load(&schema_dir().join("fixtures/valid/maneuver-horizon.min.json"));
         for (next_wake, horizon) in [(None, None), (Some(u64::MAX), Some(horizon))] {
@@ -304,11 +364,11 @@ mod tick {
                     UiCmd::ShowCheckingRoute,
                     UiCmd::SearchResultReady {
                         req_id: "r2".into(),
-                        comparison_ref: None,
+                        facts_ref: None,
                     },
                     UiCmd::SearchResultReady {
                         req_id: "r2".into(),
-                        comparison_ref: Some("cmp".into()),
+                        facts_ref: Some("facts".into()),
                     },
                 ],
                 planner_cmds: planner_cmds.clone(),
@@ -370,6 +430,13 @@ mod tick {
                 serde_json::to_value(SearchPriority::ExplicitPlan).unwrap(),
                 serde_json::to_value(SearchPriority::AvoidChip).unwrap(),
                 serde_json::to_value(SearchPriority::Comparison).unwrap(),
+            ])
+        );
+        assert_eq!(
+            names("RankReason"),
+            ser(vec![
+                serde_json::to_value(RankReason::AllDone).unwrap(),
+                serde_json::to_value(RankReason::BudgetExpired).unwrap(),
             ])
         );
         // schema lists priorities highest first, matching Ord (higher wins)
@@ -508,6 +575,7 @@ mod tick {
                 distance_class,
                 route_key: rk(),
                 graph_version: "g".into(),
+                candidate_id: None,
             })
             .unwrap();
             assert_eq!(errors(&cmd, &v), Vec::<String>::new());
