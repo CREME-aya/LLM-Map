@@ -10,8 +10,8 @@
 //! - `frame_seq` grows by one only when the content changes (everything except
 //!   `frame_seq`, `sampled_at_monotonic_ms` and `valid_until_monotonic_ms`).
 //!
-//! TODO(drive-core): passing needs 2 consecutive high-confidence samples (04 §3) — today a
-//! single on-route fix at or past the anchor passes it; `group_id` (04 §2.1 item 4),
+//! Passage requires two consecutive confident projections at or beyond an anchor.
+//! TODO(drive-core): `group_id` (04 §2.1 item 4),
 //! `eta_range_ms`, `next_p1_deadline_monotonic_ms`, `next_complex_window` and `refs` are
 //! not produced yet.
 #![deny(clippy::float_arithmetic, clippy::cast_precision_loss)]
@@ -21,13 +21,17 @@ use contracts::horizon::{Arrow, HorizonEntry, HorizonStatus, ManeuverHorizon, UP
 
 /// The next `UPCOMING_MAX` maneuvers ahead of `progress_cm` (`None`: from the start,
 /// without `from_vehicle_m`).
-pub fn upcoming(route: &LoadedRoute, progress_cm: Option<u32>) -> Vec<HorizonEntry> {
+fn upcoming(
+    route: &LoadedRoute,
+    progress_cm: Option<u32>,
+    passed_cm: Option<u32>,
+) -> Vec<HorizonEntry> {
     let from = progress_cm.unwrap_or(0);
     let mut prev_along: Option<u32> = None;
     route
         .maneuvers
         .iter()
-        .filter(|m| match progress_cm {
+        .filter(|m| match passed_cm {
             Some(p) => m.anchor.along_route_cm > p,
             None => true,
         })
@@ -35,7 +39,7 @@ pub fn upcoming(route: &LoadedRoute, progress_cm: Option<u32>) -> Vec<HorizonEnt
         .map(|m| {
             let a = m.anchor.along_route_cm;
             let (from_vehicle_m, seg_from_prev_m) = match prev_along {
-                None => (progress_cm.map(|_| (a - from) / 100), None),
+                None => (progress_cm.map(|_| a.saturating_sub(from) / 100), None),
                 Some(p) => (None, Some((a - p) / 100)),
             };
             prev_along = Some(a);
@@ -67,6 +71,8 @@ pub fn arrived(route: &LoadedRoute, progress_cm: u32) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct HorizonFrames {
     frame_seq: u64,
+    passed_cm: Option<u32>,
+    previous_sample: Option<u32>,
     /// Last content (frame fields zeroed) and the last tracking `upcoming`.
     last: Option<ManeuverHorizon>,
     frozen: Option<Vec<HorizonEntry>>,
@@ -80,8 +86,19 @@ impl HorizonFrames {
     /// A new route was committed: forget the content of the old one (frame_seq keeps
     /// growing so frames of different routes never share a number).
     pub fn reset_route(&mut self) {
+        self.passed_cm = None;
+        self.previous_sample = None;
         self.last = None;
         self.frozen = None;
+    }
+
+    pub fn observe_sample(&mut self, sample: Option<u32>) -> Option<u32> {
+        if let (Some(first), Some(second)) = (self.previous_sample, sample) {
+            let confirmed = first.min(second);
+            self.passed_cm = Some(self.passed_cm.map_or(confirmed, |old| old.max(confirmed)));
+        }
+        self.previous_sample = sample;
+        self.passed_cm
     }
 
     /// Returns the frame to emit when the content changed.
@@ -95,13 +112,15 @@ impl HorizonFrames {
     ) -> Option<ManeuverHorizon> {
         let (matched_progress_cm, upcoming) = match status {
             HorizonStatus::Tracking => {
-                let u = upcoming(route, progress_cm);
+                let u = upcoming(route, progress_cm, self.passed_cm);
                 self.frozen = Some(u.clone());
                 (progress_cm, u)
             }
             HorizonStatus::Uncertain => (
                 None,
-                self.frozen.clone().unwrap_or_else(|| upcoming(route, None)),
+                self.frozen
+                    .clone()
+                    .unwrap_or_else(|| upcoming(route, None, self.passed_cm)),
             ),
             HorizonStatus::OffRoute | HorizonStatus::Rerouting | HorizonStatus::Finished => {
                 (None, Vec::new())

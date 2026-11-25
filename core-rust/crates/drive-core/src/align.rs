@@ -284,7 +284,7 @@ impl Aligner {
     }
 
     pub fn on_fix(&mut self, route: &LoadedRoute, fix: &Fix) -> FixResult {
-        if self.last_fix_at.is_some_and(|t| fix.at_mono_ms < t) {
+        if self.last_fix_at.is_some_and(|t| fix.at_mono_ms <= t) {
             return FixResult::OutOfOrder;
         }
         self.last_fix_at = Some(fix.at_mono_ms);
@@ -311,14 +311,7 @@ impl Aligner {
             self.stats.local_segs_max = self.stats.local_segs_max.max(n);
             if let Some(b) = Self::best(&c) {
                 // Short backward jitter never moves the progress back (04 §3).
-                let along = b.along_cm.max(m.along_cm);
-                found = Some((
-                    Candidate {
-                        along_cm: along,
-                        ..b
-                    },
-                    Mode::Local,
-                ));
+                found = Some((b, Mode::Local));
             }
         }
         if found.is_none() {
@@ -344,7 +337,11 @@ impl Aligner {
                 self.ambiguous = false;
                 self.last = Some(Matched {
                     seg: c.seg,
-                    along_cm: c.along_cm,
+                    along_cm: if mode == Mode::Local {
+                        c.along_cm.max(self.progress_cm().unwrap_or(0))
+                    } else {
+                        c.along_cm
+                    },
                     at_mono_ms: fix.at_mono_ms,
                 });
                 FixResult::OnRoute {

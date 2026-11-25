@@ -251,6 +251,8 @@ def gen_chunk_boundary():
     d = math.hypot(xb - xa, yb - ya)
     xe, ye = xb + (xb - xa) / d * 5, yb + (yb - ya) / d * 5
     brg = math.degrees(math.atan2(xb - xa, yb - ya))
+    ticks.append(tick(t_end, fix(t_end, xe, ye, 5.0, brg, 20.0), status="tracking"))
+    t_end += 1000
     ticks.append(tick(t_end, fix(t_end, xe, ye, 5.0, brg, 20.0), status="finished"))
     ticks[1]["expect"] = {"status": "tracking"}
     write("gate7-chunk-boundary.json", {

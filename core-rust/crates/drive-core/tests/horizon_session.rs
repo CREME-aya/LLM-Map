@@ -93,6 +93,11 @@ fn frames_only_on_change_with_three_upcoming() {
         .horizon
         .unwrap();
     assert_eq!(h.frame_seq, 3);
+    assert_eq!(h.upcoming[0].from_vehicle_m, Some(0));
+    assert!(tick(&mut s, 3_050, None).horizon.is_none());
+    let h = tick(&mut s, 3_100, Some(fix_xy(&b, 3_100, 160_000, 0)))
+        .horizon
+        .unwrap();
     let arrows: Vec<Arrow> = h.upcoming.iter().map(|e| e.maneuver.arrow).collect();
     assert_eq!(arrows, vec![Arrow::Right, Arrow::Left, Arrow::Arrive]);
     // a short backward jitter never revives the passed maneuver
@@ -101,6 +106,10 @@ fn frames_only_on_change_with_three_upcoming() {
     // destination: finished, upcoming empty, no off-route afterwards
     tick(&mut s, 5_000, Some(fix_xy(&b, 5_000, 380_000, 0)));
     let h = tick(&mut s, 6_000, Some(fix_xy(&b, 6_000, 400_500, 0)))
+        .horizon
+        .unwrap();
+    assert_eq!(h.status, HorizonStatus::Tracking);
+    let h = tick(&mut s, 6_100, Some(fix_xy(&b, 6_100, 400_500, 0)))
         .horizon
         .unwrap();
     assert_eq!(h.status, HorizonStatus::Finished);

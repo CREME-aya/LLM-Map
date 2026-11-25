@@ -184,7 +184,7 @@ fn chunk_boundary_progress_is_continuous() {
         .collect();
     assert!(prog.len() > 300);
     // The last fix is 5 m past the end: compare only the regular 20 m steps.
-    for w in prog[..prog.len() - 1].windows(2) {
+    for w in prog[..prog.len() - 2].windows(2) {
         let d = w[1] - w[0];
         assert!((1_800..=2_200).contains(&d), "step {d} cm at {}", w[0]);
     }
@@ -411,6 +411,8 @@ fn tunnel_recovery_reacquires_through_the_grid() {
     assert_eq!(h.status, HorizonStatus::Tracking);
     let p = h.matched_progress_cm.unwrap();
     assert!((450_000..=454_000).contains(&p), "{p}");
+    assert!(h.upcoming[0].maneuver.anchor.along_route_cm < p);
+    let h = r.steps[exit + 1].out.horizon.as_ref().unwrap();
     assert!(h
         .upcoming
         .iter()

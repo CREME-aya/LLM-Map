@@ -254,6 +254,7 @@ impl Session {
         self.aligner = Aligner::new(self.align_cfg);
         self.finished = false;
         self.frames.reset_route();
+        self.last_fix_at = None;
     }
 
     /// `dc_route_commit` guard (team decision 2026-11-25): `route_key` is the one from
@@ -304,6 +305,7 @@ impl Session {
         self.aligner = Aligner::new(self.align_cfg);
         self.finished = false;
         self.frames.reset_route();
+        self.last_fix_at = None;
         Ok(result)
     }
 
@@ -478,6 +480,10 @@ impl Session {
         if r != FixResult::OutOfOrder {
             self.last_fix_at = Some(at);
         }
+        if r != FixResult::OutOfOrder && (!was_tracking || !matches!(r, FixResult::OnRoute { .. }))
+        {
+            self.frames.observe_sample(None);
+        }
         match r {
             FixResult::OnRoute { along_cm, mode, .. } => {
                 if !was_tracking {
@@ -488,7 +494,11 @@ impl Session {
                         Some(format!("mode={how} along_cm={along_cm}")),
                     ));
                 }
-                if arrived(route, along_cm) {
+                if self
+                    .frames
+                    .observe_sample(Some(along_cm))
+                    .is_some_and(|p| arrived(route, p))
+                {
                     self.finished = true;
                     log.push(log_at(at, "route_finished", None));
                 }
