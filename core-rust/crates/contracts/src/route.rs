@@ -20,7 +20,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// `expected_route_key` is the guard: the current route's key from `commit{req_id, route_key}` (the
 /// current route when the search started), or `null` when no route is committed yet (the
 /// first route of the session). It must equal the current route (`null` = none), otherwise
-/// `E_STALE` and nothing is replaced. `bundle.route_key` is the key of the new route.
+/// `E_STALE` and nothing is replaced. `bundle.route_key` is the key of the new route; when it
+/// replaces a route its `route_revision` must be the current one + 1 (`E_STALE` otherwise).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteCommitRequest {

@@ -155,6 +155,98 @@ fn guard_route_key_is_checked_before_anything_is_replaced() {
     assert_eq!(commit(&mut s, Some(ka), b), Err(ErrorCode::Stale));
 }
 
+/// `min_bundle()` with `route_revision` = `rev` (route_key and maneuver ids), and optionally
+/// another `trip_revision` / `graph_version`.
+fn bundle_rev(rev: u64, trip_rev: Option<u64>, graph: Option<&str>) -> RouteBundle {
+    let mut b = min_bundle();
+    b.route_key.route_revision = contracts::U64Str(rev);
+    if let Some(t) = trip_rev {
+        b.route_key.trip_revision = contracts::U64Str(t);
+    }
+    if let Some(g) = graph {
+        b.route_key.graph_version = g.into();
+    }
+    for leg in &mut b.legs {
+        for m in &mut leg.maneuvers {
+            m.id.route_key = b.route_key.clone();
+        }
+    }
+    b
+}
+
+/// A replacement route must carry route_revision = current + 1 (`E_STALE` otherwise,
+/// nothing replaced); the first route may carry any revision.
+#[test]
+fn replacement_route_revision_must_be_current_plus_one() {
+    // first route: any revision (here 8, and 0 in another session)
+    let mut s = Session::new(SessionConfig::default());
+    assert_eq!(commit(&mut s, None, bundle_rev(8, None, None)), Ok(()));
+    let mut s0 = Session::new(SessionConfig::default());
+    assert_eq!(commit(&mut s0, None, bundle_rev(0, None, None)), Ok(()));
+    let k8 = s.route().unwrap().route_key.clone();
+    // same revision, skipped revision, older revision → E_STALE, nothing replaced
+    for rev in [8, 10, 7, 0] {
+        assert_eq!(
+            commit(&mut s, Some(k8.clone()), bundle_rev(rev, None, None)),
+            Err(ErrorCode::Stale),
+            "rev {rev}"
+        );
+        assert_eq!(
+            s.route().unwrap().route_key,
+            k8,
+            "rev {rev}: nothing replaced"
+        );
+    }
+    // current + 1
+    assert_eq!(commit(&mut s, Some(k8), bundle_rev(9, None, None)), Ok(()));
+    let k9 = s.route().unwrap().route_key.clone();
+    assert_eq!(k9.route_revision.0, 9);
+    assert_eq!(commit(&mut s, Some(k9), bundle_rev(10, None, None)), Ok(()));
+    // u64::MAX + 1 does not exist
+    let mut sm = Session::new(SessionConfig::default());
+    assert_eq!(
+        commit(&mut sm, None, bundle_rev(u64::MAX, None, None)),
+        Ok(())
+    );
+    let km = sm.route().unwrap().route_key.clone();
+    assert_eq!(
+        commit(&mut sm, Some(km.clone()), bundle_rev(0, None, None)),
+        Err(ErrorCode::Stale)
+    );
+    assert_eq!(
+        commit(&mut sm, Some(km), bundle_rev(u64::MAX, None, None)),
+        Err(ErrorCode::Stale)
+    );
+}
+
+/// The guard compares the whole RouteKey (04 §3: trip_revision / route_revision /
+/// graph_version): a guard differing only in trip_revision or graph_version is E_STALE.
+#[test]
+fn guard_mismatch_in_trip_revision_or_graph_version_is_stale() {
+    let mut s = Session::new(SessionConfig::default());
+    assert_eq!(commit(&mut s, None, bundle_rev(8, None, None)), Ok(()));
+    let k = s.route().unwrap().route_key.clone();
+    let mut g = k.clone();
+    g.trip_revision = contracts::U64Str(k.trip_revision.0 + 1);
+    assert_eq!(
+        commit(&mut s, Some(g), bundle_rev(9, None, None)),
+        Err(ErrorCode::Stale)
+    );
+    let mut g = k.clone();
+    g.graph_version = "jp-2026.12.0".into();
+    assert_eq!(
+        commit(&mut s, Some(g), bundle_rev(9, None, None)),
+        Err(ErrorCode::Stale)
+    );
+    let mut g = k.clone();
+    g.trip_id = "other".into();
+    assert_eq!(
+        commit(&mut s, Some(g), bundle_rev(9, None, None)),
+        Err(ErrorCode::Stale)
+    );
+    assert_eq!(s.route().unwrap().route_key, k, "nothing replaced");
+}
+
 #[test]
 fn remaining_eta_from_cum_time_ms() {
     let r = LoadedRoute::load(&min_bundle()).unwrap();

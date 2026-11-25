@@ -287,11 +287,32 @@ impl Session {
     /// replaced), validates and indexes the bundle (`E_SCHEMA`), then makes it the current
     /// route. Alignment starts over (status `uncertain` until a fix matches; the first fix
     /// is located through the spatial index). The next `dc_tick` returns the new horizon.
+    ///
+    /// Revision rule (task decision 2026-11-26, not written in docs): a replacement route
+    /// must carry `route_revision` = current + 1 (`E_STALE` otherwise); the first route of
+    /// the session may carry any revision. The guard compares the whole `RouteKey`
+    /// (`trip_id` / `trip_revision` / `route_revision` / `graph_version`, 04 §3).
+    /// TODO(04 §3 / 02 §2.1): docs say nothing about the new bundle's `trip_id`,
+    /// `trip_revision` or `graph_version` relative to the current route (e.g. a re-plan with
+    /// a new `trip_revision`, or plan searches with `route_revision` "0", 03 §3.1); they are
+    /// not checked.
     pub fn route_commit(
         &mut self,
         req: &RouteCommitRequest,
     ) -> Result<RouteCommitResult, CoreError> {
         self.check_route_guard(req.expected_route_key.as_ref())?;
+        if let Some(cur) = &self.current_route_key {
+            let want = cur.route_revision.0.checked_add(1);
+            if want != Some(req.bundle.route_key.route_revision.0) {
+                return Err(CoreError::new(
+                    ErrorCode::Stale,
+                    format!(
+                        "bundle route_revision {} != current {} + 1",
+                        req.bundle.route_key.route_revision.0, cur.route_revision.0
+                    ),
+                ));
+            }
+        }
         let loaded = LoadedRoute::load(&req.bundle)
             .map_err(|e| CoreError::new(ErrorCode::Schema, format!("route_bundle: {e}")))?;
         let result = RouteCommitResult {
