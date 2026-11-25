@@ -83,16 +83,20 @@ fn frames_only_on_change_with_three_upcoming() {
     assert_eq!(h.upcoming[2].seg_from_prev_m, Some(1_000));
     assert!(h.matched_progress_cm.is_some());
     assert_eq!(h.valid_until_monotonic_ms, 1_000 + 2_500);
-    // same position again: same content → no frame (frame_seq unchanged)
-    assert!(tick(&mut s, 2_000, Some(fix_xy(&b, 2_000, 10_000, 0)))
+    // The same position on a later sample shifts the absolute P1 deadline.
+    let next = tick(&mut s, 2_000, Some(fix_xy(&b, 2_000, 10_000, 0)))
         .horizon
-        .is_none());
-    assert_eq!(s.frame_seq(), 2);
+        .unwrap();
+    assert_eq!(
+        next.next_p1_deadline_monotonic_ms.unwrap(),
+        h.next_p1_deadline_monotonic_ms.unwrap() + 1_000
+    );
+    assert_eq!(next.frame_seq, 3);
     // past the first maneuver (1.5 km): right, left, arrive
     let h = tick(&mut s, 3_000, Some(fix_xy(&b, 3_000, 160_000, 0)))
         .horizon
         .unwrap();
-    assert_eq!(h.frame_seq, 3);
+    assert_eq!(h.frame_seq, 4);
     assert_eq!(h.upcoming[0].from_vehicle_m, Some(0));
     assert!(tick(&mut s, 3_050, None).horizon.is_none());
     let h = tick(&mut s, 3_100, Some(fix_xy(&b, 3_100, 160_000, 0)))
@@ -102,7 +106,7 @@ fn frames_only_on_change_with_three_upcoming() {
     assert_eq!(arrows, vec![Arrow::Right, Arrow::Left, Arrow::Arrive]);
     // a short backward jitter never revives the passed maneuver
     let h = tick(&mut s, 4_000, Some(fix_xy(&b, 4_000, 159_000, 0)));
-    assert!(h.horizon.is_none(), "progress kept, content unchanged");
+    assert_eq!(h.horizon.unwrap().upcoming[0].maneuver.arrow, Arrow::Right);
     // destination: finished, upcoming empty, no off-route afterwards
     tick(&mut s, 5_000, Some(fix_xy(&b, 5_000, 380_000, 0)));
     let h = tick(&mut s, 6_000, Some(fix_xy(&b, 6_000, 400_500, 0)))
@@ -294,4 +298,126 @@ fn config_thresholds_and_defaults() {
     assert!(Session::from_json(br#"{"confirm_fixes":0}"#).is_err());
     assert!(Session::from_json(br#"{"heading_tol_deg":181}"#).is_err());
     assert!(Session::from_json(br#"{"lateral_tol_cm":1.5}"#).is_err());
+}
+
+#[test]
+fn group_limits_and_voice_lead_use_the_approach_edge() {
+    for (distance, motorway, time_per_cm, paired) in [
+        (12_000, false, 2, true),
+        (12_001, false, 2, false),
+        (20_000, true, 2, true),
+        (20_001, true, 2, false),
+        (24_000, false, 0, true),
+        (24_002, false, 0, false),
+    ] {
+        let mut b = main_line();
+        let leg = &mut b.legs[0];
+        let mut cumulative_cm = 0;
+        for edge in &mut leg.edges {
+            cumulative_cm += edge.length_cm;
+            edge.cum_time_ms = if time_per_cm == 0 {
+                cumulative_cm / 2
+            } else {
+                cumulative_cm * time_per_cm
+            };
+            if motorway {
+                edge.flags |= contracts::route::EDGE_FLAG_MOTORWAY;
+            }
+        }
+        b.eta_ms = leg.edges.last().unwrap().cum_time_ms;
+        // Anchor all three maneuvers on the same axis; only the first pair may group.
+        for (m, along) in
+            leg.maneuvers
+                .iter_mut()
+                .zip([100_000, 100_000 + distance, 100_000 + distance + 100])
+        {
+            let i = leg.chunks[0].seg_along_cm.partition_point(|a| *a <= along) - 1;
+            m.anchor.leg_shape_index = i as u32;
+            m.anchor.along_route_cm = along;
+        }
+        let mut s = Session::new(SessionConfig::default());
+        s.route_commit(&RouteCommitRequest {
+            route_key: None,
+            bundle: b.clone(),
+        })
+        .unwrap();
+        let h = tick(&mut s, 50_000, Some(fix_xy(&b, 50_000, 0, 0)))
+            .horizon
+            .unwrap();
+        let head = &h.upcoming[0];
+        assert_eq!(
+            head.group_id.is_some(),
+            paired,
+            "{distance}, motorway={motorway}"
+        );
+        if paired {
+            assert_eq!(head.group_id.as_ref(), Some(&head.maneuver.id));
+            assert_eq!(h.upcoming[1].group_id, head.group_id);
+            assert!(h.upcoming[2].group_id.is_none());
+        }
+        let eta = head.eta_range_ms.unwrap();
+        let lead = if motorway { 20_000 } else { 8_000 };
+        assert_eq!(
+            h.next_p1_deadline_monotonic_ms,
+            Some(50_000 + u64::from(eta.typical) - lead)
+        );
+    }
+}
+
+#[test]
+fn last_junction_expires_after_either_inclusive_limit() {
+    let mut b = main_line();
+    let m = &mut b.legs[0].maneuvers[0];
+    m.arrow = Arrow::Right;
+    let evidence = |value| {
+        serde_json::from_value(
+            serde_json::json!({"kind":"confirmed","value":value,"source_ref":"test"}),
+        )
+        .unwrap()
+    };
+    m.approach_signal = evidence("absent");
+    m.crossing = evidence("across_oncoming");
+    let anchor = m.anchor.along_route_cm;
+    for time_limit in [true, false] {
+        let mut s = Session::new(SessionConfig {
+            fix_stale_ms: 200_000,
+            ..Default::default()
+        });
+        s.route_commit(&RouteCommitRequest {
+            route_key: None,
+            bundle: b.clone(),
+        })
+        .unwrap();
+        for t in [1_000, 2_000] {
+            let h = tick(&mut s, t, Some(fix_xy(&b, t, 150_100, 0)))
+                .horizon
+                .unwrap();
+            assert_eq!(h.refs.last.is_some(), t == 2_000);
+            if let Some(r) = h.refs.last {
+                assert_eq!((r.passed_along_cm, r.passed_at_mono_ms), (anchor, 2_000));
+            }
+        }
+        if time_limit {
+            assert_eq!(tick(&mut s, 182_000, None).next_wake_mono_ms, Some(182_001));
+            assert!(tick(&mut s, 182_001, None)
+                .horizon
+                .unwrap()
+                .refs
+                .last
+                .is_none());
+        } else {
+            assert!(tick(&mut s, 3_000, Some(fix_xy(&b, 3_000, 300_000, 0)))
+                .horizon
+                .unwrap()
+                .refs
+                .last
+                .is_some());
+            assert!(tick(&mut s, 4_000, Some(fix_xy(&b, 4_000, 300_010, 0)))
+                .horizon
+                .unwrap()
+                .refs
+                .last
+                .is_none());
+        }
+    }
 }

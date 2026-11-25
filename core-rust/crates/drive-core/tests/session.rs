@@ -44,8 +44,10 @@ fn validate_override_skeleton_rules() {
         Some(RejectCode::UnknownRef)
     );
     assert_eq!(
-        rejected(&mut s, "OVR rc=H jp=last", None),
-        Some(RejectCode::UnknownRef)
+        s.validate_override(req("OVR rc=H jp=last", None))
+            .unwrap_err()
+            .code,
+        ErrorCode::Unimplemented
     );
     // Not implemented yet → explicit E_UNIMPLEMENTED, never a silent "applied".
     let e = s.validate_override(req("OVR rc=H", None)).unwrap_err();

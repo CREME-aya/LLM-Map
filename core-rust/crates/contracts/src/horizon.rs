@@ -287,8 +287,7 @@ pub struct ManeuverHorizon {
     pub next_p1_deadline_monotonic_ms: Option<MonoMs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_complex_window: Option<ComplexWindow>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refs: Option<Refs>,
+    pub refs: Refs,
 }
 
 fn schema_version_1<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {

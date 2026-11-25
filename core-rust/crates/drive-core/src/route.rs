@@ -77,6 +77,7 @@ pub struct Seg {
 struct EdgeSpan {
     along_start: u32,
     along_end: u32,
+    flags: u32,
     time_start: u32,
     time_end: u32,
 }
@@ -91,6 +92,7 @@ pub struct LoadedRoute {
     /// All maneuvers in route order (validated non-decreasing `anchor.along_route_cm`).
     pub maneuvers: Vec<Maneuver>,
     edges: Vec<EdgeSpan>,
+    group_heads: Vec<Option<usize>>,
 }
 
 impl LoadedRoute {
@@ -246,6 +248,7 @@ impl LoadedRoute {
                 edges.push(EdgeSpan {
                     along_start: (route_along + u64::from(a0)) as u32,
                     along_end: (route_along + u64::from(a1)) as u32,
+                    flags: e.flags,
                     time_start: prev_time,
                     time_end: e.cum_time_ms,
                 });
@@ -292,7 +295,8 @@ impl LoadedRoute {
         if prev_time != b.eta_ms {
             return Err("eta_ms != cum_time_ms of the last edge".into());
         }
-        Ok(Self {
+        let mut route = Self {
+            group_heads: vec![None; maneuvers.len()],
             route_key: b.route_key.clone(),
             eta_ms: b.eta_ms,
             length_cm: b.length_cm,
@@ -300,7 +304,53 @@ impl LoadedRoute {
             segs,
             maneuvers,
             edges,
-        })
+        };
+        route.index_groups();
+        Ok(route)
+    }
+
+    pub(crate) fn motorway_approach(&self, along: u32) -> bool {
+        let edge = self.edges.partition_point(|e| e.along_end < along);
+        self.edges
+            .get(edge)
+            .is_some_and(|e| e.flags & contracts::route::EDGE_FLAG_MOTORWAY != 0)
+    }
+
+    fn index_groups(&mut self) {
+        use contracts::horizon::Arrow;
+        let mut i = 0;
+        while i + 1 < self.maneuvers.len() {
+            let a = &self.maneuvers[i];
+            let b = &self.maneuvers[i + 1];
+            let start = a.anchor.along_route_cm;
+            let end = b.anchor.along_route_cm;
+            let limit_cm = if self.motorway_approach(end) {
+                20_000
+            } else {
+                12_000
+            };
+            let branch = |m: &Maneuver| {
+                !matches!(
+                    m.arrow,
+                    Arrow::Arrive | Arrow::FerryBoard | Arrow::FerryLeave | Arrow::Generic
+                )
+            };
+            // Legs bound stops in the available route body. Do not group across that boundary.
+            if a.id.leg_index == b.id.leg_index
+                && branch(a)
+                && branch(b)
+                && (end - start <= limit_cm || self.time_at(end) - self.time_at(start) <= 12_000)
+            {
+                self.group_heads[i..=i + 1].fill(Some(i));
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    pub(crate) fn group_head(&self, index: usize) -> Option<&Maneuver> {
+        self.group_heads[index].map(|head| &self.maneuvers[head])
     }
 
     /// Travel time from the route start to `along_cm` (ms), interpolated inside the edge.

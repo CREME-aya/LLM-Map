@@ -477,12 +477,12 @@ impl Session {
         let was_tracking = self.aligner.tracking(now);
         let at = fix.at_mono_ms;
         let r = self.aligner.on_fix(route, &fix);
-        if r != FixResult::OutOfOrder {
+        if matches!(r, FixResult::OnRoute { .. }) {
             self.last_fix_at = Some(at);
         }
         if r != FixResult::OutOfOrder && (!was_tracking || !matches!(r, FixResult::OnRoute { .. }))
         {
-            self.frames.observe_sample(None);
+            self.frames.observe_sample(route, at, None);
         }
         match r {
             FixResult::OnRoute { along_cm, mode, .. } => {
@@ -496,7 +496,7 @@ impl Session {
                 }
                 if self
                     .frames
-                    .observe_sample(Some(along_cm))
+                    .observe_sample(route, at, Some(along_cm))
                     .is_some_and(|p| arrived(route, p))
                 {
                     self.finished = true;
@@ -562,10 +562,14 @@ impl Session {
         let horizon = self.next_horizon(now);
         // The freshness limit can turn tracking into uncertain without new input.
         let stale_at = self.route.as_ref().and_then(|_| self.aligner.stale_at(now));
-        let next_wake_mono_ms = match (self.planner.next_wake(), stale_at) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        let next_wake_mono_ms = [
+            self.planner.next_wake(),
+            stale_at,
+            self.frames.last_ref_expires_at(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         TickOutput {
             horizon,
             voice_cmds: Vec::new(),
@@ -588,6 +592,7 @@ impl Session {
             progress,
             sampled,
             self.align_cfg.fix_stale_ms,
+            now,
         )
     }
 
@@ -610,8 +615,20 @@ impl Session {
             Command::Yes | Command::No | Command::Cxl if req.pending_offer_id.is_none() => {
                 rejected(RejectCode::NoPendingTarget)
             }
-            // TODO(drive-core): refs come from ManeuverHorizon.refs (not produced yet) → always unknown.
-            Command::Ovr(a) if matches!(a.jp, Some(JpRef::Next | JpRef::Last)) => {
+            // A missing last junction skips only the profile proposal (03 §4.1).
+            Command::Ovr(a) if a.jp == Some(JpRef::Next) => {
+                if let Some(reference) = self.frames.refs().and_then(|refs| refs.next.as_ref()) {
+                    if self.frames.frame_seq() != req.ref_frame_seq {
+                        return rejected(RejectCode::StaleRevision);
+                    }
+                    if req.utterance_mono_ms >= reference.deadline_mono_ms {
+                        return rejected(RejectCode::Expired);
+                    }
+                    return Err(CoreError::new(
+                        ErrorCode::Unimplemented,
+                        "override safety gate pending",
+                    ));
+                }
                 rejected(RejectCode::UnknownRef)
             }
             _ => Err(CoreError::new(

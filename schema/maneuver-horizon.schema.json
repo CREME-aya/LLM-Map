@@ -12,7 +12,8 @@
     "sampled_at_monotonic_ms",
     "valid_until_monotonic_ms",
     "status",
-    "upcoming"
+    "upcoming",
+    "refs"
   ],
   "properties": {
     "schema_version": {

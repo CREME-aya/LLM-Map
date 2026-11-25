@@ -393,7 +393,11 @@ fn tunnel_recovery_reacquires_through_the_grid() {
         .rev()
         .find_map(|s| s.out.horizon.as_ref())
         .unwrap();
-    assert_eq!(h.upcoming, before.upcoming);
+    let mut frozen = before.upcoming.clone();
+    for entry in &mut frozen {
+        entry.eta_range_ms = None;
+    }
+    assert_eq!(h.upcoming, frozen);
     // no frames while nothing changes in the tunnel
     let quiet = r
         .steps
