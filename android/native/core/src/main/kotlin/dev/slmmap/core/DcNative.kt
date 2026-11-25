@@ -32,8 +32,9 @@ object DcNative {
     @JvmStatic external fun validateOverride(handle: Long, input: ByteArray): ByteArray?
     @JvmStatic external fun routeCommit(handle: Long, input: ByteArray): ByteArray?
     @JvmStatic external fun avoidOfferEval(handle: Long, input: ByteArray): ByteArray?
+    /** dc_plan_candidates(s, {now_mono_ms, eta_estimate_s?, snapshot}). */
+    @JvmStatic external fun planCandidates(handle: Long, input: ByteArray): ByteArray?
 
-    @JvmStatic external fun planCandidates(input: ByteArray): ByteArray?
     @JvmStatic external fun rank(input: ByteArray): ByteArray?
     @JvmStatic external fun tripScore(input: ByteArray): ByteArray?
     @JvmStatic external fun exchangeValidate(input: ByteArray): ByteArray?

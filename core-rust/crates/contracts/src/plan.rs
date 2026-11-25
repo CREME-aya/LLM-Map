@@ -81,7 +81,7 @@ pub struct PlanBudget {
 /// One search request produced by `Session::plan_candidates` (03 §2 `CandidatePlanner`:
 /// ordered `CandidateRequest[]`, labels per 03 §3.1). Kotlin turns it into a Valhalla
 /// request when a `start{candidate_id}` for it arrives.
-/// TODO(schema-v1): no schema file yet (output of dc_plan_candidates, which is not wired).
+/// TODO(schema-v1): no schema file yet (part of the dc_plan_candidates output).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateRequest {
@@ -117,6 +117,19 @@ pub enum CostingVariant {
     PreferTrunk,
     /// `service_penalty` で生活道路入口を抑制.
     ServicePenalty,
+}
+
+/// Input of `dc_plan_candidates(s, req)` (team decision 2026-11-25):
+/// `{now_mono_ms, eta_estimate_s?, snapshot}`. `eta_estimate_s` is the pre-search ETA
+/// estimate that fixes the plan's distance class (absent → long).
+/// TODO(schema-v1): no schema file yet; unknown fields are rejected.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanCandidatesRequest {
+    pub now_mono_ms: crate::common::MonoMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_estimate_s: Option<u64>,
+    pub snapshot: TripPlanSnapshot,
 }
 
 /// Result of `Session::plan_candidates` (shape: team decision 2026-11-25, plus the wake

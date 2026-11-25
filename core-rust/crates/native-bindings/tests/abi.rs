@@ -111,7 +111,6 @@ fn null_handle_and_bad_json() {
 fn unimplemented_functions_are_explicit() {
     unsafe {
         for v in [
-            take(dc_plan_candidates(din(b"{}"))),
             take(dc_rank(din(b"{}"))),
             take(dc_trip_score(din(b"{}"))),
             take(dc_exchange_validate(din(b"{}"))),
@@ -125,6 +124,10 @@ fn unimplemented_functions_are_explicit() {
         );
         assert_eq!(
             take(dc_avoid_offer_eval(ptr::null_mut(), din(b"{}")))["error"]["code"],
+            "E_INVALID_HANDLE"
+        );
+        assert_eq!(
+            take(dc_plan_candidates(ptr::null_mut(), din(b"{}")))["error"]["code"],
             "E_INVALID_HANDLE"
         );
     }
@@ -253,6 +256,70 @@ fn route_commit_rechecks_route_key() {
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
         for bad in [&b"{}"[..], b"{", br#"{"route_key":{"trip_id":"t"}}"#] {
             let v = take(dc_route_commit(s, din(bad)));
+            assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
+        }
+        dc_session_free(s);
+    }
+}
+
+/// dc_plan_candidates(s, {now_mono_ms, eta_estimate_s?, snapshot}) returns the
+/// Session::plan_candidates result; the plan's searches continue through dc_tick.
+#[test]
+fn plan_candidates_through_the_session() {
+    unsafe {
+        let snapshot: Value = serde_json::from_slice(
+            &std::fs::read(schema_fixture_dir("valid").join("trip-plan-snapshot.min.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let mut s = ptr::null_mut();
+        take(dc_session_new(din(b"{}"), &mut s));
+        let req =
+            serde_json::json!({"now_mono_ms": 100, "eta_estimate_s": 1799, "snapshot": snapshot});
+        let v = take(dc_plan_candidates(
+            s,
+            din(&serde_json::to_vec(&req).unwrap()),
+        ));
+        assert_eq!(v["ok"], true, "{v}");
+        let d = &v["data"];
+        assert_eq!(d["plan_request_id"], "p1");
+        assert_eq!(d["distance_class"], "short");
+        assert_eq!(d["candidates"].as_array().unwrap().len(), 3);
+        assert_eq!(d["candidates"][0]["candidate_id"], "c1");
+        let cmds = d["planner_cmds"].as_array().unwrap();
+        assert_eq!(cmds.len(), 1, "{d}");
+        assert_eq!(cmds[0]["cmd"], "start");
+        assert_eq!(cmds[0]["candidate_id"], "c1");
+        assert_eq!(cmds[0]["distance_class"], "short");
+        // short: comparison budget 100 + 3000 before the watchdog 100 + 5000
+        assert_eq!(d["next_wake_mono_ms"], 3_100);
+        assert!(d["log"].as_array().is_some());
+        // c1 returns ok -> the next candidate starts from dc_tick in the same session
+        let rk = &cmds[0]["route_key"];
+        let t = serde_json::json!({"now_mono_ms": 200, "events": [{"at_mono_ms": 200,
+            "kind": "search_finished", "req_id": cmds[0]["req_id"], "route_key": rk,
+            "graph_version": "jp-2026.11.0", "outcome": "ok", "facts_ref": "f1", "engine_ms": 100}]});
+        let v = take(dc_tick(s, din(&serde_json::to_vec(&t).unwrap())));
+        assert_eq!(v["data"]["planner_cmds"][0]["candidate_id"], "c2", "{v}");
+        // without an estimate a new plan is long
+        let mut snap2 = snapshot.clone();
+        snap2["plan_request_id"] = "p2".into();
+        let req = serde_json::json!({"now_mono_ms": 300, "snapshot": snap2});
+        let v = take(dc_plan_candidates(
+            s,
+            din(&serde_json::to_vec(&req).unwrap()),
+        ));
+        assert_eq!(v["data"]["distance_class"], "long", "{v}");
+        // schema errors: unknown field, missing snapshot, bad JSON
+        for bad in [
+            serde_json::to_vec(
+                &serde_json::json!({"now_mono_ms": 1, "snapshot": snapshot, "extra": 1}),
+            )
+            .unwrap(),
+            br#"{"now_mono_ms":1}"#.to_vec(),
+            b"{".to_vec(),
+        ] {
+            let v = take(dc_plan_candidates(s, din(&bad)));
             assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
         }
         dc_session_free(s);

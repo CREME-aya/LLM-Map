@@ -5,7 +5,7 @@ The contract shared by Web (Zod) and Rust (serde) (ADR-0002 §4). All files use 
 | File | Role | Used by |
 |---|---|---|
 | `common.schema.json` | `U64Str` (u64 as a decimal string, Web-reachable IDs / revisions only) / `MonoMs` (JSON integer) / `UnixS` / `RouteKey` / `Evidence` / `ErrorCode` / `DcEnvelope` | Referenced by every schema |
-| `trip-plan-snapshot.schema.json` | `TripPlanSnapshot` | Input to `dc_plan_candidates` |
+| `trip-plan-snapshot.schema.json` | `TripPlanSnapshot` | `snapshot` of the `dc_plan_candidates(s, {now_mono_ms, eta_estimate_s?, snapshot})` input |
 | `candidate-facts.schema.json` | `CandidateFacts` (scoring JSON generated once by C++) | Input to `dc_rank` / `dc_avoid_offer_eval` |
 | `maneuver-horizon.schema.json` | `ManeuverHorizon` v1 (including `refs{next?,last?}` and `AvoidOffer.offer_id`) | `TickOutput.horizon` |
 | `personal-routing-override.schema.json` | Expanded form of the 1-line `OVR` code | `Applied.override` from `dc_validate_override` |

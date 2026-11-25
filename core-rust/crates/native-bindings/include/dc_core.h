@@ -35,11 +35,15 @@ typedef struct dc_session dc_session;
 /* 4  */ void     dc_session_free(dc_session* s);       /* NULL is safe. Double free is undefined.
                                                          * Called on explicit actor close, never from a GC finalizer. */
 
-/* 5  */ dc_out   dc_plan_candidates(dc_in trip_plan_snapshot_json);           /* -> CandidateRequest[]   (TODO: E_UNIMPLEMENTED) */
-         /* TODO(abi-v1): not wired. The body is Session::plan_candidates(now_mono_ms, eta_estimate_s?,
-          * TripPlanSnapshot) -> {plan_request_id, distance_class, candidates[], planner_cmds[],
-          * next_wake_mono_ms, log[]}; it needs the session, so the signature change
-          * (dc_plan_candidates(s, ...), decided, separate work before Gate 0) comes first. */
+/* 5  */ dc_out   dc_plan_candidates(dc_session* s, dc_in req_json);
+         /* in : {now_mono_ms, eta_estimate_s?, snapshot: TripPlanSnapshot}
+          *      eta_estimate_s = pre-search ETA estimate (< 1800 -> short; >= 1800 or absent -> long)
+          * out: {plan_request_id, distance_class: short|long,
+          *       candidates[{candidate_id, label, priority, engine_alternates, costing_variant?}],
+          *       planner_cmds[] (the first start{..., candidate_id}; the rest come from dc_tick),
+          *       next_wake_mono_ms: u64|null, log[]}
+          * Same plan_request_id as the current plan -> class kept, nothing re-queued; a new one
+          * supersedes the current plan (its running search gets cancel). Unknown fields -> E_SCHEMA. */
 /* 6  */ dc_out   dc_rank(dc_in rank_req_json);         /* {facts[], policy, profile} -> RouteComparison (TODO: E_UNIMPLEMENTED) */
 /* 7  */ dc_out   dc_validate_override(dc_session* s, dc_in req_json);
          /* req: {code_line, contract, utterance_id (required), utterance_mono_ms, ref_frame_seq, pending_offer_id?}

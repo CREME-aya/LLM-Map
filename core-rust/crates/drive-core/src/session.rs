@@ -157,8 +157,7 @@ impl Session {
     /// as each `search_finished` arrives). The plan ends with one `rank` in `planner_cmds`.
     /// Candidate searches use `route_key {trip_id, trip_revision, route_revision: 0,
     /// graph_version}` from the snapshot.
-    /// TODO(abi-v1): dc_plan_candidates(dc_in) takes no session today; the ABI change to
-    /// pass the session (decided, separate work before Gate 0) will just call this.
+    /// Called by `dc_plan_candidates(s, {now_mono_ms, eta_estimate_s?, snapshot})`.
     /// TODO(abi-v1): route_revision 0 for a plan without a committed route is provisional;
     /// `budget.deadline_ms` is not used (its relation to the comparison budget is unspecified).
     pub fn plan_candidates(

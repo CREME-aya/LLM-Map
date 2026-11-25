@@ -28,6 +28,14 @@ class DcSession private constructor(private var handle: Long) : Closeable {
 
     fun avoidOfferEval(reqJson: ByteArray): ByteArray = call { DcNative.avoidOfferEval(it, reqJson) }
 
+    /**
+     * dc_plan_candidates: {now_mono_ms, eta_estimate_s?, snapshot: TripPlanSnapshot} ->
+     * {plan_request_id, distance_class, candidates, planner_cmds, next_wake_mono_ms, log}.
+     * Execute planner_cmds and honour next_wake_mono_ms exactly as for tick(); the remaining
+     * candidate searches and the final rank come from later tick() outputs.
+     */
+    fun planCandidates(reqJson: ByteArray): ByteArray = call { DcNative.planCandidates(it, reqJson) }
+
     /** Explicit close from the actor. Idempotent on the Kotlin side. */
     override fun close() {
         val h = handle

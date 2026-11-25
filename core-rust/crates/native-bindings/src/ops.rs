@@ -2,6 +2,7 @@
 //! Every function returns a complete `{ok, data | error}` envelope.
 
 use contracts::override_types::ValidateOverrideRequest;
+use contracts::plan::PlanCandidatesRequest;
 use contracts::tick::TickInput;
 use contracts::{envelope_err, envelope_ok, ErrorCode, RouteKey};
 use drive_core::{CoreError, Session};
@@ -84,6 +85,15 @@ pub fn validate_override(s: &mut Session, input: &[u8]) -> Vec<u8> {
             Err(e) => err(e),
         },
         Err(e) => envelope_err(ErrorCode::Schema, &format!("validate_override: {e}")),
+    }
+}
+
+/// `dc_plan_candidates(s, {now_mono_ms, eta_estimate_s?, snapshot})` →
+/// `Session::plan_candidates` result.
+pub fn plan_candidates(s: &mut Session, input: &[u8]) -> Vec<u8> {
+    match serde_json::from_slice::<PlanCandidatesRequest>(input) {
+        Ok(r) => envelope_ok(&s.plan_candidates(r.now_mono_ms, r.eta_estimate_s, &r.snapshot)),
+        Err(e) => envelope_err(ErrorCode::Schema, &format!("plan_candidates: {e}")),
     }
 }
 

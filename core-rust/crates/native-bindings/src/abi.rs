@@ -128,9 +128,11 @@ pub unsafe extern "C" fn dc_avoid_offer_eval(s: *mut DcSession, req_json: DcIn) 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dc_plan_candidates(trip_plan_snapshot_json: DcIn) -> DcOut {
-    let inp = input(trip_plan_snapshot_json);
-    DcOut::from_vec(guard(|| ops::unimplemented("dc_plan_candidates", inp)))
+pub unsafe extern "C" fn dc_plan_candidates(s: *mut DcSession, req_json: DcIn) -> DcOut {
+    let inp = input(req_json);
+    DcOut::from_vec(guard(|| {
+        ops::with_session(session(s), |ss| ops::plan_candidates(ss, inp))
+    }))
 }
 
 #[no_mangle]
