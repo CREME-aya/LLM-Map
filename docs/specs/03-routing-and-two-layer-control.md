@@ -143,7 +143,7 @@ engine_stuck ──search_finished{req_id}──▶ Idle
   - **L1/L2/L3 共通** の式。`dc_rank`（候補採点）と `dc_avoid_offer_eval`（回避チップ評価）は **同じ関数** を使う。
   - `dt=T` は §4.1 の L3 命令で迂回を厳しくした場合（`tight_factor` を乗じる）。
   - **走行中の回避チップ** では `base_eta` = 現行経路の **残り ETA**。
-  - ユーザー値 `profile_weights.max_detour_ratio`（§5）は既定 NULL（= 方針値）。設定時は **厳しくする方向にのみ有効** で、1.35 で頭打ち（DDL の CHECK で 1.0〜1.35）。採否式では増加秒数に換算して使う。
+  - ユーザー値 `profile_weights.max_detour_ratio_permille`（§5、千分率）は既定 NULL（= 方針値）。設定時は **厳しくする方向にのみ有効** で、1.35 で頭打ち（DDL の CHECK で 1000〜1350）。採否式では増加秒数に換算して使う。
 - **表示の 3 軸（固定）**:
   1. **所要時間差**: 基準経路との差分（快適性ペナルティは比較順位のスコア計算のみに使い、ETA 表示自体は改変しない）。
   2. **対向横断右折数**: 「信号なし確認」「信号あり・保護未確認」「信号未確認」を分けてカウント（＋右折入口件数）。
@@ -172,7 +172,7 @@ engine_stuck ──search_finished{req_id}──▶ Idle
    - 回数で数える項目（右折・合流など）：`penalty_ms × 件数`。距離で数える項目（狭路・幅未確認の生活道路）：`penalty_ms_per_100m × length_cm / 10000`（切り捨て）。
    - **目的地への対向横断入口（+90 秒、置換）** は、その到着操作の右折ペナルティを **置き換える**（足し合わせない）。入口の方向が不明なら +45 秒。
 3. **重み `weight_permille`（千分率の整数）**: 軸（右折 / 狭路 / 合流）ごとに `L2 の倍率 × L3 の倍率 / 1000`。
-   - L2：`profile_weights.*_penalty_scale` を千分率に換算した値（既定 1000）。
+   - L2：`profile_weights.*_penalty_permille`（千分率の整数、既定 1000）。
    - L3：§4.1 の `low / normal / high` を **500 / 1000 / 2000**（暫定。0 倍・負数は禁止のまま）。L3 の指定がなければ 1000。
 4. **並び順**: `score_ms` の小さい順。同点なら **ETA → 未知区間距離 → 候補指紋（文字列として辞書順）** の順で比べる（決定論）。
 5. **表示用の数**（3 軸）は、ペナルティや重みを掛けない **生の件数・距離** を `CandidateFacts.counts` / `narrow_m` / `unknown_width_residential_m` から出す（ETA 表示は改変しない、§3.2 の 1 のとおり）。
@@ -303,11 +303,15 @@ dc_validate_override(h, { code_line, contract, utterance_id, utterance_mono_ms, 
 -- 1. コンテキスト別の運転しやすさ重みオフセット（承認済みL2）
 CREATE TABLE profile_weights (
   context_key TEXT PRIMARY KEY,           -- 'default', 'night', 'rain', 'highway_long'
-  right_turn_penalty_scale REAL NOT NULL DEFAULT 1.0,
-  narrow_road_penalty_scale REAL NOT NULL DEFAULT 1.0,
-  merge_penalty_scale REAL NOT NULL DEFAULT 1.0,
-  max_detour_ratio REAL DEFAULT NULL      -- NULL = 方針値（03 §3.2 / 07 §1 DetourPolicy）。
-    CHECK (max_detour_ratio IS NULL OR max_detour_ratio BETWEEN 1.0 AND 1.35),
+  -- 重みは千分率の整数（1000 = 1.0 倍）。採点（§3.2）と同じ整数のまま Kotlin → Rust に渡す（丸めのずれを作らない）
+  right_turn_penalty_permille INTEGER NOT NULL DEFAULT 1000
+    CHECK (right_turn_penalty_permille BETWEEN 250 AND 4000),   -- 範囲は暫定。0 倍・負数は禁止
+  narrow_road_penalty_permille INTEGER NOT NULL DEFAULT 1000
+    CHECK (narrow_road_penalty_permille BETWEEN 250 AND 4000),
+  merge_penalty_permille INTEGER NOT NULL DEFAULT 1000
+    CHECK (merge_penalty_permille BETWEEN 250 AND 4000),
+  max_detour_ratio_permille INTEGER DEFAULT NULL   -- NULL = 方針値（03 §3.2 / 07 §1 DetourPolicy）。
+    CHECK (max_detour_ratio_permille IS NULL OR max_detour_ratio_permille BETWEEN 1000 AND 1350),
                                           -- ユーザーが迂回を厳しくするための値（1.35 で頭打ち）。
                                           -- §3.2 の採否式では増加秒数に換算して使う
   source TEXT NOT NULL
