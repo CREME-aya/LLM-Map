@@ -7,6 +7,7 @@ use contracts::plan::PlanCandidatesRequest;
 use contracts::rank::RankRequest;
 use contracts::route::RouteCommitRequest;
 use contracts::tick::TickInput;
+use contracts::trip_score::TripScoreRequest;
 use contracts::{envelope_err, envelope_ok, ErrorCode, RouteKey};
 use drive_core::{CoreError, Session};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -164,6 +165,17 @@ pub fn rank(input: &[u8]) -> Vec<u8> {
             Err(e) => err(e),
         },
         Err(e) => envelope_err(ErrorCode::Schema, &format!("rank: {e}")),
+    }
+}
+
+/// `dc_trip_score(req)` → `TripScoreResult` (02 §2.1 #8, 05 §6.1).
+pub fn trip_score(input: &[u8]) -> Vec<u8> {
+    match serde_json::from_slice::<TripScoreRequest>(input) {
+        Ok(r) => match drive_core::trip_score::evaluate(&r) {
+            Ok(res) => envelope_ok(&res),
+            Err(e) => err(e),
+        },
+        Err(e) => envelope_err(ErrorCode::Schema, &format!("trip_score: {e}")),
     }
 }
 

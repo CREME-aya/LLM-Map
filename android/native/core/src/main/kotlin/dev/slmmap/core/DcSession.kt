@@ -122,6 +122,14 @@ class DcSession private constructor(private var handle: Long) : Closeable {
         fun rank(reqJson: ByteArray): ByteArray =
             DcNative.rank(reqJson) ?: throw OutOfMemoryError("dc_core: rank result ByteArray allocation failed")
 
+        /**
+         * Stateless dc_trip_score: 05 §6.1 trip-mode card (C01) trigger scoring
+         * (schema/trip-score.schema.json; 02 §2.1 #8). Integer-only; threshold default 3
+         * (provisional); suppressed (show_card=false) on driving reroutes.
+         */
+        fun tripScore(reqJson: ByteArray): ByteArray =
+            DcNative.tripScore(reqJson) ?: throw OutOfMemoryError("dc_core: tripScore result ByteArray allocation failed")
+
         /** Returns the session, or the error envelope bytes from dc_session_new. */
         fun open(configJson: ByteArray): Result<DcSession> {
             check(DcNative.abiVersion() == DcNative.EXPECTED_ABI_VERSION) { "dc_core ABI mismatch" }

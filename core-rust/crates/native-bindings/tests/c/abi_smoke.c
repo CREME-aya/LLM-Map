@@ -40,7 +40,9 @@ int main(void) {
     fails += expect(dc_rank(in_str("{}")), "E_SCHEMA", "rank(empty)");
     fails += expect(dc_rank(in_str("{\"facts\":[{\"candidate_id\":\"c1\",\"label\":\"baseline\",\"plan_request_id\":\"p1\",\"graph_version\":\"g\",\"fingerprint\":\"fp1\",\"legal\":true,\"complete\":true,\"eta_ms\":600000,\"length_m\":5000,\"counts\":{\"right_unprotected\":0,\"right_signal_unknown_protection\":0,\"right_signal_unknown\":0,\"right_protected\":0,\"right_entry\":1,\"merges\":0},\"narrow_m\":{\"confirmed\":0,\"inferred\":0},\"unknown_width_residential_m\":0,\"unknown_length_m\":0,\"junctions\":[],\"through_anchors\":[]}]}")),
         "\"score_ms\":690000", "rank");
-    fails += expect(dc_trip_score(in_str("{}")), "E_UNIMPLEMENTED", "trip_score");
+    fails += expect(dc_trip_score(in_str("{}")), "E_SCHEMA", "trip_score(empty)");
+    fails += expect(dc_trip_score(in_str("{\"distance_m\":150000,\"eta_s\":3600,\"motorway_ratio_permille\":500,\"destination_kind\":\"castle\",\"outside_daily_area\":true,\"corridor_history_density\":\"high\",\"recently_declined_similar\":false,\"is_driving_reroute\":false}")),
+        "\"show_card\":true", "trip_score");
     fails += expect(dc_exchange_validate(in_str("{}")), "E_UNIMPLEMENTED", "exchange_validate");
     fails += expect(dc_tick(NULL, in_str("{}")), "E_INVALID_HANDLE", "tick(NULL)");
     dc_session_free(s);

@@ -142,7 +142,7 @@ pub unsafe extern "C" fn dc_rank(rank_req_json: DcIn) -> DcOut {
 #[no_mangle]
 pub unsafe extern "C" fn dc_trip_score(trip_summary_json: DcIn) -> DcOut {
     let inp = input(trip_summary_json);
-    DcOut::from_vec(guard(|| ops::unimplemented("dc_trip_score", inp)))
+    DcOut::from_vec(guard(|| ops::trip_score(inp)))
 }
 
 #[no_mangle]

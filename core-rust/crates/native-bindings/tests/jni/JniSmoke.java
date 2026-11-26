@@ -35,7 +35,8 @@ public final class JniSmoke {
         check("planCandidates handle 0", DcNative.planCandidates(0L, b("{}")), "E_INVALID_HANDLE");
         check("rank bad", DcNative.rank(b("{}")), "E_SCHEMA");
         check("rank", DcNative.rank(b("{\"facts\":[{\"candidate_id\":\"c1\",\"label\":\"baseline\",\"plan_request_id\":\"p1\",\"graph_version\":\"g\",\"fingerprint\":\"fp1\",\"legal\":true,\"complete\":true,\"eta_ms\":600000,\"length_m\":5000,\"counts\":{\"right_unprotected\":0,\"right_signal_unknown_protection\":0,\"right_signal_unknown\":0,\"right_protected\":0,\"right_entry\":1,\"merges\":0},\"narrow_m\":{\"confirmed\":0,\"inferred\":0},\"unknown_width_residential_m\":0,\"unknown_length_m\":0,\"junctions\":[],\"through_anchors\":[]}]}")), "\"score_ms\":690000");
-        check("tripScore", DcNative.tripScore(b("{}")), "E_UNIMPLEMENTED");
+        check("tripScore bad", DcNative.tripScore(b("{}")), "E_SCHEMA");
+        check("tripScore", DcNative.tripScore(b("{\"distance_m\":150000,\"eta_s\":3600,\"motorway_ratio_permille\":500,\"destination_kind\":\"castle\",\"outside_daily_area\":true,\"corridor_history_density\":\"high\",\"recently_declined_similar\":false,\"is_driving_reroute\":false}")), "\"show_card\":true");
         check("exchangeValidate", DcNative.exchangeValidate(b("{}")), "E_UNIMPLEMENTED");
         // large payload pass-through (≈1 MB) still round-trips as a ByteArray
         StringBuilder sb = new StringBuilder("{\"now_mono_ms\":20,\"events\":[");

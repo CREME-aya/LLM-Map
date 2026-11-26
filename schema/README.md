@@ -8,6 +8,7 @@ The contract shared by Web (Zod) and Rust (serde) (ADR-0002 §4). All files use 
 | `trip-plan-snapshot.schema.json` | `TripPlanSnapshot` | `snapshot` of the `dc_plan_candidates(s, {now_mono_ms, eta_estimate_s?, snapshot})` input |
 | `candidate-facts.schema.json` | `CandidateFacts` (scoring JSON generated once by C++) | Input to `dc_rank` / `dc_avoid_offer_eval` |
 | `route-comparison.schema.json` | `RankRequest` (`{facts[], policy?, profile?}`) and `RouteComparison` (ranked candidates, unweighted 3-axis display values, dropped candidates) | `dc_rank` in / out |
+| `trip-score.schema.json` | `TripScoreRequest` (05 §6.1 trip scoring inputs + optional provisional `policy`) and `TripScoreResult` (`score`, `threshold`, `show_card`, `suppressed_by_reroute`, `breakdown`) | `dc_trip_score` in / out |
 | `maneuver-horizon.schema.json` | `ManeuverHorizon` v1 (including `refs{next?,last?}` and `AvoidOffer.offer_id`) | `TickOutput.horizon` |
 | `personal-routing-override.schema.json` | Expanded form of the 1-line `OVR` code | `Applied.override` from `dc_validate_override` |
 | `route-bundle.schema.json` | `RouteBundle` (route body: legs → chunks with `origin_e7` + Q16 factors + integer cm points / `seg_along_cm` / `bearing_cdeg`, edges with `cum_time_ms`, `Maneuver` via `$ref`) and `$defs/RouteCommitRequest` `{req_id, expected_route_key \| null, bundle}` (02 §2.1 #9, 04 §3.1; fixed-point contract in the description, provisional) | `dc_route_commit` in |

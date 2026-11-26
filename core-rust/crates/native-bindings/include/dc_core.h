@@ -64,7 +64,12 @@ typedef struct dc_session dc_session;
           *                                       05 §6.2; emits save_for_later{poi_id, bmk} on next dc_tick;
           *                                       shape provisional; else REJECTED NO_PENDING_TARGET)
           * (skeleton: SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF / CXL undo / BMK; else E_UNIMPLEMENTED) */
-/* 8  */ dc_out   dc_trip_score(dc_in trip_summary_json);                      /* TODO: E_UNIMPLEMENTED */
+/* 8  */ dc_out   dc_trip_score(dc_in trip_summary_json);
+         /* in : {distance_m, eta_s, motorway_ratio_permille (0..=1000), destination_kind,
+          *       outside_daily_area, corridor_history_density, recently_declined_similar, is_driving_reroute,
+          *       policy?} (schema/trip-score.schema.json; 02 §2.1 #8, 05 §6.1).
+          * out: {score, threshold, show_card, suppressed_by_reroute, breakdown}
+          *      Integer-only; threshold default 3 (provisional); is_driving_reroute=true -> show_card=false. */
 /* 9  */ dc_out   dc_route_commit(dc_session* s, dc_in route_bundle_json);     /* route body only here */
          /* in : {req_id: string, expected_route_key: RouteKey|null, bundle: RouteBundle}
           *      (schema/route-bundle.schema.json; 02 §2.1 #9)

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slm-map.invalid/schema/trip-score.schema.json",
+  "title": "dc_trip_score (TripScoreRequest / TripScoreResult)",
+  "description": "Input and output contract for dc_trip_score (02 §2.1 #8, 05 §6.1). Integer-only (no floating point). Computes trip score at route confirmation to decide whether to present the C01 trip-mode card (default OFF; never shown on driving reroutes). The root accepts either TripScoreRequest or TripScoreResult; validate against #/$defs/<Name> for a specific type.",
+  "anyOf": [
+    { "$ref": "#/$defs/TripScoreRequest" },
+    { "$ref": "#/$defs/TripScoreResult" }
+  ],
+  "$defs": {
+    "DestinationKind": {
+      "description": "Destination category (05 §6.1: sightseeing / historic_site / castle / michinoeki / lodging -> +2, other -> 0).",
+      "enum": ["sightseeing", "historic_site", "castle", "michinoeki", "lodging", "other"]
+    },
+    "HistoryDensity": {
+      "description": "Corridor historical spot density in the local pack (05 §6.1: high -> +1).",
+      "enum": ["low", "normal", "high"]
+    },
+    "TripScorePolicy": {
+      "description": "Provisional scoring thresholds and weights (05 §6.1). All fields optional; defaults match 05 §6.1 (eta_threshold_s defaults to 3600 s = 60 min from the 60-75 min initial range; threshold defaults to 3).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "threshold": { "type": "integer" },
+        "distance_medium_m": { "type": "integer", "minimum": 0 },
+        "distance_long_m": { "type": "integer", "minimum": 0 },
+        "distance_medium_pts": { "type": "integer" },
+        "distance_long_pts": { "type": "integer" },
+        "eta_threshold_s": { "type": "integer", "minimum": 0 },
+        "eta_pts": { "type": "integer" },
+        "motorway_ratio_threshold_permille": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "motorway_pts": { "type": "integer" },
+        "destination_pts": { "type": "integer" },
+        "outside_daily_area_pts": { "type": "integer" },
+        "high_history_density_pts": { "type": "integer" },
+        "recently_declined_similar_pts": { "type": "integer" }
+      }
+    },
+    "TripScoreRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "distance_m",
+        "eta_s",
+        "motorway_ratio_permille",
+        "destination_kind",
+        "outside_daily_area",
+        "corridor_history_density",
+        "recently_declined_similar",
+        "is_driving_reroute"
+      ],
+      "properties": {
+        "distance_m": { "type": "integer", "minimum": 0 },
+        "eta_s": { "type": "integer", "minimum": 0 },
+        "motorway_ratio_permille": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "destination_kind": { "$ref": "#/$defs/DestinationKind" },
+        "outside_daily_area": { "type": "boolean" },
+        "corridor_history_density": { "$ref": "#/$defs/HistoryDensity" },
+        "recently_declined_similar": { "type": "boolean" },
+        "is_driving_reroute": { "type": "boolean" },
+        "policy": { "$ref": "#/$defs/TripScorePolicy" }
+      }
+    },
+    "TripScoreBreakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "distance",
+        "eta",
+        "motorway",
+        "destination",
+        "outside_daily_area",
+        "corridor_history_density",
+        "recently_declined_similar"
+      ],
+      "properties": {
+        "distance": { "type": "integer" },
+        "eta": { "type": "integer" },
+        "motorway": { "type": "integer" },
+        "destination": { "type": "integer" },
+        "outside_daily_area": { "type": "integer" },
+        "corridor_history_density": { "type": "integer" },
+        "recently_declined_similar": { "type": "integer" }
+      }
+    },
+    "TripScoreResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "threshold", "show_card", "suppressed_by_reroute", "breakdown"],
+      "properties": {
+        "score": { "type": "integer" },
+        "threshold": { "type": "integer" },
+        "show_card": { "type": "boolean" },
+        "suppressed_by_reroute": { "type": "boolean" },
+        "breakdown": { "$ref": "#/$defs/TripScoreBreakdown" }
+      }
+    }
+  }
+}

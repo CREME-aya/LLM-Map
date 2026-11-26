@@ -110,14 +110,17 @@ fn null_handle_and_bad_json() {
 #[test]
 fn unimplemented_functions_are_explicit() {
     unsafe {
-        for v in [
-            take(dc_trip_score(din(b"{}"))),
-            take(dc_exchange_validate(din(b"{}"))),
-        ] {
-            assert_eq!(v["error"]["code"], "E_UNIMPLEMENTED");
-        }
+        assert_eq!(
+            take(dc_exchange_validate(din(b"{}")))["error"]["code"],
+            "E_UNIMPLEMENTED"
+        );
         assert_eq!(take(dc_rank(din(b"{}")))["error"]["code"], "E_SCHEMA");
         assert_eq!(take(dc_rank(din(b"nope")))["error"]["code"], "E_SCHEMA");
+        assert_eq!(take(dc_trip_score(din(b"{}")))["error"]["code"], "E_SCHEMA");
+        assert_eq!(
+            take(dc_trip_score(din(b"nope")))["error"]["code"],
+            "E_SCHEMA"
+        );
         assert_eq!(
             take(dc_route_commit(ptr::null_mut(), din(b"{}")))["error"]["code"],
             "E_INVALID_HANDLE"
@@ -130,6 +133,38 @@ fn unimplemented_functions_are_explicit() {
             take(dc_plan_candidates(ptr::null_mut(), din(b"{}")))["error"]["code"],
             "E_INVALID_HANDLE"
         );
+    }
+}
+
+/// dc_trip_score through the C ABI: scores 05 §6.1 factors, enforces driving-reroute
+/// suppression, and rejects out-of-range motorway_ratio_permille with E_SCHEMA.
+#[test]
+fn trip_score_through_c_abi() {
+    unsafe {
+        let req =
+            std::fs::read(schema_fixture_dir("valid").join("trip-score.request.min.json")).unwrap();
+        let v = take(dc_trip_score(din(&req)));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["data"]["score"], 10);
+        assert_eq!(v["data"]["threshold"], 3);
+        assert_eq!(v["data"]["show_card"], true);
+        assert_eq!(v["data"]["suppressed_by_reroute"], false);
+
+        // Driving reroute suppresses show_card even with high score
+        let mut reroute: Value = serde_json::from_slice(&req).unwrap();
+        reroute["is_driving_reroute"] = serde_json::json!(true);
+        let vr = take(dc_trip_score(din(&serde_json::to_vec(&reroute).unwrap())));
+        assert_eq!(vr["ok"], true, "{vr}");
+        assert_eq!(vr["data"]["score"], 10);
+        assert_eq!(vr["data"]["show_card"], false);
+        assert_eq!(vr["data"]["suppressed_by_reroute"], true);
+
+        // Invalid fixture (motorway_ratio_permille = 1001) -> E_SCHEMA
+        let bad = std::fs::read(
+            schema_fixture_dir("invalid").join("trip-score.request.ratio-over-1000.json"),
+        )
+        .unwrap();
+        assert_eq!(take(dc_trip_score(din(&bad)))["error"]["code"], "E_SCHEMA");
     }
 }
 
