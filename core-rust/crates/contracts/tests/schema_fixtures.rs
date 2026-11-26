@@ -320,8 +320,8 @@ fn rust_mirror_agrees_on_evidence() {
 mod tick {
     use super::*;
     use contracts::tick::{
-        DismissReason, DistanceClass, Event, LogEvent, PlannerCmd, RankReason, SearchPriority,
-        TickInput, TickOutput, UiCmd, VoiceCmd, VoicePriority,
+        DismissReason, DistanceClass, Event, LogEvent, PlannerCmd, RankReason, SaveForLaterReason,
+        SearchPriority, TickInput, TickOutput, UiCmd, VoiceCmd, VoicePriority,
     };
 
     fn rk() -> contracts::RouteKey {
@@ -545,6 +545,14 @@ mod tick {
                         target_id: "o1".into(),
                         reason: DismissReason::Superseded,
                     },
+                    UiCmd::SaveForLater {
+                        poi_id: "poi-castle".into(),
+                        reason: SaveForLaterReason::Interrupted,
+                    },
+                    UiCmd::SaveForLater {
+                        poi_id: "poi-shrine".into(),
+                        reason: SaveForLaterReason::Bmk,
+                    },
                 ],
                 planner_cmds: planner_cmds.clone(),
                 next_wake_mono_ms: next_wake,
@@ -655,6 +663,13 @@ mod tick {
             .collect())
         );
         assert_eq!(
+            names("SaveForLaterReason"),
+            ser([SaveForLaterReason::Interrupted, SaveForLaterReason::Bmk]
+                .iter()
+                .map(|x| serde_json::to_value(x).unwrap())
+                .collect())
+        );
+        assert_eq!(
             names("SearchOutcome"),
             ser([
                 SearchOutcome::Ok,
@@ -719,7 +734,7 @@ mod tick {
         }
         fixture_kinds.sort();
         assert_eq!(schema_kinds, fixture_kinds);
-        assert_eq!(schema_kinds.len(), 16, "v2 has 16 event kinds");
+        assert_eq!(schema_kinds.len(), 17, "v2 has 17 event kinds");
     }
 
     /// Unknown fields: for every event kind (and TickInput / Fix / PlannerCmd / TickOutput /
@@ -744,7 +759,7 @@ mod tick {
             );
             kinds += 1;
         }
-        assert_eq!(kinds, 16);
+        assert_eq!(kinds, 17);
         let fix = serde_json::json!({"now_mono_ms":1,"fix":{"at_mono_ms":1,"lat_e7":0,"lon_e7":0,"acc_cm":100,"alt":2}});
         let top = serde_json::json!({"now_mono_ms":1,"extra":true});
         for bad in [fix, top] {
@@ -787,6 +802,10 @@ mod tick {
                 .collect(),
         })
         .collect();
+        v.push(VoiceCmd::SpeakContent {
+            token: "p3:t1:1:poi-1:1".into(),
+            content_ref: "pack:poi-1:short".into(),
+        });
         v.push(VoiceCmd::Stop { token: "t0".into() });
         v
     }
@@ -822,6 +841,14 @@ mod tick {
             UiCmd::Dismiss {
                 target_id: "o".into(),
                 reason: DismissReason::Expired,
+            },
+            UiCmd::SaveForLater {
+                poi_id: "poi-1".into(),
+                reason: SaveForLaterReason::Interrupted,
+            },
+            UiCmd::SaveForLater {
+                poi_id: "poi-2".into(),
+                reason: SaveForLaterReason::Bmk,
             },
         ]
         .iter()
@@ -860,6 +887,55 @@ mod tick {
         let gone = serde_json::json!({"ui": "show_checking_route"});
         assert!(!ui.is_valid(&gone));
         assert!(serde_json::from_value::<UiCmd>(gone).is_err());
+
+        // VoiceCmd.speak content_ref is P3-only and mutually exclusive with template_id/params
+        // on both schema and serde (ADR-0008, 05 §6.2).
+        for bad_prio in ["p0", "p1", "p2"] {
+            let v = serde_json::json!({
+                "voice": "speak",
+                "token": "t1",
+                "priority": bad_prio,
+                "content_ref": "pack:poi:short"
+            });
+            assert!(
+                !voice.is_valid(&v),
+                "schema must reject content_ref with {bad_prio}"
+            );
+            assert!(
+                serde_json::from_value::<VoiceCmd>(v).is_err(),
+                "serde must reject content_ref with {bad_prio}"
+            );
+        }
+        let ok_p3 = serde_json::json!({
+            "voice": "speak",
+            "token": "t1",
+            "priority": "p3",
+            "content_ref": "pack:poi:short"
+        });
+        assert_eq!(errors(&voice, &ok_p3), Vec::<String>::new());
+        let parsed: VoiceCmd = serde_json::from_value(ok_p3.clone()).unwrap();
+        assert_eq!(
+            parsed,
+            VoiceCmd::SpeakContent {
+                token: "t1".into(),
+                content_ref: "pack:poi:short".into(),
+            }
+        );
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), ok_p3);
+        for bad in [
+            serde_json::json!({"voice": "speak", "token": "t1", "priority": "p3", "template_id": "x", "params": {}, "content_ref": "c"}),
+            serde_json::json!({"voice": "speak", "token": "t1", "priority": "p3", "content_ref": "c", "params": {}}),
+            serde_json::json!({"voice": "speak", "token": "t1", "priority": "p3", "content_ref": "c", "template_id": "x"}),
+            serde_json::json!({"voice": "speak", "token": "t1", "priority": "p3"}),
+            serde_json::json!({"voice": "speak", "token": "t1", "priority": "p1", "template_id": "x"}),
+            serde_json::json!({"voice": "speak", "token": "t1", "priority": "p1", "params": {}}),
+        ] {
+            assert!(!voice.is_valid(&bad), "schema should reject {bad}");
+            assert!(
+                serde_json::from_value::<VoiceCmd>(bad.clone()).is_err(),
+                "serde should reject {bad}"
+            );
+        }
     }
 
     /// `planner_cmds.start` carries a required `distance_class`; every serde Start passes

@@ -449,6 +449,27 @@
             }
           },
           "description": "Valhalla actor re-created. Does not by itself resume searching."
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
+            "kind",
+            "on"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "history_consent"
+            },
+            "on": {
+              "type": "boolean"
+            }
+          },
+          "description": "User consent for P3 history commentary (05 §6.2, ADR-0008). Default OFF; persists across route changes."
         }
       ]
     },
@@ -749,7 +770,35 @@
               "$ref": "#/$defs/DismissReason"
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ui",
+            "poi_id",
+            "reason"
+          ],
+          "description": "Save a history commentary POI to the 'save for later' list (05 §6.2, ADR-0008).",
+          "properties": {
+            "ui": {
+              "const": "save_for_later"
+            },
+            "poi_id": {
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/$defs/SaveForLaterReason"
+            }
+          }
         }
+      ]
+    },
+    "SaveForLaterReason": {
+      "description": "interrupted = P3 history commentary stopped by P0/P1 (05 §6.2); bmk = user requested L3 BMK (03 §4.1, 05 §6.2).",
+      "enum": [
+        "interrupted",
+        "bmk"
       ]
     },
     "DismissReason": {
@@ -762,7 +811,7 @@
       ]
     },
     "VoiceCmd": {
-      "description": "Instruction to Kotlin's single TTS queue (05 §5). No text: Kotlin renders template_id + numeric params with the same template as the screen (04 §2, ADR-0007 decision 8).",
+      "description": "Instruction to Kotlin's single TTS queue (05 §5, 05 §6.2, ADR-0008). No raw text crosses the boundary: speak carries either (template_id + numeric params) for fixed templates or content_ref for P3 history pack entries (P3 only, enforced by schema and Rust types).",
       "oneOf": [
         {
           "type": "object",
@@ -793,6 +842,32 @@
               "additionalProperties": {
                 "type": "integer"
               }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "voice",
+            "token",
+            "priority",
+            "content_ref"
+          ],
+          "description": "P3-only history commentary utterance referencing a pre-packaged history pack entry (05 §6.2, ADR-0008).",
+          "properties": {
+            "voice": {
+              "const": "speak"
+            },
+            "token": {
+              "type": "string",
+              "description": "Opaque utterance_token {route_key, event_id, generation} (05 §5); tts_* events echo it. TODO(schema-v1): encoding."
+            },
+            "priority": {
+              "const": "p3"
+            },
+            "content_ref": {
+              "type": "string"
             }
           }
         },

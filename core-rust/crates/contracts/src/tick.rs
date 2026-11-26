@@ -220,6 +220,11 @@ pub enum EventBody {
     /// Kotlin re-created the Valhalla actor. Does NOT by itself resume searching
     /// (03 §3.1: the slot is freed only by the real `search_finished`).
     EngineReset {},
+    /// User consent for P3 history commentary (05 §6.2, ADR-0008). Default OFF; persists
+    /// across route changes.
+    HistoryConsent {
+        on: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -450,6 +455,21 @@ pub enum UiCmd {
         target_id: String,
         reason: DismissReason,
     },
+    /// Save a history commentary POI to the "save for later" list (05 §6.2, ADR-0008).
+    SaveForLater {
+        poi_id: String,
+        reason: SaveForLaterReason,
+    },
+}
+
+/// Why a history commentary POI was saved for later (05 §6.2, ADR-0008).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SaveForLaterReason {
+    /// P3 history commentary stopped by P0 / P1 interruption.
+    Interrupted,
+    /// User requested L3 `BMK` ("あとで詳しく").
+    Bmk,
 }
 
 /// Why a shown item is removed; only the cases docs v1.2 name.
@@ -466,16 +486,16 @@ pub enum DismissReason {
     Superseded,
 }
 
-/// Voice command for Kotlin's single TTS queue (05 §5). The text is never in the command:
-/// Kotlin renders `template_id` + numeric `params` with its templates, the same wording as
-/// the screen (04 §2 `AvoidOffer.summary`, ADR-0007 decision 8). No raw text crosses the
-/// boundary (and so none reaches the log, ADR-0008 decision 7).
+/// Voice command for Kotlin's single TTS queue (05 §5, 05 §6.2, ADR-0008). Raw text never
+/// crosses the boundary: `speak` carries either `(template_id, params)` for fixed templates
+/// or `content_ref` for P3 history pack entries (`priority: p3` only, enforced at both the
+/// Rust type level and JSON schema / serde level).
 /// TODO(abi-v1): tag field name `voice` is provisional.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "voice", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoiceCmd {
-    /// Start an utterance. Kotlin reports `tts_started` / `tts_done` / `tts_stopped` with
-    /// the same `token`; callbacks of older generations are ignored (05 §5).
+    /// Start a fixed-template utterance (`template_id` + numeric `params`, any priority).
+    /// Kotlin reports `tts_started` / `tts_done` / `tts_stopped` with the same `token`;
+    /// callbacks of older generations are ignored (05 §5).
     Speak {
         token: String,
         priority: VoicePriority,
@@ -483,9 +503,138 @@ pub enum VoiceCmd {
         /// Numbers only (ids are in `token` / `template_id`). Sorted keys: deterministic.
         params: std::collections::BTreeMap<String, i64>,
     },
+    /// Start a P3 history commentary utterance referencing Kotlin's history pack (05 §6.2).
+    /// Wire format: `{"voice":"speak","token":...,"priority":"p3","content_ref":...}`.
+    SpeakContent { token: String, content_ref: String },
     /// Silence the utterance now (P3 on P0/P1 / call / off-route / stop operation, 05 §5).
     /// Kotlin must not wait for `onStop` before the next P1 (05 §5 TTS safety rule).
     Stop { token: String },
+}
+
+impl VoiceCmd {
+    pub fn token(&self) -> &str {
+        match self {
+            Self::Speak { token, .. } | Self::SpeakContent { token, .. } | Self::Stop { token } => {
+                token
+            }
+        }
+    }
+
+    pub fn priority(&self) -> Option<VoicePriority> {
+        match self {
+            Self::Speak { priority, .. } => Some(*priority),
+            Self::SpeakContent { .. } => Some(VoicePriority::P3),
+            Self::Stop { .. } => None,
+        }
+    }
+}
+
+impl Serialize for VoiceCmd {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            Self::Speak {
+                token,
+                priority,
+                template_id,
+                params,
+            } => {
+                let mut m = s.serialize_map(Some(5))?;
+                m.serialize_entry("voice", "speak")?;
+                m.serialize_entry("token", token)?;
+                m.serialize_entry("priority", priority)?;
+                m.serialize_entry("template_id", template_id)?;
+                m.serialize_entry("params", params)?;
+                m.end()
+            }
+            Self::SpeakContent { token, content_ref } => {
+                let mut m = s.serialize_map(Some(4))?;
+                m.serialize_entry("voice", "speak")?;
+                m.serialize_entry("token", token)?;
+                m.serialize_entry("priority", &VoicePriority::P3)?;
+                m.serialize_entry("content_ref", content_ref)?;
+                m.end()
+            }
+            Self::Stop { token } => {
+                let mut m = s.serialize_map(Some(2))?;
+                m.serialize_entry("voice", "stop")?;
+                m.serialize_entry("token", token)?;
+                m.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VoiceCmd {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SpeakTemplateWire {
+            token: String,
+            priority: VoicePriority,
+            template_id: String,
+            params: std::collections::BTreeMap<String, i64>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SpeakContentWire {
+            token: String,
+            priority: VoicePriority,
+            content_ref: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct StopWire {
+            token: String,
+        }
+
+        let mut obj = d.deserialize_map(StrictObject)?;
+        let voice_val = obj
+            .remove("voice")
+            .ok_or_else(|| D::Error::missing_field("voice"))?;
+        let voice = String::deserialize(voice_val).map_err(D::Error::custom)?;
+        match voice.as_str() {
+            "stop" => {
+                let w = StopWire::deserialize(serde_json::Value::Object(obj))
+                    .map_err(D::Error::custom)?;
+                Ok(Self::Stop { token: w.token })
+            }
+            "speak" => {
+                let has_content = obj.contains_key("content_ref");
+                let has_template = obj.contains_key("template_id") || obj.contains_key("params");
+                match (has_content, has_template) {
+                    (true, true) => Err(D::Error::custom(
+                        "speak must carry either (template_id, params) or content_ref, not both",
+                    )),
+                    (true, false) => {
+                        let w = SpeakContentWire::deserialize(serde_json::Value::Object(obj))
+                            .map_err(D::Error::custom)?;
+                        if w.priority != VoicePriority::P3 {
+                            return Err(D::Error::custom(
+                                "speak with content_ref is only allowed for priority p3",
+                            ));
+                        }
+                        Ok(Self::SpeakContent {
+                            token: w.token,
+                            content_ref: w.content_ref,
+                        })
+                    }
+                    (false, _) => {
+                        let w = SpeakTemplateWire::deserialize(serde_json::Value::Object(obj))
+                            .map_err(D::Error::custom)?;
+                        Ok(Self::Speak {
+                            token: w.token,
+                            priority: w.priority,
+                            template_id: w.template_id,
+                            params: w.params,
+                        })
+                    }
+                }
+            }
+            other => Err(D::Error::custom(format!("unknown voice command `{other}`"))),
+        }
+    }
 }
 
 /// `P0 > P1 > P2 > P3` (05 §5). `Ord` follows it (higher wins); variant order below is

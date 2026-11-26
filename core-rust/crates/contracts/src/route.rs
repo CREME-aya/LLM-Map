@@ -42,7 +42,7 @@ pub struct RouteCommitRequest {
     pub bundle: RouteBundle,
 }
 
-/// `RouteBundle = { route_key, eta_ms, length_cm, legs[] }`.
+/// `RouteBundle = { route_key, eta_ms, length_cm, legs[], history_pois? }`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteBundle {
@@ -55,6 +55,35 @@ pub struct RouteBundle {
     /// Total length (cm) = sum of the legs' `length_cm`.
     pub length_cm: u32,
     pub legs: Vec<Leg>,
+    /// Optional history commentary POIs along the route corridor (05 §6.2, 04 §3.1).
+    /// Text never crosses the boundary: only `content_ref` and `duration_ms`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_pois: Vec<HistoryPoi>,
+}
+
+/// One history commentary POI placed along the route corridor (05 §6.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryPoi {
+    pub poi_id: String,
+    pub along_route_cm: u32,
+    pub versions: Vec<HistoryVersion>,
+}
+
+/// Pre-packaged commentary version inside Kotlin's history pack (05 §6.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryVersion {
+    pub kind: HistoryVersionKind,
+    pub content_ref: String,
+    pub duration_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryVersionKind {
+    Short,
+    Summary,
 }
 
 /// One leg. Distances exist both per leg (`seg_along_cm`, from the leg start) and for the

@@ -59,6 +59,12 @@ pub enum ValidateOverrideResult {
     Undone {
         req_id: String,
     },
+    /// L3 `BMK` ("あとで詳しく", 03 §4.1, 05 §6.2): `save_for_later{poi_id, reason: bmk}`
+    /// comes with the next `dc_tick`.
+    /// TODO(abi-v1): shape provisional (docs do not name the `ValidateOverrideResult` variant).
+    Bookmarked {
+        poi_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

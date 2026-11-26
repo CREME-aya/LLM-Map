@@ -72,8 +72,70 @@
           "items": {
             "$ref": "#/$defs/Leg"
           }
+        },
+        "history_pois": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HistoryPoi"
+          },
+          "description": "Optional history commentary POIs along the route corridor (05 §6.2, 04 §3.1). Text never crosses the boundary: only content_ref and duration_ms."
         }
       }
+    },
+    "HistoryPoi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "poi_id",
+        "along_route_cm",
+        "versions"
+      ],
+      "properties": {
+        "poi_id": {
+          "type": "string",
+          "description": "Stable POI identifier (used for once-per-trip deduplication and save_for_later)."
+        },
+        "along_route_cm": {
+          "$ref": "#/$defs/U32",
+          "description": "Position of the POI on the route-wide distance axis (cm, <= bundle.length_cm)."
+        },
+        "versions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/HistoryVersion"
+          },
+          "description": "Pre-packaged commentary versions (short / summary) available in the history pack."
+        }
+      }
+    },
+    "HistoryVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "content_ref",
+        "duration_ms"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/HistoryVersionKind"
+        },
+        "content_ref": {
+          "type": "string",
+          "description": "Opaque reference to the commentary entry and version inside Kotlin's history pack."
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/U32",
+          "description": "Playback duration of this version (ms)."
+        }
+      }
+    },
+    "HistoryVersionKind": {
+      "enum": [
+        "short",
+        "summary"
+      ]
     },
     "Leg": {
       "type": "object",

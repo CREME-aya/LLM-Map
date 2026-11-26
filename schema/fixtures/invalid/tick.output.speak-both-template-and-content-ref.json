@@ -1,0 +1,1 @@
+{"voice_cmds": [{"voice": "speak", "token": "t1", "priority": "p3", "template_id": "turn", "params": {}, "content_ref": "pack:castle:short"}], "ui_cmds": [], "planner_cmds": [], "next_wake_mono_ms": null, "log": []}

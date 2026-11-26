@@ -43,6 +43,7 @@ fn all_v2_event_kinds_parse() {
         r#"{"kind":"call_state","active":true}"#.into(),
         format!(r#"{{"kind":"search_finished","req_id":"r1","route_key":{rk},"graph_version":"g","outcome":"cancelled","engine_ms":12}}"#),
         r#"{"kind":"engine_reset"}"#.into(),
+        r#"{"kind":"history_consent","on":true}"#.into(),
     ];
     for e in &events {
         let with_at = format!(r#"{{"at_mono_ms":5,{}"#, &e[1..]);
