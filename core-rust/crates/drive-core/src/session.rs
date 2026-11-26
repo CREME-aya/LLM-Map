@@ -7,7 +7,6 @@ use crate::avoid::{
 };
 use crate::command_line::{self, Command, JpRef};
 use crate::horizon::{arrived, eta_range, EtaFactors, HorizonFrames};
-use crate::junction::is_avoid_target;
 use crate::planner::{CommitGate, Effects, PlanSearch, SearchLimits, SearchPlanner};
 use crate::route::LoadedRoute;
 use contracts::facts::{AvoidDeclineReason, AvoidOfferEvalRequest, AvoidOfferEvalResult};
@@ -1070,7 +1069,10 @@ impl Session {
             if k - first >= UPCOMING_MAX && earliest > self.avoid_cfg.trigger_eta_ms {
                 break;
             }
-            if !is_avoid_target(m) || self.avoid_tried.contains(&m.id) {
+            let Some(kind) = avoid::target_kind(m) else {
+                continue;
+            };
+            if self.avoid_tried.contains(&m.id) {
                 continue;
             }
             self.avoid_tried.push(m.id.clone());
@@ -1088,6 +1090,7 @@ impl Session {
                 deadline_mono_ms: deadline,
                 base_eta_ms: u64::from(route.remaining_ms(progress)),
                 avoided: avoid::avoided(m),
+                kind,
                 start_progress_cm: progress,
                 edge_pair: route.edge_pair_at(m.anchor.along_route_cm),
             });

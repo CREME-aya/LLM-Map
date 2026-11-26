@@ -532,6 +532,17 @@ fn alternative_must_avoid_the_target_and_not_add_hazards() {
         ),
         Some(AvoidDeclineReason::NotFewerHazards)
     );
+    // (b) right-turn target: shorter narrow_m alone does not pass when right-turn count is equal
+    assert_eq!(
+        run(
+            alt(&|a| {
+                a.counts.right_unprotected = 1;
+                a.narrow_m.confirmed = 10;
+            }),
+            b(&|x| x.narrow_m.confirmed = 100)
+        ),
+        Some(AvoidDeclineReason::NotFewerHazards)
+    );
     // base_facts of another graph version
     assert_eq!(
         run(alt(&|_| {}), b(&|x| x.graph_version = "other".into())),
@@ -541,6 +552,111 @@ fn alternative_must_avoid_the_target_and_not_add_hazards() {
     assert_eq!(
         run(alt(&|a| a.eta_ms = base + 180_001), b(&|_| {})),
         Some(AvoidDeclineReason::OverDetourCap)
+    );
+}
+
+/// 04 §4.3 (b) (`fcacfb1`): when the avoid-chip target is `narrow` only, `narrow_m` must be
+/// strictly shorter than `base_facts` and avoid right-turn count must be `<=` `base_facts`
+/// (same right-turn count passes if `narrow_m` is shorter; fewer right turns alone does not).
+#[test]
+fn narrow_target_b_rule_checks_narrow_m_strictly_and_right_turns_non_increasing() {
+    let narrow_bundle = || {
+        let mut b = main_line();
+        // Make maneuver 1 a left turn into a confirmed 3.0 m narrow road (narrow only).
+        b.legs[0].maneuvers[1].arrow = contracts::horizon::Arrow::Left;
+        b.legs[0].maneuvers[1].departure_width_mm =
+            serde_json::from_value(json!({"kind": "confirmed", "value": 3_000, "source_ref": "t"}))
+                .unwrap();
+        b
+    };
+    let ready = || {
+        let b = narrow_bundle();
+        let mut s = session_with(&b, config());
+        let o = tick(&mut s, 1_000, Some(fix_xy(&b, 1_000, 10_000, 0)), vec![]);
+        assert_eq!(starts(&o, SearchPriority::AvoidChip), vec!["r1".to_owned()]);
+        let k = key(&s);
+        tick(&mut s, 1_500, None, vec![finished(1_400, "r1", &k, "ok")]);
+        let t = s.avoid_state().target().unwrap();
+        assert_eq!(t.kind, drive_core::avoid::AvoidTargetKind::Narrow);
+        assert_eq!(t.avoided.unprotected_right, 0);
+        let base_eta = t.base_eta_ms;
+        (s, k.graph_version, base_eta)
+    };
+    let run = |alt_fn: &dyn Fn(&mut CandidateFacts), base_fn: &dyn Fn(&mut CandidateFacts)| {
+        let (mut s, gv, base_eta) = ready();
+        let mut alt = facts(&gv, base_eta + 30_000);
+        alt_fn(&mut alt);
+        let mut base = facts(&gv, base_eta);
+        base.candidate_id = "c-base".into();
+        base.counts.right_unprotected = 1;
+        base.narrow_m.confirmed = 120;
+        base_fn(&mut base);
+        match s.avoid_offer_eval(&AvoidOfferEvalRequest {
+            req_id: "r1".into(),
+            now_mono_ms: 1_600,
+            alt_facts: alt,
+            base_facts: base,
+        }) {
+            AvoidOfferEvalResult::Offered { .. } => None,
+            AvoidOfferEvalResult::Declined { reason } => Some(reason),
+        }
+    };
+    // Narrow shorter (119 < 120) with the same right-turn count (1 == 1) → offered!
+    assert_eq!(
+        run(
+            &|a| {
+                a.counts.right_unprotected = 1;
+                a.narrow_m.confirmed = 119;
+            },
+            &|_| {}
+        ),
+        None
+    );
+    // Narrow shorter via confirmed + inferred split (40 + 79 = 119 < 120), fewer right turns → offered
+    assert_eq!(
+        run(
+            &|a| {
+                a.counts.right_unprotected = 0;
+                a.narrow_m.confirmed = 40;
+                a.narrow_m.inferred = 79;
+            },
+            &|_| {}
+        ),
+        None
+    );
+    // Narrow equal (120 == 120), even if right-turn count dropped (0 < 1) → not_fewer_hazards
+    assert_eq!(
+        run(
+            &|a| {
+                a.counts.right_unprotected = 0;
+                a.narrow_m.confirmed = 120;
+            },
+            &|_| {}
+        ),
+        Some(AvoidDeclineReason::NotFewerHazards)
+    );
+    // Narrow shorter (80 < 120), but right-turn count increased (2 > 1) → not_fewer_hazards
+    assert_eq!(
+        run(
+            &|a| {
+                a.counts.right_unprotected = 1;
+                a.counts.right_signal_unknown = 1;
+                a.narrow_m.confirmed = 80;
+            },
+            &|_| {}
+        ),
+        Some(AvoidDeclineReason::NotFewerHazards)
+    );
+    // Narrow longer (121 > 120), right-turn count dropped → not_fewer_hazards
+    assert_eq!(
+        run(
+            &|a| {
+                a.counts.right_unprotected = 0;
+                a.narrow_m.confirmed = 121;
+            },
+            &|_| {}
+        ),
+        Some(AvoidDeclineReason::NotFewerHazards)
     );
 }
 
