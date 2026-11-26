@@ -19,7 +19,7 @@
 | **候補探索・採点** | C++ → Kotlin → Rust 受け渡し＋解析 | 短距離 7 候補で p95 `<= 300 ms` | 超過なら内訳を調査し、コピーが主因なら `DirectByteBuffer` を比較。計測点は JNI ラッパー側（[02 §2.1](02-architecture-and-stack.md)） |
 | **個人プロファイル** | 学習回避記録の自動減衰 (TTL) | 最終発火から 180 日 | L2 明示承認後のみ有効 |
 | **個人プロファイル** | `jp=last` の対象範囲 | 通過後 180 秒以内 かつ 1.5 km 以内の直近難所 | 経路は変えず `profile_proposals` へ。該当なしはエラーにせず提案を作らない（[03 §4.1](03-routing-and-two-layer-control.md)） |
-| **速度・モード切替** | 走行中ソフトモード突入 / 解除 | 突入: `>= 8 km/h` を 3〜5 秒連続<br>解除: `<= 3 km/h` を 10〜30 秒連続（信号待ち除外） | [01-product-and-ux](01-product-and-ux.md), [04-maneuver-horizon](04-maneuver-horizon-and-hmi.md) |
+| **速度・モード切替** | 走行中ソフトモード突入 / 解除 | 突入: `>= 8 km/h`（222 cm/s）を **3 秒** 連続（暫定。範囲表記をやめ単一値に。計画の候補を選べる期限の「走り出す」も同じ値、[02 §2.1](02-architecture-and-stack.md)。速度の無い Fix・精度の悪い Fix が来たら数え直す）<br>解除: `<= 3 km/h` を 10〜30 秒連続（信号待ち除外） | [01-product-and-ux](01-product-and-ux.md), [04-maneuver-horizon](04-maneuver-horizon-and-hmi.md) |
 | **位置・鮮度** | 測位鮮度上限 | 2.5 秒 | 超過時は `uncertain` |
 | **位置・鮮度** | 経路から外れたと判定する閾値（横方向の許容 / 進行方向の許容 / 確定に要る連続 Fix 数） | `lateral_tol_cm` 3000（30 m） / `heading_tol_deg` 60（速度 1.4 m/s 未満では方位を使わない） / `confirm_fixes` 3 | 暫定（根拠なし、推測）。経路の上だけで位置合わせをするため、**近くを並行する道路（側道など、間隔が許容幅より狭い道）では逸脱の検出が遅れることがある**（仕様上の制約。分岐後に離れていけば `confirm_fixes` で検出する）。Gate 0・7 で校正。 方針値として `dc_session_new` の設定で渡す。経路ごとには持たない（[04 §3.1](04-maneuver-horizon-and-hmi.md)） |
 | **位置・鮮度** | 位置合わせに使う測位精度の上限 `max_acc_cm` | 3000（30 m、`lateral_tol_cm` と同じ） | 暫定。`acc_cm`（68% 信頼水準の推定値）がこれより大きい Fix が来たら逸脱の連続カウントを **0 に戻す**（「有効な範囲外 Fix が連続 `confirm_fixes` 回」という条件を守るため）。そういう Fix が `confirm_fixes` 回続いたら `status=uncertain`。`SessionConfig` で渡す（[04 §3.1](04-maneuver-horizon-and-hmi.md)） |
