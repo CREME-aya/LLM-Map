@@ -100,7 +100,7 @@ JSON の形の正本は `schema/exchange.schema.json`（作成予定）。決ま
 IntentPreset = { kind, schema_version, preset_id, name (≤ 40 字),
                  chips: [chip_id] (≤ 8), hard_soft: { [chip_id]: "hard" | "soft" },
                  detour: "standard" | "tight",
-                 weights_permille: { right_turn, narrow_road, merge } }   // 各 250〜4000（03 §5 と同じ）
+                 weights_permille: { right_turn, narrow_road, merge } }   // 各 250〜4000（03 §5 と同じ）。hard_soft のキーは chips に含まれていること
 TripPlan     = { kind, schema_version, origin: Place, vias: [Place] (≤ 5), destination: Place,
                  preset_ref?: preset_id, history_mode: "off" | "on" }    // 経路形状は送らない
 Place        = { lat_e7, lon_e7, name? (≤ 60 字), vehicle_entry_id?: U64Str }
@@ -110,11 +110,13 @@ DriveDiary   = { kind, schema_version, trip_id, started_at_unix_s,
                  history: [{ poi_id, outcome: "completed" | "interrupted" | "saved" }] (≤ 200) }
 ```
 - **軌跡は区間（`segments`）に分ける**：トンネルなどで測位が途切れた前後を直線で結ばないため。区間をまたいで点を結ばない。
-- `t_offset_s`（始まった時刻からの秒）は `null` を許す。値がある点では、同じ区間の中で時刻が逆向きに進まないことを検証する。
-- 点の数の上限は **全区間の合計で 20,000**（1 Hz で約 5 時間 33 分）。長い記録は、書き出すときに各区間の最初と最後の点を残して間引く。`.drivediary`（zip）は、これとは別に **展開後のバイト数** も制限する。
+- `t_offset_s`（始まった時刻からの秒）は `null` を許す。値がある点を **全区間を通して** 順に並べたとき、時刻が逆向きに進まないことを検証する（同じ秒の点が続くのは許す。トンネルで記録が途切れても時間は前に進んでいるため）。
+- 点の数の上限は **全区間の合計で 20,000**（1 Hz で約 5 時間 33 分）。長い記録は、書き出すときに各区間の最初と最後の点を残して間引く。`.drivediary`（zip）は、これとは別に **展開後のバイト数を 16 MB まで**（暫定）に制限する。
 - URL フラグメント（≤ 1,000 文字）に入れるのは `IntentPreset` と `TripPlan` だけ。`DriveDiary` は `.drivediary` のファイルでだけ受け渡す。
 - `TripPlan.history_mode` は共有する相手に伝えるためだけの値で、受け取った端末では [05 §6.2](05-inference-tier-and-audio.md) のとおり `history_consent` で改めて確かめる（共有された設定で歴史解説を自動で ON にしない）。
-- 共通テスト（Android の Rust と Web の Zod で同じ結果になること）：2 区間のあいだを結ばない、20,000 点を受け付け 20,001 点を拒否する、時刻の逆行を拒否する、未知のキーを拒否する。
+- 共通テストは 2 種類に分ける。
+  - **検証**（Android の Rust と Web の Zod で同じ判定になること）：20,000 点を受け付け 20,001 点を拒否する、全区間を通した時刻の逆行を拒否する（同じ秒は受け付ける）、`chips` にない `hard_soft` のキーを拒否する、未知のキーを拒否する、展開後 16 MB を超える zip を拒否する。
+  - **描画**（Android と Web）：同じ 2 区間の検体が、別々の線として描かれる（区間をまたいで結ばない）。
 
 - **受け渡し媒体**:
   1. **URL フラグメント (`https://<domain>/p#<圧縮データ base64url>`) + QR コード**: 短いデータ（暫定上限 1,000 文字）用。フラグメント `#` 以降は HTTP サーバへ送信されない（[RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html#section-3.5)）一方、ブラウザ履歴やコピー・ページ内 JS から参照し得るため、**Web ページに第三者解析スクリプトを一切入れない** とともに、受渡画面に「含まれる出発地・行先」を明示確認させます。Android 側は `/.well-known/assetlinks.json` による App Links で受け取ります。
