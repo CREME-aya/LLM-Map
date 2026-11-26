@@ -17,26 +17,26 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 /// `dc_route_commit` input: `{ req_id, expected_route_key, bundle }`.
 ///
-/// `req_id` (provisional, proposed to the team) is the `req_id` of the `commit{req_id,
-/// route_key}` Rust emitted (`undo-<req_id>` for an undo). While a route is current it must
-/// name a commit Rust issued and has not settled, with the same `route_key` as
-/// `expected_route_key`; otherwise `E_STALE` and nothing is replaced. This tells two
-/// commits with the same guard apart (a reroute vs. the consented avoid route). For the
-/// first route of the session (no route current) it may be `null` (the key is required).
+/// `req_id` is mandatory (`null` / omitted is `E_SCHEMA`, 02 §2.1 #9): it must name either
+/// (1) a `commit{req_id, route_key}` Rust emitted and has not settled (`undo-<req_id>` for
+/// an undo) with `route_key == expected_route_key`, or (2) an `ok` candidate search of the
+/// current plan while its commit window is still open (closed when the next plan starts,
+/// when one of its candidates is committed, or when the vehicle starts moving →
+/// `FORBIDDEN_WHILE_DRIVING`). Any other `req_id` is `E_STALE`.
 ///
-/// `expected_route_key` is the guard: the current route's key from `commit{req_id, route_key}` (the
-/// current route when the search started), or `null` when no route is committed yet (the
-/// first route of the session). It must equal the current route (`null` = none), otherwise
-/// `E_STALE` and nothing is replaced. `bundle.route_key` (and every `ManeuverId.route_key` in
-/// the bundle) carries `route_revision` "0" (`E_SCHEMA` otherwise): Rust assigns the
-/// revision (current + 1, the first route: 1) and returns the new key in
-/// `RouteCommitResult.route_key`. While a route is current, the bundle's `trip_id` /
-/// `trip_revision` / `graph_version` must equal it (`E_STALE` otherwise). Team decision 2026-11-26.
+/// `expected_route_key` is the guard: the current route's key, or `null` when no route is
+/// committed yet (the first route of the session). It must equal the current route (`null` =
+/// none), otherwise `E_STALE` and nothing is replaced. `bundle.route_key` (and every
+/// `ManeuverId.route_key` in the bundle) carries `route_revision` "0" (`E_SCHEMA` otherwise):
+/// Rust assigns the revision (current + 1, the first route: 1; never reset when
+/// `trip_revision` advances) and returns the new key in `RouteCommitResult.route_key`. While
+/// a route is current, the bundle's `trip_id` / `graph_version` must equal it, and
+/// `trip_revision` must equal it or — only for a plan candidate whose plan has that
+/// `trip_revision` — equal current + 1 (`E_STALE` otherwise).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteCommitRequest {
-    #[serde(deserialize_with = "crate::common::required_nullable")]
-    pub req_id: Option<String>,
+    pub req_id: String,
     #[serde(deserialize_with = "crate::common::required_nullable")]
     pub expected_route_key: Option<RouteKey>,
     pub bundle: RouteBundle,

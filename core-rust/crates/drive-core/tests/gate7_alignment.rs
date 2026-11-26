@@ -67,8 +67,9 @@ fn replay(name: &str) -> Run {
     let fx = fixture(name);
     let mut s = Session::new(SessionConfig::default());
     let bundle: RouteBundle = serde_json::from_value(fx["bundle"].clone()).unwrap();
+    s.record_plan_ok_for_test("p-init", bundle.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: None,
+        req_id: "p-init".into(),
         expected_route_key: None,
         bundle,
     })

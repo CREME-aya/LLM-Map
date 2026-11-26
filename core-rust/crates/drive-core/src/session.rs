@@ -7,8 +7,9 @@ use crate::avoid::{
 };
 use crate::command_line::{self, Command, JpRef};
 use crate::horizon::{arrived, eta_range, EtaFactors, HorizonFrames};
-use crate::junction::is_avoid_target;
-use crate::planner::{CommitGate, Effects, PlanSearch, SearchLimits, SearchPlanner};
+use crate::planner::{
+    CommitGate, Effects, PlanCommitState, PlanSearch, SearchLimits, SearchPlanner,
+};
 use crate::route::LoadedRoute;
 use contracts::facts::{AvoidDeclineReason, AvoidOfferEvalRequest, AvoidOfferEvalResult};
 use contracts::horizon::{HorizonStatus, ManeuverHorizon, ManeuverId, UPCOMING_MAX};
@@ -66,6 +67,11 @@ pub struct SessionConfig {
     pub avoid_trigger_eta_ms: u64,
     /// "戻して" window after consent (ms; 04 §4.3 item 3: 5 s).
     pub avoid_undo_window_ms: u64,
+    /// Soft-mode / drive-start speed threshold (cm/s; 07 §1: 8 km/h = 222 cm/s, provisional).
+    pub drive_start_speed_cm_s: u32,
+    /// Continuous duration at `>= drive_start_speed_cm_s` before drive-start closes the plan
+    /// commit window (ms; 07 §1: 3 s = 3000 ms, provisional).
+    pub drive_start_hold_ms: u64,
 }
 
 impl Default for SessionConfig {
@@ -93,6 +99,8 @@ impl Default for SessionConfig {
             avoid_deadline_before_ms: v.deadline_before_ms,
             avoid_trigger_eta_ms: v.trigger_eta_ms,
             avoid_undo_window_ms: v.undo_window_ms,
+            drive_start_speed_cm_s: 222,
+            drive_start_hold_ms: 3_000,
         }
     }
 }
@@ -189,6 +197,19 @@ impl From<ThermalStatus> for ThermalLevel {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommitSource {
+    /// Rust emitted `planner_cmds: commit{req_id, route_key}` (reroute / avoid_chip / undo /
+    /// ad-hoc explicit_plan).
+    Issued,
+    /// User selected an `ok` candidate of the current plan (`Plan.ok_searches`).
+    PlanCandidate {
+        trip_id: String,
+        trip_revision: contracts::U64Str,
+        graph_version: String,
+    },
+}
+
 #[derive(Debug)]
 pub struct Session {
     planner: SearchPlanner,
@@ -224,6 +245,14 @@ pub struct Session {
     issued_commits: Vec<(String, RouteKey)>,
     /// The undo `commit` issued, its route not loaded yet (#22).
     undo_return: Option<UndoReturn>,
+    /// Soft-mode / drive-start speed threshold (cm/s; 07 §1: 222 = 8 km/h, provisional).
+    drive_start_speed_cm_s: u32,
+    /// Continuous duration at `>= drive_start_speed_cm_s` to trigger drive-start (ms; 3000).
+    drive_start_hold_ms: u64,
+    /// `fix.at_mono_ms` when the current unbroken run of valid fast fixes started.
+    drive_fast_since_mono_ms: Option<u64>,
+    /// Latest `fix.at_mono_ms` seen by drive-start tracking (out-of-order fixes ignored).
+    drive_last_fix_at_mono_ms: Option<u64>,
 }
 
 impl Session {
@@ -251,6 +280,10 @@ impl Session {
             pending_log: Vec::new(),
             issued_commits: Vec::new(),
             undo_return: None,
+            drive_start_speed_cm_s: config.drive_start_speed_cm_s,
+            drive_start_hold_ms: config.drive_start_hold_ms,
+            drive_fast_since_mono_ms: None,
+            drive_last_fix_at_mono_ms: None,
         }
     }
 
@@ -356,6 +389,14 @@ impl Session {
         self.issued_commits.push((req_id.to_owned(), route_key));
     }
 
+    /// Test hook: records an `ok` plan candidate on the current plan (or a synthetic ranked
+    /// plan) so non-plan tests can load a first route through `route_commit` without driving
+    /// a full `plan_candidates` cycle or advancing `next_req_seq`.
+    #[doc(hidden)]
+    pub fn record_plan_ok_for_test(&mut self, req_id: &str, route_key: RouteKey) {
+        self.planner.record_plan_ok_for_test(req_id, route_key);
+    }
+
     /// `commit` req_ids Rust emitted that no `dc_route_commit` has settled yet.
     pub fn issued_commits(&self) -> impl Iterator<Item = &str> {
         self.issued_commits.iter().map(|(r, _)| r.as_str())
@@ -406,56 +447,88 @@ impl Session {
         }
     }
 
-    /// The full `dc_route_commit` guard: `expected_route_key` equals the current route
-    /// (`None` only when no route is committed yet), and while a route is current `req_id`
-    /// names a `commit{req_id, route_key}` Rust issued with that same `route_key` and no
-    /// route was loaded since (provisional, proposed to the team). The first route may come
-    /// with any `req_id` or `null`. `E_STALE` otherwise.
-    pub fn check_route_guard(
+    fn classify_commit_guard(
         &self,
-        req_id: Option<&str>,
+        req_id: &str,
         route_key: Option<&RouteKey>,
-    ) -> Result<(), CoreError> {
+    ) -> Result<CommitSource, CoreError> {
         self.check_route_key(route_key)?;
-        if self.current_route_key.is_none() {
-            return Ok(());
-        }
-        let issued = req_id.is_some_and(|id| {
-            self.issued_commits
+        if let Some(k) = route_key {
+            if self
+                .issued_commits
                 .iter()
-                .any(|(r, k)| r == id && Some(k) == route_key)
-        });
-        if issued {
-            Ok(())
-        } else {
-            Err(CoreError::new(
-                ErrorCode::Stale,
-                "req_id does not name a commit Rust issued for the current route",
-            ))
+                .any(|(r, rk)| r == req_id && rk == k)
+            {
+                return Ok(CommitSource::Issued);
+            }
         }
+        if let Some(plan) = self.planner.plan() {
+            if plan.ok_searches.iter().any(|s| s.req_id == req_id) {
+                return match plan.commit_state {
+                    PlanCommitState::Open => {
+                        let Some(plan_rk) = plan.route_key.as_ref() else {
+                            return Err(CoreError::new(
+                                ErrorCode::Stale,
+                                "plan has no route_key for candidate commit",
+                            ));
+                        };
+                        Ok(CommitSource::PlanCandidate {
+                            trip_id: plan_rk.trip_id.clone(),
+                            trip_revision: plan.trip_revision.unwrap_or(plan_rk.trip_revision),
+                            graph_version: plan_rk.graph_version.clone(),
+                        })
+                    }
+                    PlanCommitState::ClosedDriving => Err(CoreError::new(
+                        ErrorCode::ForbiddenWhileDriving,
+                        "committing a plan candidate is forbidden while driving",
+                    )),
+                    PlanCommitState::Closed => Err(CoreError::new(
+                        ErrorCode::Stale,
+                        "plan candidate commit window is already closed",
+                    )),
+                };
+            }
+        }
+        Err(CoreError::new(
+            ErrorCode::Stale,
+            "req_id does not name an issued commit or an ok candidate of the current plan",
+        ))
     }
 
-    /// `dc_route_commit` body (04 §3.1): re-checks the guard `expected_route_key` (`E_STALE`, nothing
+    /// The full `dc_route_commit` guard (02 §2.1 #9): `expected_route_key` equals the
+    /// current route (`None` only when no route is committed yet), and `req_id` names either
+    /// an unsettled `commit{req_id, route_key}` Rust issued for that `route_key`, or an `ok`
+    /// candidate search of the current plan while its commit window is open
+    /// (`FORBIDDEN_WHILE_DRIVING` if closed by driving, `E_STALE` otherwise).
+    pub fn check_route_guard(
+        &self,
+        req_id: &str,
+        route_key: Option<&RouteKey>,
+    ) -> Result<(), CoreError> {
+        self.classify_commit_guard(req_id, route_key).map(|_| ())
+    }
+
+    /// `dc_route_commit` body (02 §2.1 #9, 04 §3.1): re-checks the guard
+    /// (`expected_route_key` + `req_id` → `E_STALE` / `FORBIDDEN_WHILE_DRIVING`, nothing
     /// replaced), validates and indexes the bundle (`E_SCHEMA`), then makes it the current
     /// route. Alignment starts over (status `uncertain` until a fix matches; the first fix
     /// is located through the spatial index). The next `dc_tick` returns the new horizon.
     ///
-    /// Revision rule (team decision 2026-11-26; 02 §2.1 still says the bundle carries
-    /// current + 1): the bundle always carries `route_revision` "0" (`E_SCHEMA` otherwise)
-    /// and Rust assigns current + 1 (the first route of the session: 1). The assigned key
-    /// replaces the bundle's `route_key` and every `ManeuverId.route_key` in it, and is
-    /// returned in the result. While a route is current, the bundle's `trip_id`,
-    /// `trip_revision` and `graph_version` must equal the current route's (`E_STALE`
-    /// otherwise; 06 §3: the route in progress stays pinned to its graph version). Order of
-    /// checks: guard (`E_STALE`), revision "0" (`E_SCHEMA`), trip_id / trip_revision /
-    /// graph_version (`E_STALE`), bundle body (`E_SCHEMA`); nothing is replaced on any error.
-    /// TODO(02 §2.1 / 04 §3): a re-plan with a new `trip_id` / `trip_revision` cannot
-    /// replace the current route through this entry.
+    /// Revision rule: the bundle always carries `route_revision` "0" (`E_SCHEMA` otherwise)
+    /// and Rust assigns current + 1 (the first route of the session: 1; never reset when
+    /// `trip_revision` advances). The assigned key replaces the bundle's `route_key` and
+    /// every `ManeuverId.route_key` in it, and is returned in the result. While a route is
+    /// current, the bundle's `trip_id` and `graph_version` must equal the current route's
+    /// (06 §3: pinned while driving), and `trip_revision` must equal current or — only for a
+    /// plan candidate whose plan has that `trip_revision` — equal current + 1 (`E_STALE`
+    /// otherwise). Order of checks: guard (`E_STALE` / `FORBIDDEN_WHILE_DRIVING`), revision
+    /// "0" (`E_SCHEMA`), trip_id / trip_revision / graph_version (`E_STALE`), bundle body
+    /// (`E_SCHEMA`); nothing is replaced on any error.
     pub fn route_commit(
         &mut self,
         req: &RouteCommitRequest,
     ) -> Result<RouteCommitResult, CoreError> {
-        self.check_route_guard(req.req_id.as_deref(), req.expected_route_key.as_ref())?;
+        let source = self.classify_commit_guard(&req.req_id, req.expected_route_key.as_ref())?;
         let bundle_key = &req.bundle.route_key;
         if bundle_key.route_revision.0 != 0 {
             return Err(CoreError::new(
@@ -465,6 +538,37 @@ impl Session {
                     bundle_key.route_revision.0
                 ),
             ));
+        }
+        if let CommitSource::PlanCandidate {
+            trip_id,
+            trip_revision,
+            graph_version,
+        } = &source
+        {
+            if bundle_key.trip_id != *trip_id {
+                return Err(CoreError::new(
+                    ErrorCode::Stale,
+                    format!("bundle trip_id {} != plan {}", bundle_key.trip_id, trip_id),
+                ));
+            }
+            if bundle_key.trip_revision != *trip_revision {
+                return Err(CoreError::new(
+                    ErrorCode::Stale,
+                    format!(
+                        "bundle trip_revision {} != plan {}",
+                        bundle_key.trip_revision.0, trip_revision.0
+                    ),
+                ));
+            }
+            if bundle_key.graph_version != *graph_version {
+                return Err(CoreError::new(
+                    ErrorCode::Stale,
+                    format!(
+                        "bundle graph_version {} != plan {}",
+                        bundle_key.graph_version, graph_version
+                    ),
+                ));
+            }
         }
         let revision = match &self.current_route_key {
             None => 1,
@@ -478,11 +582,20 @@ impl Session {
                         ),
                     ));
                 }
-                if bundle_key.trip_revision != cur.trip_revision {
+                let trip_rev_ok = match &source {
+                    CommitSource::Issued => bundle_key.trip_revision == cur.trip_revision,
+                    CommitSource::PlanCandidate { trip_revision, .. } => {
+                        bundle_key.trip_revision == *trip_revision
+                            && (bundle_key.trip_revision == cur.trip_revision
+                                || cur.trip_revision.0.checked_add(1)
+                                    == Some(bundle_key.trip_revision.0))
+                    }
+                };
+                if !trip_rev_ok {
                     return Err(CoreError::new(
                         ErrorCode::Stale,
                         format!(
-                            "bundle trip_revision {} != current {}",
+                            "bundle trip_revision {} not allowed for current {}",
                             bundle_key.trip_revision.0, cur.trip_revision.0
                         ),
                     ));
@@ -514,12 +627,17 @@ impl Session {
             segments: loaded.segs.len() as u32,
             maneuvers: loaded.maneuvers.len() as u32,
         };
-        let undo = self.undo_window_for(req.req_id.as_deref(), &loaded);
+        let undo = self.undo_window_for(&req.req_id, &loaded);
         let now = self.last_now_mono_ms.unwrap_or(0);
         let mut fx = Effects::default();
         self.planner
             .on_route_changed(now, &loaded.route_key, &mut fx);
+        self.pending_planner.extend(fx.planner_cmds);
+        self.pending_log.extend(fx.log);
         self.planner.invalidate_route_eta();
+        if matches!(source, CommitSource::PlanCandidate { .. }) {
+            self.planner.close_plan_commit_committed();
+        }
         self.current_route_key = Some(loaded.route_key.clone());
         self.route = Some(loaded);
         self.aligner = Aligner::new(self.align_cfg);
@@ -530,7 +648,7 @@ impl Session {
         // #22: the undo brings the original route back (the same body, by ordinal): its
         // junctions already tried stay tried, so the one just undone is not offered again.
         if let Some(r) = self.undo_return.take() {
-            if req.req_id.as_deref() == Some(r.undo_req_id.as_str()) {
+            if req.req_id == r.undo_req_id {
                 let key = &self.current_route_key;
                 self.avoid_tried = r
                     .tried_before
@@ -554,14 +672,14 @@ impl Session {
     /// reroute committed against the same guard is never taken for it), the divergence
     /// point is computed once, here, from the old route and the new one and kept for
     /// "戻して". Any other commit (including the undo itself) ends the window.
-    fn undo_window_for(&self, req_id: Option<&str>, loaded: &LoadedRoute) -> UndoState {
+    fn undo_window_for(&self, req_id: &str, loaded: &LoadedRoute) -> UndoState {
         let UndoState::Consented(c) = &self.undo else {
             return UndoState::None;
         };
         let Some(old) = self.route.as_ref() else {
             return UndoState::None;
         };
-        if req_id != Some(c.req_id.as_str()) {
+        if req_id != c.req_id {
             return UndoState::None;
         }
         UndoState::Window(UndoWindow {
@@ -1012,16 +1130,30 @@ impl Session {
         }
     }
 
-    /// End of a tick: removes a chip past its deadline or off the route, then looks for a
-    /// new avoid target (see `crate::avoid`).
+    /// End of a tick: removes a chip past its deadline or off the route, cancels any running
+    /// avoid-chip search if the vehicle left the route, then looks for a new avoid target
+    /// (see `crate::avoid`).
     fn avoid_step(&mut self, now: u64, fx: &mut Effects, log: &mut Vec<LogEvent>) {
         let status = self.horizon_status(now);
+        let off = matches!(
+            status,
+            Some(HorizonStatus::OffRoute | HorizonStatus::Rerouting | HorizonStatus::Finished)
+        );
+        if off {
+            if let AvoidState::Searching {
+                req_id,
+                budget_deadline_mono_ms,
+                ..
+            } = &mut self.avoid
+            {
+                *budget_deadline_mono_ms = None;
+                let req_id = req_id.clone();
+                self.planner.cancel_search(now, &req_id, fx);
+            }
+            self.planner.cancel_avoid_in_slot(now, fx);
+        }
         if let Some(t) = self.avoid.target() {
             let expired = now >= t.deadline_mono_ms;
-            let off = matches!(
-                status,
-                Some(HorizonStatus::OffRoute | HorizonStatus::Rerouting | HorizonStatus::Finished)
-            );
             // A search still running ends through its own search_finished.
             let searching = matches!(self.avoid, AvoidState::Searching { .. });
             if expired || (off && !searching) {
@@ -1070,7 +1202,10 @@ impl Session {
             if k - first >= UPCOMING_MAX && earliest > self.avoid_cfg.trigger_eta_ms {
                 break;
             }
-            if !is_avoid_target(m) || self.avoid_tried.contains(&m.id) {
+            let Some(kind) = avoid::target_kind(m) else {
+                continue;
+            };
+            if self.avoid_tried.contains(&m.id) {
                 continue;
             }
             self.avoid_tried.push(m.id.clone());
@@ -1088,6 +1223,7 @@ impl Session {
                 deadline_mono_ms: deadline,
                 base_eta_ms: u64::from(route.remaining_ms(progress)),
                 avoided: avoid::avoided(m),
+                kind,
                 start_progress_cm: progress,
                 edge_pair: route.edge_pair_at(m.anchor.along_route_cm),
             });
@@ -1161,9 +1297,36 @@ impl Session {
         }
     }
 
+    /// Soft-mode entry / drive-start tracking (02 §2.1 #9, 03 §3.1, 07 §1):
+    /// `speed_cm_s >= drive_start_speed_cm_s` (default 222 cm/s = 8 km/h) continuously for
+    /// `drive_start_hold_ms` (default 3000 ms) closes the current plan's commit window
+    /// (`FORBIDDEN_WHILE_DRIVING`). A fix without speed, below threshold, or with
+    /// `acc_cm > max_acc_cm` resets the continuous run; an out-of-order fix is ignored.
+    fn observe_drive_start(&mut self, fix: &Fix) {
+        let at = fix.at_mono_ms;
+        if self.drive_last_fix_at_mono_ms.is_some_and(|prev| at < prev) {
+            return;
+        }
+        self.drive_last_fix_at_mono_ms = Some(at);
+        let fast = fix.acc_cm <= self.align_cfg.max_acc_cm
+            && fix
+                .speed_cm_s
+                .is_some_and(|s| s >= self.drive_start_speed_cm_s);
+        if !fast {
+            self.drive_fast_since_mono_ms = None;
+            return;
+        }
+        let since = *self.drive_fast_since_mono_ms.get_or_insert(at);
+        if at.saturating_sub(since) >= self.drive_start_hold_ms {
+            self.planner.close_plan_commit_driving();
+        }
+    }
+
     /// On-route alignment of one fix (04 §3.1); confirms off-route and requests the reroute
     /// with this fix as the new origin.
     fn on_fix(&mut self, now: u64, fix: Fix, fx: &mut Effects, log: &mut Vec<LogEvent>) {
+        // Tracked even before the first route is committed.
+        self.observe_drive_start(&fix);
         let Some(route) = self.route.as_ref() else {
             return;
         };

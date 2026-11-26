@@ -139,6 +139,37 @@ impl Default for AvoidConfig {
     }
 }
 
+/// Category of the avoid-chip target for 04 §4.3 (b) comparison (docs `fcacfb1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvoidTargetKind {
+    /// One of `right_unprotected` / `right_signal_unknown_protection` / `right_signal_unknown`.
+    RightTurn,
+    /// `narrow` only (not one of the right-turn avoid targets).
+    Narrow,
+    /// Both a right-turn avoid target and `narrow` (e.g. a right turn into a narrow road).
+    RightTurnAndNarrow,
+}
+
+/// Category of `m` when it is an avoid-chip target (`None` otherwise), for 04 §4.3 (b).
+pub fn target_kind(m: &Maneuver) -> Option<AvoidTargetKind> {
+    let classes = classify(m);
+    let right = classes.iter().any(|c| {
+        matches!(
+            c,
+            JunctionClass::RightUnprotected
+                | JunctionClass::RightSignalUnknownProtection
+                | JunctionClass::RightSignalUnknown
+        )
+    });
+    let narrow = classes.contains(&JunctionClass::Narrow);
+    match (right, narrow) {
+        (true, true) => Some(AvoidTargetKind::RightTurnAndNarrow),
+        (true, false) => Some(AvoidTargetKind::RightTurn),
+        (false, true) => Some(AvoidTargetKind::Narrow),
+        (false, false) => None,
+    }
+}
+
 /// What a chip is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvoidTarget {
@@ -149,6 +180,8 @@ pub struct AvoidTarget {
     /// Remaining ETA on the current route when the search started (`base_eta`, 03 §3.2).
     pub base_eta_ms: u64,
     pub avoided: Avoided,
+    /// Category of the target maneuver for 04 §4.3 (b).
+    pub kind: AvoidTargetKind,
     /// Matched position on the current route when the search started (`along_route_cm`):
     /// the origin of the divergence search (03 §3.1 "探索開始時の位置").
     pub start_progress_cm: u32,
@@ -331,10 +364,14 @@ pub fn narrow_total_m(f: &CandidateFacts) -> u64 {
     f.narrow_m.confirmed.saturating_add(f.narrow_m.inferred)
 }
 
-/// 04 §4.3 item 2: is the alternative really better? (a) the target's `(edge_in, edge_out)`
-/// is not among `alt.junctions` (unknown pair → cannot be confirmed); (b) against
-/// `base` (the current route from the search start, also built by C++: same yardstick),
-/// fewer avoid targets and `narrow_m` not longer.
+/// 04 §4.3 item 2 (docs `fcacfb1`): is the alternative really better?
+/// - (a) the target's `(edge_in, edge_out)` is not among `alt.junctions` (unknown pair →
+///   cannot be confirmed);
+/// - (b) against `base` (the current route from the search start, also built by C++: same
+///   yardstick), the target's own category strictly improves and the other does not worsen:
+///   - right-turn target: avoid right-turn count `<` base and `narrow_m` `<=` base;
+///   - `narrow` target: `narrow_m` `<` base and avoid right-turn count `<=` base;
+///   - both (right turn into narrow road): neither worsens and at least one strictly improves.
 pub fn check_alternative(
     target: &AvoidTarget,
     alt: &CandidateFacts,
@@ -350,7 +387,20 @@ pub fn check_alternative(
     {
         return Err(AvoidDeclineReason::TargetNotAvoided);
     }
-    if target_count(alt) >= target_count(base) || narrow_total_m(alt) > narrow_total_m(base) {
+    let alt_right = target_count(alt);
+    let base_right = target_count(base);
+    let alt_narrow = narrow_total_m(alt);
+    let base_narrow = narrow_total_m(base);
+    let better = match target.kind {
+        AvoidTargetKind::RightTurn => alt_right < base_right && alt_narrow <= base_narrow,
+        AvoidTargetKind::Narrow => alt_narrow < base_narrow && alt_right <= base_right,
+        AvoidTargetKind::RightTurnAndNarrow => {
+            alt_right <= base_right
+                && alt_narrow <= base_narrow
+                && (alt_right < base_right || alt_narrow < base_narrow)
+        }
+    };
+    if !better {
         return Err(AvoidDeclineReason::NotFewerHazards);
     }
     Ok(())
@@ -429,6 +479,7 @@ mod tests {
                 unprotected_right: 1,
                 narrow_m: 0,
             },
+            kind: AvoidTargetKind::RightTurn,
             start_progress_cm: 0,
             edge_pair: None,
         };
@@ -438,6 +489,93 @@ mod tests {
         );
         t.edge_pair = Some((1, 2));
         assert_eq!(check_alternative(&t, &alt, &base), Ok(()));
+    }
+
+    #[test]
+    fn check_alternative_b_splits_by_target_kind() {
+        let mut base: CandidateFacts = serde_json::from_str(include_str!(
+            "../../../../schema/fixtures/valid/candidate-facts.min.json"
+        ))
+        .unwrap();
+        base.junctions.clear();
+        base.counts.right_unprotected = 1;
+        base.counts.right_signal_unknown_protection = 0;
+        base.counts.right_signal_unknown = 0;
+        base.narrow_m.confirmed = 100;
+        base.narrow_m.inferred = 0;
+
+        let key = RouteKey {
+            trip_id: "t".into(),
+            trip_revision: contracts::U64Str(1),
+            route_revision: contracts::U64Str(1),
+            graph_version: "g".into(),
+        };
+        let target = |kind: AvoidTargetKind| AvoidTarget {
+            maneuver_id: ManeuverId {
+                route_key: key.clone(),
+                leg_index: 0,
+                ordinal: 0,
+            },
+            route_key: key.clone(),
+            deadline_mono_ms: 0,
+            base_eta_ms: 0,
+            avoided: Avoided {
+                unprotected_right: u8::from(kind != AvoidTargetKind::Narrow),
+                narrow_m: 0,
+            },
+            kind,
+            start_progress_cm: 0,
+            edge_pair: Some((1, 2)),
+        };
+        let alt = |right: u64, narrow: u64| {
+            let mut a = base.clone();
+            a.counts.right_unprotected = right;
+            a.narrow_m.confirmed = narrow;
+            a
+        };
+
+        // RightTurn: right < base && narrow <= base
+        let rt = target(AvoidTargetKind::RightTurn);
+        assert_eq!(check_alternative(&rt, &alt(0, 100), &base), Ok(()));
+        assert_eq!(check_alternative(&rt, &alt(0, 50), &base), Ok(()));
+        assert_eq!(
+            check_alternative(&rt, &alt(1, 50), &base),
+            Err(AvoidDeclineReason::NotFewerHazards)
+        );
+        assert_eq!(
+            check_alternative(&rt, &alt(0, 101), &base),
+            Err(AvoidDeclineReason::NotFewerHazards)
+        );
+
+        // Narrow: narrow < base && right <= base
+        let nw = target(AvoidTargetKind::Narrow);
+        assert_eq!(check_alternative(&nw, &alt(1, 99), &base), Ok(()));
+        assert_eq!(check_alternative(&nw, &alt(0, 99), &base), Ok(()));
+        assert_eq!(
+            check_alternative(&nw, &alt(0, 100), &base),
+            Err(AvoidDeclineReason::NotFewerHazards)
+        );
+        assert_eq!(
+            check_alternative(&nw, &alt(2, 50), &base),
+            Err(AvoidDeclineReason::NotFewerHazards)
+        );
+
+        // RightTurnAndNarrow: neither worsens, at least one strictly improves
+        let both = target(AvoidTargetKind::RightTurnAndNarrow);
+        assert_eq!(check_alternative(&both, &alt(0, 100), &base), Ok(()));
+        assert_eq!(check_alternative(&both, &alt(1, 99), &base), Ok(()));
+        assert_eq!(
+            check_alternative(&both, &alt(1, 100), &base),
+            Err(AvoidDeclineReason::NotFewerHazards)
+        );
+        assert_eq!(
+            check_alternative(&both, &alt(0, 101), &base),
+            Err(AvoidDeclineReason::NotFewerHazards)
+        );
+        assert_eq!(
+            check_alternative(&both, &alt(2, 50), &base),
+            Err(AvoidDeclineReason::NotFewerHazards)
+        );
     }
 
     #[test]

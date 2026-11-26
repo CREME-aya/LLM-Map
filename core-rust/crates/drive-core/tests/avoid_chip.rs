@@ -51,8 +51,9 @@ fn config() -> SessionConfig {
 
 fn session_with(b: &RouteBundle, cfg: SessionConfig) -> Session {
     let mut s = Session::new(cfg);
+    s.record_plan_ok_for_test("p-init", b.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: None,
+        req_id: "p-init".into(),
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -532,6 +533,17 @@ fn alternative_must_avoid_the_target_and_not_add_hazards() {
         ),
         Some(AvoidDeclineReason::NotFewerHazards)
     );
+    // (b) right-turn target: shorter narrow_m alone does not pass when right-turn count is equal
+    assert_eq!(
+        run(
+            alt(&|a| {
+                a.counts.right_unprotected = 1;
+                a.narrow_m.confirmed = 10;
+            }),
+            b(&|x| x.narrow_m.confirmed = 100)
+        ),
+        Some(AvoidDeclineReason::NotFewerHazards)
+    );
     // base_facts of another graph version
     assert_eq!(
         run(alt(&|_| {}), b(&|x| x.graph_version = "other".into())),
@@ -541,6 +553,111 @@ fn alternative_must_avoid_the_target_and_not_add_hazards() {
     assert_eq!(
         run(alt(&|a| a.eta_ms = base + 180_001), b(&|_| {})),
         Some(AvoidDeclineReason::OverDetourCap)
+    );
+}
+
+/// 04 §4.3 (b) (`fcacfb1`): when the avoid-chip target is `narrow` only, `narrow_m` must be
+/// strictly shorter than `base_facts` and avoid right-turn count must be `<=` `base_facts`
+/// (same right-turn count passes if `narrow_m` is shorter; fewer right turns alone does not).
+#[test]
+fn narrow_target_b_rule_checks_narrow_m_strictly_and_right_turns_non_increasing() {
+    let narrow_bundle = || {
+        let mut b = main_line();
+        // Make maneuver 1 a left turn into a confirmed 3.0 m narrow road (narrow only).
+        b.legs[0].maneuvers[1].arrow = contracts::horizon::Arrow::Left;
+        b.legs[0].maneuvers[1].departure_width_mm =
+            serde_json::from_value(json!({"kind": "confirmed", "value": 3_000, "source_ref": "t"}))
+                .unwrap();
+        b
+    };
+    let ready = || {
+        let b = narrow_bundle();
+        let mut s = session_with(&b, config());
+        let o = tick(&mut s, 1_000, Some(fix_xy(&b, 1_000, 10_000, 0)), vec![]);
+        assert_eq!(starts(&o, SearchPriority::AvoidChip), vec!["r1".to_owned()]);
+        let k = key(&s);
+        tick(&mut s, 1_500, None, vec![finished(1_400, "r1", &k, "ok")]);
+        let t = s.avoid_state().target().unwrap();
+        assert_eq!(t.kind, drive_core::avoid::AvoidTargetKind::Narrow);
+        assert_eq!(t.avoided.unprotected_right, 0);
+        let base_eta = t.base_eta_ms;
+        (s, k.graph_version, base_eta)
+    };
+    let run = |alt_fn: &dyn Fn(&mut CandidateFacts), base_fn: &dyn Fn(&mut CandidateFacts)| {
+        let (mut s, gv, base_eta) = ready();
+        let mut alt = facts(&gv, base_eta + 30_000);
+        alt_fn(&mut alt);
+        let mut base = facts(&gv, base_eta);
+        base.candidate_id = "c-base".into();
+        base.counts.right_unprotected = 1;
+        base.narrow_m.confirmed = 120;
+        base_fn(&mut base);
+        match s.avoid_offer_eval(&AvoidOfferEvalRequest {
+            req_id: "r1".into(),
+            now_mono_ms: 1_600,
+            alt_facts: alt,
+            base_facts: base,
+        }) {
+            AvoidOfferEvalResult::Offered { .. } => None,
+            AvoidOfferEvalResult::Declined { reason } => Some(reason),
+        }
+    };
+    // Narrow shorter (119 < 120) with the same right-turn count (1 == 1) → offered!
+    assert_eq!(
+        run(
+            &|a| {
+                a.counts.right_unprotected = 1;
+                a.narrow_m.confirmed = 119;
+            },
+            &|_| {}
+        ),
+        None
+    );
+    // Narrow shorter via confirmed + inferred split (40 + 79 = 119 < 120), fewer right turns → offered
+    assert_eq!(
+        run(
+            &|a| {
+                a.counts.right_unprotected = 0;
+                a.narrow_m.confirmed = 40;
+                a.narrow_m.inferred = 79;
+            },
+            &|_| {}
+        ),
+        None
+    );
+    // Narrow equal (120 == 120), even if right-turn count dropped (0 < 1) → not_fewer_hazards
+    assert_eq!(
+        run(
+            &|a| {
+                a.counts.right_unprotected = 0;
+                a.narrow_m.confirmed = 120;
+            },
+            &|_| {}
+        ),
+        Some(AvoidDeclineReason::NotFewerHazards)
+    );
+    // Narrow shorter (80 < 120), but right-turn count increased (2 > 1) → not_fewer_hazards
+    assert_eq!(
+        run(
+            &|a| {
+                a.counts.right_unprotected = 1;
+                a.counts.right_signal_unknown = 1;
+                a.narrow_m.confirmed = 80;
+            },
+            &|_| {}
+        ),
+        Some(AvoidDeclineReason::NotFewerHazards)
+    );
+    // Narrow longer (121 > 120), right-turn count dropped → not_fewer_hazards
+    assert_eq!(
+        run(
+            &|a| {
+                a.counts.right_unprotected = 0;
+                a.narrow_m.confirmed = 121;
+            },
+            &|_| {}
+        ),
+        Some(AvoidDeclineReason::NotFewerHazards)
     );
 }
 
@@ -673,7 +790,7 @@ fn consent_before_the_deadline_commits() {
     alt.route_key.route_revision = contracts::U64Str(0);
     let r = s
         .route_commit(&RouteCommitRequest {
-            req_id: Some("r1".into()),
+            req_id: "r1".into(),
             expected_route_key: Some(k.clone()),
             bundle: alt,
         })
@@ -958,7 +1075,7 @@ fn route_commit_resets_the_chip() {
     alt.route_key.route_revision = contracts::U64Str(0);
     s.issue_commit_for_test("r9", k.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: Some("r9".into()),
+        req_id: "r9".into(),
         expected_route_key: Some(k),
         bundle: alt,
     })
@@ -973,5 +1090,128 @@ fn route_commit_resets_the_chip() {
         starts(&o, SearchPriority::AvoidChip).len(),
         1,
         "new route, new attempt"
+    );
+}
+
+/// If the current route changes via `dc_route_commit` while an `avoid_chip` search is
+/// running, Rust sends `cancel{req_id}` on the next tick, keeps the slot occupied until
+/// `search_finished`, and discards a late `ok` as `discarded_late` with no `evaluate_offer`
+/// and no offer.
+#[test]
+fn avoid_search_is_cancelled_on_route_commit_and_late_ok_is_discarded() {
+    let (mut s, b, _) = started(config());
+    let k1 = key(&s);
+    assert!(matches!(
+        s.planner().slot(),
+        drive_core::planner::Slot::Running { req } if req.req_id == "r1"
+    ));
+
+    // Current route changes via dc_route_commit while r1 is still running.
+    let mut next = b.clone();
+    next.route_key.route_revision = contracts::U64Str(0);
+    s.issue_commit_for_test("c-next", k1.clone());
+    let k2 = s
+        .route_commit(&RouteCommitRequest {
+            req_id: "c-next".into(),
+            expected_route_key: Some(k1.clone()),
+            bundle: next,
+        })
+        .unwrap()
+        .route_key;
+    assert_eq!(k2.route_revision.0, k1.route_revision.0 + 1);
+    assert_eq!(*s.avoid_state(), AvoidState::Idle);
+    assert!(matches!(
+        s.planner().slot(),
+        drive_core::planner::Slot::CancelRequested { req } if req.req_id == "r1"
+    ));
+
+    // Next tick emits cancel{r1}; slot is still occupied so no new avoid_chip starts yet.
+    let o = tick(&mut s, 1_500, Some(fix_xy(&b, 1_500, 10_000, 0)), vec![]);
+    assert_eq!(
+        o.planner_cmds,
+        vec![PlannerCmd::Cancel {
+            req_id: "r1".into()
+        }]
+    );
+    assert!(o.log.iter().any(|l| l.what == "search_cancel_requested"));
+    assert!(!s.planner().is_idle(), "slot held until search_finished");
+    assert!(starts(&o, SearchPriority::AvoidChip).is_empty());
+
+    // Another tick before search_finished: no duplicate cancel, slot still occupied.
+    let o = tick(&mut s, 1_800, Some(fix_xy(&b, 1_800, 11_000, 0)), vec![]);
+    assert!(o.planner_cmds.is_empty());
+    assert!(!s.planner().is_idle());
+
+    // Late ok for r1 arrives: discarded_late, no evaluate_offer, slot freed (new route may start r2).
+    let o = tick(&mut s, 2_000, None, vec![finished(1_900, "r1", &k1, "ok")]);
+    assert!(logged(&o, "discarded_late"));
+    assert!(
+        !o.planner_cmds
+            .iter()
+            .any(|c| matches!(c, PlannerCmd::EvaluateOffer { .. })),
+        "no evaluate_offer for discarded_late r1: {:?}",
+        o.planner_cmds
+    );
+    assert_eq!(
+        s.avoid_offer_eval(&AvoidOfferEvalRequest {
+            req_id: "r1".into(),
+            now_mono_ms: 2_100,
+            alt_facts: facts(&k1.graph_version, 1),
+            base_facts: base_facts(&k1.graph_version, 1),
+        }),
+        AvoidOfferEvalResult::Declined {
+            reason: AvoidDeclineReason::NoPendingResult
+        }
+    );
+    // Slot was freed and the new route (tracking) could start its own avoid search r2.
+    assert_eq!(starts(&o, SearchPriority::AvoidChip), vec!["r2".to_owned()]);
+}
+
+/// Leaving the route (`off_route` / `rerouting`) while an `avoid_chip` search is running
+/// cancels it once (without triggering a second budget cancel), holds the slot until
+/// `search_finished`, and treats a late `ok` as `discarded_late` with no `evaluate_offer`.
+#[test]
+fn avoid_search_cancelled_on_off_route_holds_slot_and_emits_no_evaluate_offer() {
+    let (mut s, b, _) = started(config()); // default 1.5 s avoid budget
+    let k = key(&s);
+    // Off-route confirmed at t=2_200 (before the 1.5 s avoid budget at t=2_500).
+    let mut last = None;
+    for (i, at) in [1_400u64, 1_800, 2_200].into_iter().enumerate() {
+        last = Some(tick(
+            &mut s,
+            at,
+            Some(fix_xy(&b, at, 12_000 + i as i64 * 1_000, 5_000)),
+            vec![],
+        ));
+    }
+    let o = last.unwrap();
+    assert_eq!(s.horizon_status(2_200), Some(HorizonStatus::OffRoute));
+    assert_eq!(
+        o.planner_cmds,
+        vec![PlannerCmd::Cancel {
+            req_id: "r1".into()
+        }]
+    );
+    assert!(!s.planner().is_idle());
+    // Passing the original 1.5 s avoid budget (2_500) emits no duplicate cancel or budget log.
+    let o = tick(&mut s, 2_600, None, vec![]);
+    assert!(o.planner_cmds.is_empty());
+    assert!(!logged(&o, "avoid_budget_expired"));
+    assert!(!s.planner().is_idle());
+    // Late ok for r1 arrives: discarded_late, no evaluate_offer, reroute r2 starts (→ rerouting).
+    let o = tick(&mut s, 2_800, None, vec![finished(2_700, "r1", &k, "ok")]);
+    assert!(logged(&o, "discarded_late"));
+    assert!(!o
+        .planner_cmds
+        .iter()
+        .any(|c| matches!(c, PlannerCmd::EvaluateOffer { .. })));
+    assert_eq!(starts(&o, SearchPriority::Reroute), vec!["r2".to_owned()]);
+    assert_eq!(s.horizon_status(2_800), Some(HorizonStatus::Rerouting));
+    assert_eq!(*s.avoid_state(), AvoidState::Idle);
+    assert_eq!(
+        eval(&mut s, 2_900, facts(&k.graph_version, 1)),
+        AvoidOfferEvalResult::Declined {
+            reason: AvoidDeclineReason::NoPendingResult
+        }
     );
 }

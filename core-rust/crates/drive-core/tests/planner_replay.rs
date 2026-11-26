@@ -59,11 +59,15 @@ fn start_fix(b: &RouteBundle, at_mono_ms: u64) -> Fix {
 /// Commits `b` (first route or replacing the current one).
 fn commit(s: &mut Session, b: &RouteBundle) {
     let guard = s.route().map(|r| r.route_key.clone());
-    if let Some(k) = &guard {
+    let req_id = if let Some(k) = &guard {
         s.issue_commit_for_test("t-commit", k.clone());
-    }
+        "t-commit".to_owned()
+    } else {
+        s.record_plan_ok_for_test("p-init", b.route_key.clone());
+        "p-init".to_owned()
+    };
     s.route_commit(&RouteCommitRequest {
-        req_id: guard.as_ref().map(|_| "t-commit".to_owned()),
+        req_id,
         expected_route_key: guard,
         bundle: b.clone(),
     })
@@ -173,6 +177,14 @@ fn run_with_wakes(name: &str) -> (Session, Vec<TickOutput>, usize, Vec<Option<u6
             // Stands in for a `commit{req_id, route_key}` the fixture does not drive.
             "issue_commit" => {
                 s.issue_commit_for_test(
+                    step["req_id"].as_str().unwrap(),
+                    serde_json::from_value(step["route_key"].clone()).unwrap(),
+                );
+                TickOutput::default()
+            }
+            // Stands in for a plan candidate `ok` the fixture does not drive.
+            "plan_ok" => {
+                s.record_plan_ok_for_test(
                     step["req_id"].as_str().unwrap(),
                     serde_json::from_value(step["route_key"].clone()).unwrap(),
                 );
@@ -453,31 +465,31 @@ fn short_plan_watchdog_5s_keeps_slot_until_search_finished() {
             .ends_with("distance_class=short")));
     assert_eq!(w[0], Some(3_000));
     // r1 started at 1000: watchdog 1000 + 5000, budget 3000 comes first
-    assert_eq!(w[3], Some(3_000));
-    assert!(whats(&o[5]).contains(&"comparison_budget_expired"));
-    assert_eq!(w[5], Some(6_000));
+    assert_eq!(w[4], Some(3_000));
+    assert!(whats(&o[6]).contains(&"comparison_budget_expired"));
+    assert_eq!(w[6], Some(6_000));
     // 5999: not yet stuck
-    assert!(!whats(&o[6]).contains(&"engine_stuck"));
+    assert!(!whats(&o[7]).contains(&"engine_stuck"));
     // 6000: watchdog limit reached → engine_stuck, slot still occupied, no UiCmd
-    assert!(whats(&o[7]).contains(&"engine_stuck"));
-    assert!(o[7].ui_cmds.is_empty());
-    assert_eq!(w[7], None);
+    assert!(whats(&o[8]).contains(&"engine_stuck"));
+    assert!(o[8].ui_cmds.is_empty());
+    assert_eq!(w[8], None);
     // reroute requested while stuck: one cancel, no start (slot occupied)
     assert_eq!(
-        o[8].planner_cmds,
+        o[9].planner_cmds,
         vec![PlannerCmd::Cancel {
             req_id: "r1".into()
         }]
     );
     // much later (past both limits, engine_reset seen): still no start, no wake request
-    assert!(o[9].planner_cmds.is_empty());
-    assert_eq!(w[9], None);
+    assert!(o[10].planner_cmds.is_empty());
+    assert_eq!(w[10], None);
     // r1 returns → discarded_after_stuck, r2 starts short (remaining ETA 29:59 still valid)
-    assert!(whats(&o[10]).contains(&"discarded_after_stuck"));
+    assert!(whats(&o[11]).contains(&"discarded_after_stuck"));
     assert!(
-        matches!(&o[10].planner_cmds[..], [PlannerCmd::Start { req_id, priority: SearchPriority::Reroute, .. }] if req_id == "r2")
+        matches!(&o[11].planner_cmds[..], [PlannerCmd::Start { req_id, priority: SearchPriority::Reroute, .. }] if req_id == "r2")
     );
-    assert_eq!(w[10], Some(30_000 + 5_000));
+    assert_eq!(w[11], Some(30_000 + 5_000));
     assert!(matches!(s.planner().slot(), Slot::Running { .. }));
 }
 
@@ -818,20 +830,20 @@ fn reroute_held_while_uncertain_commits_on_tracking() {
     use contracts::horizon::HorizonStatus;
     let (s, o, max_running) = run("gate7-reroute-held-uncertain.json");
     assert_eq!(max_running, 1);
-    // [0] commit A, [1] tracking, [2..=4] off → r1, [5] ambiguous, [6] r1 ok, [7] wait,
-    // [8] tracking → commit, [9] route_commit B, [10] tick on B
-    assert!(whats(&o[4]).contains(&"off_route_confirmed"));
-    assert!(whats(&o[5]).contains(&"align_ambiguous"));
-    assert!(whats(&o[6]).contains(&"commit_held_uncertain"));
-    assert!(!whats(&o[6]).contains(&"discarded_not_tracking"));
+    // [0] plan_ok, [1] commit A, [2] tracking, [3..=5] off → r1, [6] ambiguous, [7] r1 ok,
+    // [8] wait, [9] tracking → commit, [10] route_commit B, [11] tick on B
+    assert!(whats(&o[5]).contains(&"off_route_confirmed"));
+    assert!(whats(&o[6]).contains(&"align_ambiguous"));
+    assert!(whats(&o[7]).contains(&"commit_held_uncertain"));
+    assert!(!whats(&o[7]).contains(&"discarded_not_tracking"));
     // the held reroute counts as the reroute: no second start while held
-    assert!(o[5..8].iter().all(|x| x.planner_cmds.is_empty()));
-    assert!(o[6].next_wake_mono_ms.is_some_and(|w| w <= 16_001));
-    let l = o[8].log.iter().find(|l| l.what == "commit_issued").unwrap();
+    assert!(o[6..9].iter().all(|x| x.planner_cmds.is_empty()));
+    assert!(o[7].next_wake_mono_ms.is_some_and(|w| w <= 16_001));
+    let l = o[9].log.iter().find(|l| l.what == "commit_issued").unwrap();
     assert_eq!(l.detail.as_deref(), Some("from_hold"));
     assert_eq!(s.route().unwrap().route_key.route_revision.0, 2);
     assert_eq!(
-        o[10].horizon.as_ref().unwrap().route_key.route_revision.0,
+        o[11].horizon.as_ref().unwrap().route_key.route_revision.0,
         2
     );
     assert_eq!(status_of(&s, 8_000), Some(HorizonStatus::Tracking));
@@ -843,11 +855,11 @@ fn reroute_held_while_uncertain_commits_on_tracking() {
 fn reroute_hold_expires_after_10s() {
     let (s, o, max_running) = run("gate7-reroute-hold-expired.json");
     assert_eq!(max_running, 1);
-    assert!(whats(&o[6]).contains(&"commit_held_uncertain"));
-    assert!(!whats(&o[7]).contains(&"discarded_hold_expired"));
-    assert!(whats(&o[8]).contains(&"discarded_hold_expired"));
+    assert!(whats(&o[7]).contains(&"commit_held_uncertain"));
+    assert!(!whats(&o[8]).contains(&"discarded_hold_expired"));
+    assert!(whats(&o[9]).contains(&"discarded_hold_expired"));
     assert!(s.planner().held().is_none());
-    assert!(o[9]
+    assert!(o[10]
         .planner_cmds
         .iter()
         .all(|c| !matches!(c, PlannerCmd::Commit { .. })));
@@ -864,10 +876,10 @@ fn commit_assigns_route_revision_current_plus_one() {
     assert_eq!(s.route().unwrap().route_key.route_revision.0, 2);
     // the tick right after the refused commits still shows rev 1
     assert_eq!(
-        o[10].horizon.as_ref().unwrap().route_key.route_revision.0,
+        o[11].horizon.as_ref().unwrap().route_key.route_revision.0,
         1
     );
-    let h = o[13].horizon.as_ref().unwrap();
+    let h = o[14].horizon.as_ref().unwrap();
     assert_eq!(h.route_key.route_revision.0, 2);
     assert!(h
         .upcoming

@@ -9,6 +9,7 @@
  *            dc_out is allocated by Rust and MUST be released with dc_buf_free (exactly once).
  *            Every dc_out is {"ok":true,"data":...} | {"ok":false,"error":{"code":..,"msg":..}}
  *            code: E_SCHEMA | E_VERSION | E_STALE | E_REJECTED | E_PANIC | E_INVALID_HANDLE
+ *                  | FORBIDDEN_WHILE_DRIVING
  *                  (+ E_UNIMPLEMENTED: skeleton-only placeholder, TODO remove before ABI freeze)
  * Threads:   dc_session is NOT thread-safe. Call only from the single NavigationSession actor.
  * Time:      *_mono_ms are SystemClock.elapsedRealtime based. Rust never reads a clock.
@@ -53,21 +54,25 @@ typedef struct dc_session dc_session;
           * (skeleton: SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only, else E_UNIMPLEMENTED) */
 /* 8  */ dc_out   dc_trip_score(dc_in trip_summary_json);                      /* TODO: E_UNIMPLEMENTED */
 /* 9  */ dc_out   dc_route_commit(dc_session* s, dc_in route_bundle_json);     /* route body only here */
-         /* in : {req_id: string|null, expected_route_key: RouteKey|null, bundle: RouteBundle}
-          *      (schema/route-bundle.schema.json)
-          *      req_id (provisional, proposed to the team) = the req_id of the planner_cmds
-          *      commit this route answers (undo-<req_id> for an undo). While a route is current
-          *      it must name a commit Rust issued with route_key = expected_route_key and not
-          *      settled yet (loading any route settles them all; cancel_commit withdraws one)
-          *      -> otherwise E_STALE, nothing replaced. null / any value for the first route.
-          *      expected_route_key = guard: from planner_cmds commit (the current route's key when the
-          *      search started), or null for the first route. Must equal the current route
-          *      (null = none) -> otherwise E_STALE, nothing replaced (checked first).
+         /* in : {req_id: string, expected_route_key: RouteKey|null, bundle: RouteBundle}
+          *      (schema/route-bundle.schema.json; 02 §2.1 #9)
+          *      req_id is required (null or omitted -> E_SCHEMA). Accepted only when it names
+          *      either (1) an unsettled commit{req_id, route_key} Rust issued with route_key =
+          *      expected_route_key (undo-<req_id> for an undo; loading any route settles them
+          *      all, cancel_commit withdraws one), or (2) an ok candidate search of the current
+          *      plan while its commit window is open (closed when the next plan starts or after
+          *      one candidate commits -> E_STALE; closed once driving, >= drive_start_speed_cm_s
+          *      [222 cm/s = 8 km/h] continuously for drive_start_hold_ms [3000 ms], reset by
+          *      slow / missing-speed / acc_cm > max_acc_cm fixes -> FORBIDDEN_WHILE_DRIVING).
+          *      Any other req_id -> E_STALE.
+          *      expected_route_key = guard: current route's key, or null for the first route.
+          *      Must equal the current route (null = none) -> otherwise E_STALE, nothing replaced.
           *      bundle.route_key.route_revision (and every ManeuverId.route_key) must be "0"
-          *      -> otherwise E_SCHEMA. Rust assigns current + 1 (the first route: 1) and
-          *      rewrites the bundle's route_keys to it. While a route is current, the bundle's
-          *      trip_id / trip_revision / graph_version must equal it -> otherwise E_STALE.
-          *      Nothing is replaced on any error.
+          *      -> otherwise E_SCHEMA. Rust assigns current + 1 (the first route: 1; never reset
+          *      when trip_revision advances) and rewrites the bundle's route_keys to it. While a
+          *      route is current, bundle trip_id / graph_version must match it, and trip_revision
+          *      must match it or (only for a plan candidate whose plan has that trip_revision)
+          *      equal current + 1 -> otherwise E_STALE. Nothing is replaced on any error.
           *      bundle = {route_key (new, route_revision "0"), eta_ms, length_cm, legs[{leg_index, along_route_start_cm,
           *      length_cm, chunks[{first_shape_index, origin_e7{lat,lon}, k_lat_q16, k_lon_q16,
           *      points_cm[[dx,dy]], seg_along_cm[], bearing_cdeg[]}], edges[{edge_id, from_pt, to_pt,
@@ -108,7 +113,8 @@ typedef struct dc_session dc_session;
           *                  | commit{req_id, route_key, undo_req_id?} | cancel_commit{req_id}
           *                  | evaluate_offer{req_id, facts_ref, base_facts_ref}],
           *   cancel{req_id} also comes for an avoid_chip search still running 1.5 s after its
-          *   start (04 §4.3; the slot stays occupied until its search_finished).
+          *   start (04 §4.3) or when the current route changes (dc_route_commit / off_route /
+          *   rerouting); the slot stays occupied until its search_finished (ok -> discarded_late).
           *   evaluate_offer: an avoid_chip ok (valid, tracking) with both refs -> call
           *   dc_avoid_offer_eval with the CandidateFacts behind them. Without both: no offer.
           *   "経路を確認中" is horizon.status off_route / rerouting (show_checking_route is abolished).
@@ -145,9 +151,10 @@ typedef struct dc_session dc_session;
           *   no_pending_result|not_tracking|deadline_passed|graph_mismatch|not_legal_or_complete
           *   |target_edges_unknown|target_not_avoided|not_fewer_hazards|over_detour_cap}.
           *   04 §4.3 item 2: (a) the target's (edge_in, edge_out) must not be in
-          *   alt_facts.junctions; (b) against base_facts, fewer avoid targets (right_unprotected
-          *   + right_signal_unknown_protection + right_signal_unknown) and narrow_m
-          *   (confirmed + inferred) not longer. Result shape provisional (not in docs). */
+          *   alt_facts.junctions; (b) against base_facts, for a right-turn target fewer avoid
+          *   right turns (right_unprotected + right_signal_unknown_protection +
+          *   right_signal_unknown) and narrow_m (confirmed + inferred) not longer; for a narrow
+          *   target shorter narrow_m and avoid right turns not more. Result shape provisional. */
 /* 12 */ dc_out   dc_exchange_validate(dc_in req_json);                        /* {kind, payload} (TODO: E_UNIMPLEMENTED) */
 
 #ifdef __cplusplus

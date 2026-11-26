@@ -16,6 +16,9 @@ pub enum ErrorCode {
     Panic,
     #[serde(rename = "E_INVALID_HANDLE")]
     InvalidHandle,
+    /// Plan-candidate `dc_route_commit` after the vehicle started moving (02 §2.1 #9).
+    #[serde(rename = "FORBIDDEN_WHILE_DRIVING")]
+    ForbiddenWhileDriving,
     /// TODO(abi-v1): skeleton-only placeholder for functions not implemented yet.
     /// Not one of the 6 agreed codes; remove before freezing ABI v1.
     #[serde(rename = "E_UNIMPLEMENTED")]
@@ -31,6 +34,7 @@ impl ErrorCode {
             ErrorCode::Rejected => "E_REJECTED",
             ErrorCode::Panic => "E_PANIC",
             ErrorCode::InvalidHandle => "E_INVALID_HANDLE",
+            ErrorCode::ForbiddenWhileDriving => "FORBIDDEN_WHILE_DRIVING",
             ErrorCode::Unimplemented => "E_UNIMPLEMENTED",
         }
     }

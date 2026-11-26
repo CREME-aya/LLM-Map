@@ -61,7 +61,7 @@
 use contracts::tick::{
     DistanceClass, Fix, LogEvent, PlannerCmd, RankReason, SearchOutcome, SearchPriority, UiCmd,
 };
-use contracts::RouteKey;
+use contracts::{RouteKey, U64Str};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +118,28 @@ impl SearchLimits {
     }
 }
 
+/// A candidate search of a plan that returned `ok` (03 §3.1, 02 §2.1 #9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanOkSearch {
+    pub req_id: String,
+    pub candidate_id: String,
+    pub facts_ref: String,
+}
+
+/// Whether candidates of the current plan may still be committed via `dc_route_commit`
+/// (02 §2.1 #9, 03 §3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanCommitState {
+    /// Candidates in `ok_searches` can be committed.
+    Open,
+    /// A candidate of this plan was already committed (or the plan was superseded).
+    Closed,
+    /// The vehicle started driving (`>= drive_start_speed_cm_s` = 222 cm/s continuously for
+    /// `drive_start_hold_ms` = 3000 ms, 07 §1); committing a candidate of this plan returns
+    /// `FORBIDDEN_WHILE_DRIVING`.
+    ClosedDriving,
+}
+
 /// The current plan_request. Its distance class is fixed at `begin_plan` and never
 /// re-evaluated for the candidate searches of the same plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,12 +149,20 @@ pub struct Plan {
     pub started_at_mono_ms: u64,
     /// Key every candidate search of the plan is started with.
     pub route_key: Option<RouteKey>,
+    /// `TripPlanSnapshot.trip_revision` of this plan (present when started with a route_key).
+    pub trip_revision: Option<U64Str>,
     /// Candidate searches not started yet, in request order.
     pub queue: VecDeque<PlanSearch>,
     /// `facts_ref` of each candidate search that returned `ok`, in request order.
     pub facts_refs: Vec<String>,
-    /// Set once `rank` was emitted (or the plan was superseded): nothing more starts.
-    pub ended: bool,
+    /// Candidate searches of this plan that returned `ok`, in request order.
+    pub ok_searches: Vec<PlanOkSearch>,
+    /// Flag 1 ("新しい探索を始めない"): set once `rank` was emitted (or the plan was
+    /// superseded): nothing more starts.
+    pub searches_closed: bool,
+    /// Flag 2 ("commit を受け付けない"): closed when a new plan starts, when one of this
+    /// plan's candidates is committed, or when the vehicle starts moving.
+    pub commit_state: PlanCommitState,
 }
 
 /// A queued candidate search of a plan.
@@ -368,7 +398,7 @@ impl SearchPlanner {
             if p.plan_request_id == plan_request_id {
                 return p.distance_class;
             }
-            if !p.ended {
+            if !p.searches_closed {
                 let detail = format!("plan_request_id={}", p.plan_request_id);
                 log(fx, now, "plan_superseded", None, Some(detail));
                 self.end_plan(now, fx);
@@ -386,14 +416,18 @@ impl SearchPlanner {
             )),
         );
         let head = searches.first().map(|s| s.priority);
+        let trip_revision = route_key.as_ref().map(|k| k.trip_revision);
         self.plan = Some(Plan {
             plan_request_id: plan_request_id.to_owned(),
             distance_class,
             started_at_mono_ms: now,
             route_key,
+            trip_revision,
             queue: searches.into(),
             facts_refs: Vec::new(),
-            ended: false,
+            ok_searches: Vec::new(),
+            searches_closed: false,
+            commit_state: PlanCommitState::Open,
         });
         if let Some(priority) = head {
             self.preempt_or_start(now, priority, fx);
@@ -401,12 +435,14 @@ impl SearchPlanner {
         distance_class
     }
 
-    /// Ends the current plan: drops its queued searches and cancels its running one.
+    /// Closes the plan's search phase ("新しい探索を始めない"): drops queued searches and
+    /// cancels a running one. Does not close `commit_state` so ranked candidates can still be
+    /// committed.
     fn end_plan(&mut self, now: u64, fx: &mut Effects) {
         let Some(plan) = self.plan.as_mut() else {
             return;
         };
-        plan.ended = true;
+        plan.searches_closed = true;
         for s in plan.queue.drain(..) {
             log(
                 fx,
@@ -439,9 +475,58 @@ impl SearchPlanner {
         }
     }
 
-    /// Emits the plan's single `rank` and ends it.
+    /// Closes the current plan's commit window after one of its candidates was committed.
+    pub fn close_plan_commit_committed(&mut self) {
+        if let Some(p) = self.plan.as_mut() {
+            if p.commit_state == PlanCommitState::Open {
+                p.commit_state = PlanCommitState::Closed;
+            }
+        }
+    }
+
+    /// Closes the current plan's commit window because the vehicle started moving
+    /// (`FORBIDDEN_WHILE_DRIVING` on any later plan-candidate commit).
+    pub fn close_plan_commit_driving(&mut self) {
+        if let Some(p) = self.plan.as_mut() {
+            if p.commit_state == PlanCommitState::Open {
+                p.commit_state = PlanCommitState::ClosedDriving;
+            }
+        }
+    }
+
+    /// Test hook: records an `ok` plan candidate on the current plan (creating a ranked
+    /// test plan if none exists), without advancing `next_req_seq`.
+    #[doc(hidden)]
+    pub fn record_plan_ok_for_test(&mut self, req_id: &str, route_key: RouteKey) {
+        let entry = PlanOkSearch {
+            req_id: req_id.to_owned(),
+            candidate_id: "c1".into(),
+            facts_ref: format!("facts-{req_id}"),
+        };
+        if let Some(p) = self.plan.as_mut() {
+            p.route_key.get_or_insert_with(|| route_key.clone());
+            p.trip_revision.get_or_insert(route_key.trip_revision);
+            p.ok_searches.push(entry);
+            p.commit_state = PlanCommitState::Open;
+        } else {
+            self.plan = Some(Plan {
+                plan_request_id: format!("test-plan-{req_id}"),
+                distance_class: DistanceClass::Long,
+                started_at_mono_ms: 0,
+                trip_revision: Some(route_key.trip_revision),
+                route_key: Some(route_key),
+                queue: VecDeque::new(),
+                facts_refs: vec![entry.facts_ref.clone()],
+                ok_searches: vec![entry],
+                searches_closed: true,
+                commit_state: PlanCommitState::Open,
+            });
+        }
+    }
+
+    /// Emits the plan's single `rank` and closes its search phase (commit window stays open).
     fn rank(&mut self, now: u64, reason: RankReason, fx: &mut Effects) {
-        let Some(plan) = self.plan.as_ref().filter(|p| !p.ended) else {
+        let Some(plan) = self.plan.as_ref().filter(|p| !p.searches_closed) else {
             return;
         };
         fx.planner_cmds.push(PlannerCmd::Rank {
@@ -461,12 +546,12 @@ impl SearchPlanner {
     fn active_plan(&self, plan_request_id: &str) -> bool {
         self.plan
             .as_ref()
-            .is_some_and(|p| !p.ended && p.plan_request_id == plan_request_id)
+            .is_some_and(|p| !p.searches_closed && p.plan_request_id == plan_request_id)
     }
 
-    /// Comparison budget deadline of the current plan (None once expired / no plan).
+    /// Comparison budget deadline of the current plan (None once searches closed / no plan).
     pub fn comparison_deadline(&self) -> Option<u64> {
-        self.plan.as_ref().filter(|p| !p.ended).map(|p| {
+        self.plan.as_ref().filter(|p| !p.searches_closed).map(|p| {
             p.started_at_mono_ms
                 .saturating_add(self.limits.comparison_budget_ms(p.distance_class))
         })
@@ -567,6 +652,32 @@ impl SearchPlanner {
         }
     }
 
+    /// Cancels a running (or stuck, not yet cancelled) avoid-chip search in the slot.
+    /// The slot stays occupied until its `search_finished`.
+    pub fn cancel_avoid_in_slot(&mut self, now: u64, fx: &mut Effects) -> bool {
+        match &self.slot {
+            Slot::Running { req } if req.priority == SearchPriority::AvoidChip => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::CancelRequested { req };
+                true
+            }
+            Slot::EngineStuck {
+                req,
+                cancel_sent: false,
+            } if req.priority == SearchPriority::AvoidChip => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::EngineStuck {
+                    req,
+                    cancel_sent: true,
+                };
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn send_cancel(now: u64, req: &SearchReq, fx: &mut Effects) {
         fx.planner_cmds.push(PlannerCmd::Cancel {
             req_id: req.req_id.clone(),
@@ -581,7 +692,7 @@ impl SearchPlanner {
             && !self
                 .plan
                 .as_ref()
-                .is_some_and(|p| !p.ended && !p.queue.is_empty())
+                .is_some_and(|p| !p.searches_closed && !p.queue.is_empty())
     }
 
     /// A reroute is waiting or occupies the slot (no second one is requested).
@@ -607,8 +718,31 @@ impl SearchPlanner {
         }
     }
 
-    /// A new route was committed: a waiting request made for another route is dropped.
+    /// A new route was committed: waiting / held requests made for another route are
+    /// dropped, and a running avoid-chip search for another route gets `cancel` (the slot
+    /// stays occupied until its `search_finished`, whose `ok` is then `discarded_late`).
     pub fn on_route_changed(&mut self, now: u64, route_key: &RouteKey, fx: &mut Effects) {
+        match &self.slot {
+            Slot::Running { req }
+                if req.priority == SearchPriority::AvoidChip && req.route_key != *route_key =>
+            {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::CancelRequested { req };
+            }
+            Slot::EngineStuck {
+                req,
+                cancel_sent: false,
+            } if req.priority == SearchPriority::AvoidChip && req.route_key != *route_key => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::EngineStuck {
+                    req,
+                    cancel_sent: true,
+                };
+            }
+            _ => {}
+        }
         if self
             .pending
             .as_ref()
@@ -653,7 +787,7 @@ impl SearchPlanner {
         let plan_head = self
             .plan
             .as_ref()
-            .filter(|p| !p.ended && p.route_key.is_some())
+            .filter(|p| !p.searches_closed && p.route_key.is_some())
             .and_then(|p| p.queue.front())
             .map(|s| s.priority);
         let take_plan = match (&self.pending, plan_head) {
@@ -750,6 +884,11 @@ impl SearchPlanner {
                 match facts_ref {
                     Some(f) => {
                         plan.facts_refs.push(f.to_owned());
+                        plan.ok_searches.push(PlanOkSearch {
+                            req_id: req_id.to_owned(),
+                            candidate_id: req.candidate_id.clone().unwrap_or_default(),
+                            facts_ref: f.to_owned(),
+                        });
                         log(fx, at, "candidate_collected", Some(req_id), None);
                     }
                     // TODO(abi-v1): an ok without facts_ref is not specified; not ranked.

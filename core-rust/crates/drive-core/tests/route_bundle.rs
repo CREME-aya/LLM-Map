@@ -25,12 +25,21 @@ fn min_bundle() -> RouteBundle {
 }
 
 /// The `dc_route_commit` request for `guard`; a non-null guard comes with a `commit` Rust
-/// issued for it (test hook), so these tests exercise the route_key half of the guard.
+/// issued for it (test hook), and a null guard comes with a plan candidate `ok` (test hook),
+/// so these tests exercise the route_key / revision / body checks.
 fn request(s: &mut Session, guard: Option<RouteKey>, b: RouteBundle) -> RouteCommitRequest {
-    let req_id = guard.as_ref().map(|k| {
-        s.issue_commit_for_test("t-commit", k.clone());
-        "t-commit".to_owned()
-    });
+    let req_id = match &guard {
+        Some(k) => {
+            s.issue_commit_for_test("t-commit", k.clone());
+            "t-commit".to_owned()
+        }
+        None => {
+            let mut plan_rk = b.route_key.clone();
+            plan_rk.route_revision = contracts::U64Str(0);
+            s.record_plan_ok_for_test("p-init", plan_rk);
+            "p-init".to_owned()
+        }
+    };
     RouteCommitRequest {
         req_id,
         expected_route_key: guard,
@@ -43,46 +52,51 @@ fn commit(s: &mut Session, guard: Option<RouteKey>, b: RouteBundle) -> Result<()
     s.route_commit(&req).map(|_| ()).map_err(|e| e.code)
 }
 
-/// The req_id half of the guard (provisional): while a route is current, `req_id` must
-/// name a commit Rust issued for that `expected_route_key` and not settled yet; the first
-/// route may carry any req_id or null.
+/// The req_id half of the guard (02 §2.1 #9): `req_id` is mandatory (`null` / omitted fails
+/// deserialization → `E_SCHEMA`) and must name either an open plan candidate or a commit Rust
+/// issued for `expected_route_key` and not settled yet.
 #[test]
 fn guard_req_id_must_name_an_issued_commit() {
     let mut s = Session::new(SessionConfig::default());
-    let raw = |req_id: Option<&str>, guard: Option<RouteKey>| RouteCommitRequest {
-        req_id: req_id.map(str::to_owned),
+    let raw = |req_id: &str, guard: Option<RouteKey>| RouteCommitRequest {
+        req_id: req_id.to_owned(),
         expected_route_key: guard,
         bundle: min_bundle(),
     };
-    s.route_commit(&raw(Some("anything"), None)).unwrap();
-    let k1 = s.route().unwrap().route_key.clone();
-    let stale = |s: &mut Session, r: RouteCommitRequest| s.route_commit(&r).unwrap_err().code;
-    assert_eq!(stale(&mut s, raw(None, Some(k1.clone()))), ErrorCode::Stale);
+    // req_id: null is E_SCHEMA at JSON deserialization
+    assert!(
+        serde_json::from_value::<RouteCommitRequest>(serde_json::json!({
+            "req_id": null,
+            "expected_route_key": null,
+            "bundle": min_value(),
+        }))
+        .is_err()
+    );
+    // unknown req_id for first route → E_STALE
     assert_eq!(
-        stale(&mut s, raw(Some("r1"), Some(k1.clone()))),
+        s.route_commit(&raw("anything", None)).unwrap_err().code,
         ErrorCode::Stale
     );
+    s.record_plan_ok_for_test("p1", min_bundle().route_key);
+    s.route_commit(&raw("p1", None)).unwrap();
+    let k1 = s.route().unwrap().route_key.clone();
+    let stale = |s: &mut Session, r: RouteCommitRequest| s.route_commit(&r).unwrap_err().code;
+    assert_eq!(stale(&mut s, raw("r1", Some(k1.clone()))), ErrorCode::Stale);
     // issued for another route_key: not this guard's commit
     let mut other = k1.clone();
     other.route_revision = contracts::U64Str(7);
     s.issue_commit_for_test("r1", other);
-    assert_eq!(
-        stale(&mut s, raw(Some("r1"), Some(k1.clone()))),
-        ErrorCode::Stale
-    );
+    assert_eq!(stale(&mut s, raw("r1", Some(k1.clone()))), ErrorCode::Stale);
     s.issue_commit_for_test("r2", k1.clone());
     s.issue_commit_for_test("r3", k1.clone());
     assert_eq!(s.route().unwrap().route_key, k1, "nothing replaced");
     let k2 = s
-        .route_commit(&raw(Some("r3"), Some(k1.clone())))
+        .route_commit(&raw("r3", Some(k1.clone())))
         .unwrap()
         .route_key;
     // r2 had the same guard: settled by the route change
     assert_eq!(s.issued_commits().count(), 0);
-    assert_eq!(
-        stale(&mut s, raw(Some("r2"), Some(k2.clone()))),
-        ErrorCode::Stale
-    );
+    assert_eq!(stale(&mut s, raw("r2", Some(k2.clone()))), ErrorCode::Stale);
     assert_eq!(s.route().unwrap().route_key, k2);
 }
 

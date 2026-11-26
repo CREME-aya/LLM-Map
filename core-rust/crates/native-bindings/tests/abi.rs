@@ -241,13 +241,16 @@ fn tick_input_fixtures_agree_with_dc_tick() {
     }
 }
 
-/// dc_route_commit `{req_id, expected_route_key, bundle}`: the first route with `req_id` / `expected_route_key` null, then the
-/// next dc_tick returns its horizon; a fix aligns it (tracking). The bundle carries
-/// route_revision "0" and Rust assigns current + 1 (first route: 1), returned in
-/// `data.route_key` and used by the horizon and every ManeuverId. A replacement needs a commit Rust issued (`req_id`) and the
-/// current key (`E_STALE` otherwise, nothing replaced); a non-"0" revision or a broken
-/// bundle is `E_SCHEMA`; a bundle trip_revision / graph_version differing from the current
-/// route is `E_STALE`.
+/// dc_route_commit `{req_id, expected_route_key, bundle}` (02 §2.1 #9): `req_id` is
+/// mandatory (`null` / omitted → `E_SCHEMA`). The first route is committed with the `req_id`
+/// of an `ok` plan candidate (`expected_route_key: null`), then the next `dc_tick` returns
+/// its horizon and a fix aligns it (`tracking`). The bundle carries `route_revision` "0" and
+/// Rust assigns current + 1 (first route: 1), returned in `data.route_key` and used by the
+/// horizon and every ManeuverId. A replacement needs an unsettled commit Rust issued or an
+/// open plan candidate (`E_STALE` otherwise; `FORBIDDEN_WHILE_DRIVING` for a plan candidate
+/// after driving starts); a non-"0" revision or broken bundle is `E_SCHEMA`; a bundle
+/// `trip_id` / `trip_revision` (other than +1 from a plan) / `graph_version` differing from
+/// the current route is `E_STALE`.
 #[test]
 fn route_commit_loads_the_bundle() {
     unsafe {
@@ -255,12 +258,50 @@ fn route_commit_loads_the_bundle() {
             &std::fs::read(schema_fixture_dir("valid").join("route-bundle.min.json")).unwrap(),
         )
         .unwrap();
+        let mut snapshot: Value = serde_json::from_slice(
+            &std::fs::read(schema_fixture_dir("valid").join("trip-plan-snapshot.min.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        snapshot["trip_id"] = bundle["route_key"]["trip_id"].clone();
+        snapshot["trip_revision"] = bundle["route_key"]["trip_revision"].clone();
+        snapshot["graph_version"] = bundle["route_key"]["graph_version"].clone();
+        snapshot["budget"]["max_requests"] = 1.into();
         assert_eq!(bundle["route_key"]["route_revision"], "0");
         let mut rk = bundle["route_key"].clone();
         rk["route_revision"] = "1".into();
         let mut s = ptr::null_mut();
         take(dc_session_new(din(b"{}"), &mut s));
-        let req = serde_json::json!({"req_id": null, "expected_route_key": null, "bundle": bundle});
+        // req_id: null is E_SCHEMA even before the first route
+        let null_req =
+            serde_json::json!({"req_id": null, "expected_route_key": null, "bundle": bundle});
+        let v = take(dc_route_commit(
+            s,
+            din(&serde_json::to_vec(&null_req).unwrap()),
+        ));
+        assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
+        // Run plan_candidates -> search_finished(ok) so r1 is a committable plan candidate
+        let plan_req = serde_json::json!({"now_mono_ms": 1, "snapshot": snapshot});
+        let pv = take(dc_plan_candidates(
+            s,
+            din(&serde_json::to_vec(&plan_req).unwrap()),
+        ));
+        assert_eq!(pv["ok"], true, "{pv}");
+        let plan_req_id = pv["data"]["planner_cmds"][0]["req_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let plan_rk = pv["data"]["planner_cmds"][0]["route_key"].clone();
+        let fin_tick = serde_json::json!({"now_mono_ms": 5, "events": [{
+            "at_mono_ms": 5, "kind": "search_finished", "req_id": plan_req_id,
+            "route_key": plan_rk, "graph_version": plan_rk["graph_version"],
+            "outcome": "ok", "facts_ref": "f-plan-1", "engine_ms": 4
+        }]});
+        let tv = take(dc_tick(s, din(&serde_json::to_vec(&fin_tick).unwrap())));
+        assert_eq!(tv["data"]["planner_cmds"][0]["cmd"], "rank", "{tv}");
+        let req = serde_json::json!({
+            "req_id": plan_req_id, "expected_route_key": null, "bundle": bundle
+        });
         let v = take(dc_route_commit(s, din(&serde_json::to_vec(&req).unwrap())));
         assert_eq!(v["ok"], true, "{v}");
         assert_eq!(v["data"]["route_key"], rk, "Rust assigns rev 1");
@@ -276,44 +317,46 @@ fn route_commit_loads_the_bundle() {
         assert_eq!(h["upcoming"][0]["maneuver"]["id"]["route_key"], rk);
         assert_eq!(h["upcoming"][0]["maneuver"]["arrow"], "left");
         assert_eq!(h["upcoming"][0]["from_vehicle_m"], 150);
-        // again with null: a route is current now → E_STALE
+        // again with expected_route_key null: a route is current now → E_STALE
         let v = take(dc_route_commit(s, din(&serde_json::to_vec(&req).unwrap())));
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
-        // a replacement needs a commit Rust issued: right guard without one → E_STALE
+        // a replacement needs a commit Rust issued or an open plan candidate → E_STALE
         let mut unissued = req.clone();
         unissued["expected_route_key"] = rk.clone();
-        unissued["req_id"] = "r1".into();
+        unissued["req_id"] = "r2".into();
         let v = take(dc_route_commit(
             s,
             din(&serde_json::to_vec(&unissued).unwrap()),
         ));
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
-        // three fixes 1.1 km north confirm off-route → reroute r1; its ok → commit{r1, rk}
+        // three fixes 1.1 km north confirm off-route → reroute r2; its ok → commit{r2, rk}
         for t in [20, 21, 22] {
             let tick = serde_json::json!({"now_mono_ms": t, "fix": {"at_mono_ms": t,
                 "lat_e7": 350100000, "lon_e7": 1390005483, "acc_cm": 300}});
             take(dc_tick(s, din(&serde_json::to_vec(&tick).unwrap())));
         }
         let tick = serde_json::json!({"now_mono_ms": 30, "events": [{"at_mono_ms": 30,
-            "kind": "search_finished", "req_id": "r1", "route_key": rk, "graph_version":
+            "kind": "search_finished", "req_id": "r2", "route_key": rk, "graph_version":
             rk["graph_version"], "outcome": "ok", "engine_ms": 5}]});
         let v = take(dc_tick(s, din(&serde_json::to_vec(&tick).unwrap())));
         assert_eq!(
             v["data"]["planner_cmds"],
-            serde_json::json!([{"cmd": "commit", "req_id": "r1", "route_key": rk}]),
+            serde_json::json!([{"cmd": "commit", "req_id": "r2", "route_key": rk}]),
             "{v}"
         );
-        // req_id: a number → E_SCHEMA (before the guard)
-        unissued["req_id"] = 1.into();
-        let v = take(dc_route_commit(
-            s,
-            din(&serde_json::to_vec(&unissued).unwrap()),
-        ));
-        assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
+        // req_id: a number or null → E_SCHEMA (before the guard)
+        for bad_req in [serde_json::json!(1), Value::Null] {
+            unissued["req_id"] = bad_req;
+            let v = take(dc_route_commit(
+                s,
+                din(&serde_json::to_vec(&unissued).unwrap()),
+            ));
+            assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
+        }
         // right guard, broken body → E_SCHEMA; wrong guard with a broken body → E_STALE
         let mut broken = req.clone();
         broken["expected_route_key"] = rk.clone();
-        broken["req_id"] = "r1".into();
+        broken["req_id"] = "r2".into();
         broken["bundle"]["length_cm"] = 1.into();
         let v = take(dc_route_commit(
             s,
@@ -330,7 +373,7 @@ fn route_commit_loads_the_bundle() {
         for rev in ["1", "2"] {
             let mut nonzero = req.clone();
             nonzero["expected_route_key"] = rk.clone();
-            nonzero["req_id"] = "r1".into();
+            nonzero["req_id"] = "r2".into();
             nonzero["bundle"]["route_key"]["route_revision"] = rev.into();
             for m in nonzero["bundle"]["legs"][0]["maneuvers"]
                 .as_array_mut()
@@ -353,7 +396,7 @@ fn route_commit_loads_the_bundle() {
         ] {
             let mut other = req.clone();
             other["expected_route_key"] = rk.clone();
-            other["req_id"] = "r1".into();
+            other["req_id"] = "r2".into();
             other["bundle"]["route_key"][field] = value.into();
             for m in other["bundle"]["legs"][0]["maneuvers"]
                 .as_array_mut()
@@ -370,7 +413,7 @@ fn route_commit_loads_the_bundle() {
         // unknown field in the request
         let mut extra = req.clone();
         extra["expected_route_key"] = rk.clone();
-        extra["req_id"] = "r1".into();
+        extra["req_id"] = "r2".into();
         extra["x"] = 1.into();
         let v = take(dc_route_commit(
             s,
@@ -380,20 +423,79 @@ fn route_commit_loads_the_bundle() {
         // the valid replacement: rev 2
         let mut next = req.clone();
         next["expected_route_key"] = rk.clone();
-        next["req_id"] = "r1".into();
+        next["req_id"] = "r2".into();
         let v = take(dc_route_commit(s, din(&serde_json::to_vec(&next).unwrap())));
         assert_eq!(v["data"]["route_key"]["route_revision"], "2", "{v}");
-        // r1 is settled: the same req_id with the new key → E_STALE
-        next["expected_route_key"] = v["data"]["route_key"].clone();
+        // r2 is settled: the same req_id with the new key → E_STALE
+        let rk2 = v["data"]["route_key"].clone();
+        next["expected_route_key"] = rk2.clone();
         let v = take(dc_route_commit(s, din(&serde_json::to_vec(&next).unwrap())));
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
+        // Mid-trip replan (trip_revision + 1) closed by driving → FORBIDDEN_WHILE_DRIVING
+        let mut snap2 = snapshot.clone();
+        snap2["plan_request_id"] = "p2".into();
+        snap2["trip_revision"] = "4".into();
+        let pv2 = take(dc_plan_candidates(
+            s,
+            din(
+                &serde_json::to_vec(&serde_json::json!({"now_mono_ms": 40, "snapshot": snap2}))
+                    .unwrap(),
+            ),
+        ));
+        let p2_req = pv2["data"]["planner_cmds"][0]["req_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let p2_rk = pv2["data"]["planner_cmds"][0]["route_key"].clone();
+        take(dc_tick(
+            s,
+            din(&serde_json::to_vec(&serde_json::json!({
+                "now_mono_ms": 45,
+                "events": [{
+                    "at_mono_ms": 45, "kind": "search_finished", "req_id": p2_req,
+                    "route_key": p2_rk, "graph_version": p2_rk["graph_version"],
+                    "outcome": "ok", "facts_ref": "f-plan-2", "engine_ms": 5
+                }]
+            }))
+            .unwrap()),
+        ));
+        // Vehicle drives at >= 8 km/h (222 cm/s) continuously for 3.0 s (3000 ms)
+        for t in [50u64, 1_550, 3_050] {
+            take(dc_tick(
+                s,
+                din(&serde_json::to_vec(&serde_json::json!({
+                    "now_mono_ms": t,
+                    "fix": {"at_mono_ms": t, "lat_e7": 350000000, "lon_e7": 1390005483,
+                            "acc_cm": 300, "speed_cm_s": 222}
+                }))
+                .unwrap()),
+            ));
+        }
+        let mut replan_bundle = bundle.clone();
+        replan_bundle["route_key"]["trip_revision"] = "4".into();
+        for m in replan_bundle["legs"][0]["maneuvers"]
+            .as_array_mut()
+            .unwrap()
+        {
+            m["id"]["route_key"]["trip_revision"] = "4".into();
+        }
+        let driving_commit = serde_json::json!({
+            "req_id": p2_req,
+            "expected_route_key": rk2,
+            "bundle": replan_bundle,
+        });
+        let v = take(dc_route_commit(
+            s,
+            din(&serde_json::to_vec(&driving_commit).unwrap()),
+        ));
+        assert_eq!(v["error"]["code"], "FORBIDDEN_WHILE_DRIVING", "{v}");
         dc_session_free(s);
     }
 }
 
 /// dc_route_commit re-checks the `commit` route_key (the current route's key at the search
 /// start): no / another current route → E_STALE, nothing replaced. Missing or malformed
-/// route_key → E_SCHEMA.
+/// route_key or req_id (including null) → E_SCHEMA.
 #[test]
 fn route_commit_rechecks_route_key() {
     unsafe {
@@ -410,6 +512,7 @@ fn route_commit_rechecks_route_key() {
             b"{",
             br#"{"req_id":"r1","expected_route_key":{"trip_id":"t"}}"#,
             br#"{"expected_route_key":null,"bundle":{}}"#,
+            br#"{"req_id":null,"expected_route_key":null,"bundle":{}}"#,
         ] {
             let v = take(dc_route_commit(s, din(bad)));
             assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");

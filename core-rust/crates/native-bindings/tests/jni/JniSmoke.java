@@ -28,6 +28,7 @@ public final class JniSmoke {
         check("tick handle 0", DcNative.tick(0L, b("{\"now_mono_ms\":1}")), "E_INVALID_HANDLE");
         check("validateOverride", DcNative.validateOverride(h[0], b("{\"code_line\":\"OVR dt=R\",\"contract\":{},\"utterance_id\":\"u1\",\"utterance_mono_ms\":1,\"ref_frame_seq\":1}")), "SYNTAX");
         check("routeCommit", DcNative.routeCommit(h[0], b("{\"req_id\":\"r1\",\"expected_route_key\":{\"trip_id\":\"t\",\"trip_revision\":\"1\",\"route_revision\":\"1\",\"graph_version\":\"g\"}}")), "E_STALE");
+        check("routeCommit null req_id", DcNative.routeCommit(h[0], b("{\"req_id\":null,\"expected_route_key\":null,\"bundle\":{}}")), "E_SCHEMA");
         check("avoidOfferEval", DcNative.avoidOfferEval(h[0], b("{}")), "E_SCHEMA");
         check("planCandidates", DcNative.planCandidates(h[0], b("{\"now_mono_ms\":20,\"eta_estimate_s\":1799,\"snapshot\":{\"schema_version\":1,\"trip_id\":\"t1\",\"trip_revision\":\"3\",\"plan_request_id\":\"p1\",\"graph_version\":\"g\",\"policy_version\":\"pol-1\",\"origin\":{\"lat\":35.681,\"lon\":139.767},\"destination\":{\"display_point\":{\"lat\":35.69,\"lon\":139.70}},\"vias\":[],\"vehicle\":{\"profile\":\"standard_car\",\"width_mm\":1695,\"height_mm\":1550},\"avoid\":{\"toll\":false,\"ferry\":true},\"depart_at_unix_s\":1795000000,\"budget\":{\"max_requests\":3,\"deadline_ms\":3000}}}")), "\"candidate_id\":\"c1\"");
         check("planCandidates bad", DcNative.planCandidates(h[0], b("{\"now_mono_ms\":1}")), "E_SCHEMA");

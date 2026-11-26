@@ -28,8 +28,9 @@ int main(void) {
         "NO_PENDING_TARGET", "validate_override");
     /* no current route: the commit's route_key is stale */
     fails += expect(dc_route_commit(s, in_str("{\"req_id\":\"r1\",\"expected_route_key\":{\"trip_id\":\"t\",\"trip_revision\":\"1\",\"route_revision\":\"1\",\"graph_version\":\"g\"}}")), "E_STALE", "route_commit");
-    /* req_id is required (null allowed for the first route) */
+    /* req_id is required (omitted or null -> E_SCHEMA) */
     fails += expect(dc_route_commit(s, in_str("{\"expected_route_key\":null,\"bundle\":{}}")), "E_SCHEMA", "route_commit(no req_id)");
+    fails += expect(dc_route_commit(s, in_str("{\"req_id\":null,\"expected_route_key\":null,\"bundle\":{}}")), "E_SCHEMA", "route_commit(null req_id)");
     fails += expect(dc_avoid_offer_eval(s, in_str("{}")), "E_SCHEMA", "avoid_offer_eval");
     fails += expect(dc_avoid_offer_eval(s, in_str("{\"req_id\":\"r1\",\"now_mono_ms\":30,\"alt_facts\":{\"candidate_id\":\"c1\",\"label\":\"through_anchor\",\"plan_request_id\":\"p\",\"graph_version\":\"g\",\"fingerprint\":\"f\",\"legal\":true,\"complete\":true,\"eta_ms\":1,\"length_m\":1,\"counts\":{\"right_unprotected\":0,\"right_signal_unknown_protection\":0,\"right_signal_unknown\":0,\"right_protected\":0,\"right_entry\":0,\"merges\":0},\"narrow_m\":{\"confirmed\":0,\"inferred\":0},\"unknown_width_residential_m\":0,\"unknown_length_m\":0,\"junctions\":[],\"through_anchors\":[]},\"base_facts\":{\"candidate_id\":\"c1\",\"label\":\"through_anchor\",\"plan_request_id\":\"p\",\"graph_version\":\"g\",\"fingerprint\":\"f\",\"legal\":true,\"complete\":true,\"eta_ms\":1,\"length_m\":1,\"counts\":{\"right_unprotected\":0,\"right_signal_unknown_protection\":0,\"right_signal_unknown\":0,\"right_protected\":0,\"right_entry\":0,\"merges\":0},\"narrow_m\":{\"confirmed\":0,\"inferred\":0},\"unknown_width_residential_m\":0,\"unknown_length_m\":0,\"junctions\":[],\"through_anchors\":[]}}")),
         "\"reason\":\"no_pending_result\"", "avoid_offer_eval(no pending)");

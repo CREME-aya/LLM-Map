@@ -58,8 +58,9 @@ fn as_committed(s: &Session, mut b: RouteBundle) -> RouteBundle {
 fn committed() -> (Session, RouteBundle) {
     let mut s = Session::new(SessionConfig::default());
     let b = main_line();
+    s.record_plan_ok_for_test("p-init", b.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: None,
+        req_id: "p-init".into(),
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -207,17 +208,16 @@ fn reroute_from_fix_then_commit() {
             route_key: b.route_key.clone()
         }]
     );
-    // req_id must name a commit Rust issued with that guard: none / unknown / another
+    // req_id must name a commit Rust issued with that guard: unknown / another
     // guard → E_STALE, nothing replaced
     let b2 = main_line();
     for (req_id, guard) in [
-        (None, b.route_key.clone()),
-        (Some("r3"), b.route_key.clone()),
-        (Some("undo-r2"), b.route_key.clone()),
+        ("r3", b.route_key.clone()),
+        ("undo-r2", b.route_key.clone()),
     ] {
         let e = s
             .route_commit(&RouteCommitRequest {
-                req_id: req_id.map(str::to_owned),
+                req_id: req_id.to_owned(),
                 expected_route_key: Some(guard),
                 bundle: b2.clone(),
             })
@@ -228,7 +228,7 @@ fn reroute_from_fix_then_commit() {
     // Kotlin commits the new route (r2): horizon of the new route, uncertain until a fix
     let r = s
         .route_commit(&RouteCommitRequest {
-            req_id: Some("r2".into()),
+            req_id: "r2".into(),
             expected_route_key: Some(b.route_key.clone()),
             bundle: b2.clone(),
         })
@@ -236,7 +236,7 @@ fn reroute_from_fix_then_commit() {
     // r1 had the same guard; it is settled by the route change (E_STALE on both halves)
     let e = s
         .route_commit(&RouteCommitRequest {
-            req_id: Some("r1".into()),
+            req_id: "r1".into(),
             expected_route_key: Some(r.route_key.clone()),
             bundle: main_line(),
         })
@@ -349,8 +349,9 @@ fn held_result_expires_after_hold_limit() {
 fn hold_limit_is_configurable() {
     let mut s = Session::from_json(br#"{"commit_hold_ms": 2000}"#).unwrap();
     let b = main_line();
+    s.record_plan_ok_for_test("p-init", b.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: None,
+        req_id: "p-init".into(),
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -391,7 +392,7 @@ fn held_result_for_a_replaced_route_is_not_committed() {
     // another commit against the same route (stands in for an explicit plan)
     s.issue_commit_for_test("r9", b.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: Some("r9".into()),
+        req_id: "r9".into(),
         expected_route_key: Some(b.route_key.clone()),
         bundle: b2.clone(),
     })
@@ -521,8 +522,9 @@ fn group_limits_and_voice_lead_use_the_approach_edge() {
             m.anchor.along_route_cm = along;
         }
         let mut s = Session::new(SessionConfig::default());
+        s.record_plan_ok_for_test("p-init", b.route_key.clone());
         s.route_commit(&RouteCommitRequest {
-            req_id: None,
+            req_id: "p-init".into(),
             expected_route_key: None,
             bundle: b.clone(),
         })
@@ -569,8 +571,9 @@ fn last_junction_expires_after_either_inclusive_limit() {
             fix_stale_ms: 200_000,
             ..Default::default()
         });
+        s.record_plan_ok_for_test("p-init", b.route_key.clone());
         s.route_commit(&RouteCommitRequest {
-            req_id: None,
+            req_id: "p-init".into(),
             expected_route_key: None,
             bundle: b.clone(),
         })
@@ -634,8 +637,9 @@ fn roundabout_exit_still_has_a_p1_deadline_after_entrance_passage() {
     exit.along_route_cm = 175_000;
     m.roundabout_leave_anchor = Some(exit);
     let mut s = Session::new(SessionConfig::default());
+    s.record_plan_ok_for_test("p-init", b.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: None,
+        req_id: "p-init".into(),
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -707,8 +711,9 @@ fn ordinary_junctions_create_no_refs_but_keep_p1_deadlines() {
             fix_stale_ms: 200_000,
             ..Default::default()
         });
+        s.record_plan_ok_for_test("p-init", b.route_key.clone());
         s.route_commit(&RouteCommitRequest {
-            req_id: None,
+            req_id: "p-init".into(),
             expected_route_key: None,
             bundle: b.clone(),
         })
