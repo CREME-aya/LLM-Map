@@ -6,6 +6,7 @@ pub mod avoid;
 pub mod candidates;
 pub mod command_line;
 pub mod geo;
+pub mod history;
 pub mod horizon;
 pub mod junction;
 pub mod planner;

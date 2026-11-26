@@ -6,6 +6,7 @@ use crate::avoid::{
     UndoWindow,
 };
 use crate::command_line::{self, Command, JpRef};
+use crate::history::{self, HistoryConfig, HistoryScheduler, PoiState, StepContext};
 use crate::horizon::{arrived, eta_range, EtaFactors, HorizonFrames};
 use crate::planner::{
     CommitGate, Effects, PlanCommitState, PlanSearch, SearchLimits, SearchPlanner,
@@ -17,8 +18,9 @@ use contracts::override_types::{RejectCode, ValidateOverrideRequest, ValidateOve
 use contracts::plan::{PlanCandidates, TripPlanSnapshot};
 use contracts::route::{RouteCommitRequest, RouteCommitResult};
 use contracts::tick::{
-    DismissReason, DistanceClass, EventBody, Fix, LogEvent, PlannerCmd, SearchPriority, TapAction,
-    TextClass, ThermalStatus, TickInput, TickOutput, UiCmd, VoiceCmd, VoicePriority,
+    DismissReason, DistanceClass, EventBody, Fix, LogEvent, PlannerCmd, SaveForLaterReason,
+    SearchPriority, TapAction, TextClass, ThermalStatus, TickInput, TickOutput, UiCmd, VoiceCmd,
+    VoicePriority,
 };
 use contracts::{ErrorCode, RouteKey};
 use serde::Deserialize;
@@ -72,6 +74,20 @@ pub struct SessionConfig {
     /// Continuous duration at `>= drive_start_speed_cm_s` before drive-start closes the plan
     /// commit window (ms; 07 §1: 3 s = 3000 ms, provisional).
     pub drive_start_hold_ms: u64,
+    /// P3 history commentary corridor far bound ahead of POI (cm; 05 §6.2: 2 km, provisional).
+    pub p3_corridor_far_cm: u32,
+    /// P3 history commentary corridor near bound ahead of POI (cm; 05 §6.2: 0.5 km, provisional).
+    pub p3_corridor_near_cm: u32,
+    /// P3 max duration in `Pending` before expiring (ms; 05 §6.2: 30 s, provisional).
+    pub p3_pending_timeout_ms: u64,
+    /// P3 minimum interval between utterance starts (ms; 05 §6.2: 5 min, provisional).
+    pub p3_min_interval_ms: u64,
+    /// Estimated TTS preparation time for P3 available window (ms; 05 §6.2: 800 ms, provisional).
+    pub p3_tts_prep_ms: u64,
+    /// Safety margin before P1 deadline / complex window (ms; 05 §6.2: 5 s, provisional).
+    pub p3_safety_margin_ms: u64,
+    /// Window after `Completed` / `Interrupted` for L3 `BMK` (ms; 05 §6.2: 60 s, provisional).
+    pub p3_bmk_window_ms: u64,
 }
 
 impl Default for SessionConfig {
@@ -80,6 +96,7 @@ impl Default for SessionConfig {
         let a = AlignConfig::default();
         let e = EtaFactors::default();
         let v = AvoidConfig::default();
+        let h = HistoryConfig::default();
         Self {
             watchdog_short_ms: l.watchdog_short_ms,
             watchdog_long_ms: l.watchdog_long_ms,
@@ -101,6 +118,13 @@ impl Default for SessionConfig {
             avoid_undo_window_ms: v.undo_window_ms,
             drive_start_speed_cm_s: 222,
             drive_start_hold_ms: 3_000,
+            p3_corridor_far_cm: h.corridor_far_cm,
+            p3_corridor_near_cm: h.corridor_near_cm,
+            p3_pending_timeout_ms: h.pending_timeout_ms,
+            p3_min_interval_ms: h.min_interval_ms,
+            p3_tts_prep_ms: h.tts_prep_ms,
+            p3_safety_margin_ms: h.safety_margin_ms,
+            p3_bmk_window_ms: h.bmk_window_ms,
         }
     }
 }
@@ -127,7 +151,22 @@ impl SessionConfig {
         if self.eta_earliest_permille > 1_000 || self.eta_latest_permille < 1_000 {
             return Err("eta factors need earliest_permille <= 1000 <= latest_permille".into());
         }
+        if self.p3_corridor_far_cm < self.p3_corridor_near_cm {
+            return Err("p3_corridor_far_cm must be >= p3_corridor_near_cm".into());
+        }
         Ok(())
+    }
+
+    pub fn history(&self) -> HistoryConfig {
+        HistoryConfig {
+            corridor_far_cm: self.p3_corridor_far_cm,
+            corridor_near_cm: self.p3_corridor_near_cm,
+            pending_timeout_ms: self.p3_pending_timeout_ms,
+            min_interval_ms: self.p3_min_interval_ms,
+            tts_prep_ms: self.p3_tts_prep_ms,
+            safety_margin_ms: self.p3_safety_margin_ms,
+            bmk_window_ms: self.p3_bmk_window_ms,
+        }
     }
 
     pub fn eta_factors(&self) -> EtaFactors {
@@ -253,11 +292,18 @@ pub struct Session {
     drive_fast_since_mono_ms: Option<u64>,
     /// Latest `fix.at_mono_ms` seen by drive-start tracking (out-of-order fixes ignored).
     drive_last_fix_at_mono_ms: Option<u64>,
+    /// P3 history commentary scheduler (05 §6.2).
+    history: HistoryScheduler,
+    /// Latest on-route fix satisfied `lateral_cm <= lateral_tol_cm` (reset on off/low-acc/route change).
+    last_fix_lateral_ok: bool,
+    /// Latest on-route fix had `acc_cm <= max_acc_cm` and usable bearing (speed >= heading_min_speed_cm_s).
+    last_fix_acc_and_bearing_ok: bool,
 }
 
 impl Session {
     pub fn new(config: SessionConfig) -> Self {
         let align_cfg = config.align();
+        let history_cfg = config.history();
         Self {
             planner: SearchPlanner::new(config.limits()),
             last_now_mono_ms: None,
@@ -284,6 +330,9 @@ impl Session {
             drive_start_hold_ms: config.drive_start_hold_ms,
             drive_fast_since_mono_ms: None,
             drive_last_fix_at_mono_ms: None,
+            history: HistoryScheduler::new(history_cfg),
+            last_fix_lateral_ok: false,
+            last_fix_acc_and_bearing_ok: false,
         }
     }
 
@@ -366,6 +415,22 @@ impl Session {
         self.thermal
     }
 
+    pub fn history_consent(&self) -> bool {
+        self.history.consent()
+    }
+
+    pub fn history_poi_state(&self, poi_id: &str) -> Option<&PoiState> {
+        self.history.poi_state(poi_id)
+    }
+
+    pub fn history_has_spoken(&self, poi_id: &str) -> bool {
+        self.history.has_spoken(poi_id)
+    }
+
+    pub fn history_spoken_count(&self) -> usize {
+        self.history.spoken_count()
+    }
+
     /// Test hook: replaces the current route key without geometry (stands in for a
     /// `dc_route_commit` in planner tests). Any loaded geometry is dropped.
     #[doc(hidden)]
@@ -376,10 +441,20 @@ impl Session {
         self.finished = false;
         self.frames.reset_route();
         self.last_fix_at = None;
+        self.last_fix_lateral_ok = false;
+        self.last_fix_acc_and_bearing_ok = false;
         self.reset_avoid();
         self.undo = UndoState::None;
         self.issued_commits.clear();
         self.undo_return = None;
+        let now = self.last_now_mono_ms.unwrap_or(0);
+        self.history.on_route_changed(
+            now,
+            &[],
+            &mut self.pending_voice,
+            &mut self.pending_ui,
+            &mut self.pending_log,
+        );
     }
 
     /// Test hook: records `commit{req_id, route_key}` as if a `dc_tick` had emitted it, so a
@@ -639,11 +714,20 @@ impl Session {
             self.planner.close_plan_commit_committed();
         }
         self.current_route_key = Some(loaded.route_key.clone());
+        self.history.on_route_changed(
+            now,
+            &loaded.history_pois,
+            &mut self.pending_voice,
+            &mut self.pending_ui,
+            &mut self.pending_log,
+        );
         self.route = Some(loaded);
         self.aligner = Aligner::new(self.align_cfg);
         self.finished = false;
         self.frames.reset_route();
         self.last_fix_at = None;
+        self.last_fix_lateral_ok = false;
+        self.last_fix_acc_and_bearing_ok = false;
         self.reset_avoid();
         // #22: the undo brings the original route back (the same body, by ordinal): its
         // junctions already tried stay tried, so the one just undone is not offered again.
@@ -780,8 +864,10 @@ impl Session {
         };
         log.push(log_at(at, "avoid_undo_refused", Some(code_name.to_owned())));
         // TODO(05 §5): utterance_token encoding is provisional.
+        let token = format!("{}-{at}", avoid::UNDO_UNAVAILABLE_TEMPLATE_ID);
+        self.history.note_p2_token(&token);
         self.pending_voice.push(VoiceCmd::Speak {
-            token: format!("{}-{at}", avoid::UNDO_UNAVAILABLE_TEMPLATE_ID),
+            token,
             priority: VoicePriority::P2,
             template_id: avoid::UNDO_UNAVAILABLE_TEMPLATE_ID.to_owned(),
             params: std::collections::BTreeMap::new(),
@@ -877,6 +963,7 @@ impl Session {
     /// Pure state transition: `TickInput → TickOutput`.
     pub fn tick(&mut self, input: TickInput) -> TickOutput {
         let mut fx = Effects::default();
+        let mut tick_voice: Vec<VoiceCmd> = Vec::new();
         let mut extra_log: Vec<LogEvent> = Vec::new();
 
         // Time never goes backwards inside the core: clamp to the previous value and
@@ -939,6 +1026,50 @@ impl Session {
                         self.consent(now, at, "dict_yes", &mut fx, &mut extra_log);
                     }
                 }
+                EventBody::AsrResult {
+                    text_class: TextClass::Dict,
+                    dict_norm: Some(norm),
+                    ..
+                } if history::is_dict_stop(&norm) => {
+                    self.history
+                        .on_user_stop(at, &mut tick_voice, &mut extra_log);
+                }
+                EventBody::TtsStarted { token } => {
+                    self.history.on_tts_started(
+                        at,
+                        &token,
+                        &mut tick_voice,
+                        &mut fx.ui_cmds,
+                        &mut extra_log,
+                    );
+                }
+                EventBody::TtsDone { token } => {
+                    self.history.on_tts_done(at, &token, &mut extra_log);
+                }
+                EventBody::TtsStopped { token } => {
+                    self.history.on_tts_stopped(at, &token, &mut extra_log);
+                }
+                EventBody::CallState { active } => {
+                    self.history.on_call_state(
+                        at,
+                        active,
+                        &mut tick_voice,
+                        &mut fx.ui_cmds,
+                        &mut extra_log,
+                    );
+                }
+                EventBody::AudioFocusLost {} => {
+                    self.history.on_audio_focus_lost(
+                        at,
+                        &mut tick_voice,
+                        &mut fx.ui_cmds,
+                        &mut extra_log,
+                    );
+                }
+                EventBody::HistoryConsent { on } => {
+                    self.history
+                        .on_consent(at, on, &mut tick_voice, &mut extra_log);
+                }
                 EventBody::EngineReset {} => self.planner.on_engine_reset(at, &mut fx),
                 EventBody::Thermal { status } => {
                     let lvl = ThermalLevel::from(status);
@@ -947,9 +1078,8 @@ impl Session {
                         self.thermal = lvl;
                     }
                 }
-                // TODO(drive-core): voice scheduler (tts_*), ASR (asr_* other than the dict "はい" consent, override_ready,
-                // user_tap for overrides / confirm screens), inference tier, audio focus,
-                // call state, low memory.
+                // TODO(drive-core): ASR (asr_* other than dict yes/stop, override_ready,
+                // user_tap for overrides / confirm screens), inference tier, low memory.
                 _ => {}
             }
         }
@@ -964,7 +1094,46 @@ impl Session {
             .release_held(now, gate, self.current_route_key.as_ref(), &mut fx);
         self.refresh_eta(now);
         self.avoid_step(now, &mut fx, &mut extra_log);
-        self.finish(now, fx, extra_log)
+        let horizon = self.next_horizon(now);
+        self.history_step(now, &mut tick_voice, &mut fx.ui_cmds, &mut extra_log);
+        self.finish_with_horizon(now, horizon, fx, tick_voice, extra_log)
+    }
+
+    fn history_step(
+        &mut self,
+        now: u64,
+        tick_voice: &mut Vec<VoiceCmd>,
+        ui_cmds: &mut Vec<UiCmd>,
+        log: &mut Vec<LogEvent>,
+    ) {
+        let has_p0_or_p1_speak = self
+            .pending_voice
+            .iter()
+            .chain(tick_voice.iter())
+            .any(|c| matches!(c.priority(), Some(VoicePriority::P0 | VoicePriority::P1)));
+        let has_any_other_speak = self
+            .pending_voice
+            .iter()
+            .chain(tick_voice.iter())
+            .any(|c| matches!(c, VoiceCmd::Speak { .. }));
+        let status = self.horizon_status(now);
+        let last_h = self.frames.last();
+        let next_p1_deadline_mono_ms = last_h.and_then(|h| h.next_p1_deadline_monotonic_ms);
+        let next_complex_window = last_h.and_then(|h| h.next_complex_window.as_ref());
+        let ctx = StepContext {
+            now,
+            route_key: self.current_route_key.as_ref(),
+            status,
+            progress_cm: self.aligner.progress_cm(),
+            next_p1_deadline_mono_ms,
+            next_complex_window,
+            lateral_ok: self.last_fix_lateral_ok,
+            acc_and_bearing_ok: self.last_fix_acc_and_bearing_ok,
+            thermal_ok: self.thermal <= ThermalLevel::Light,
+            has_p0_or_p1_speak,
+            has_any_other_speak,
+        };
+        self.history.step(&ctx, tick_voice, ui_cmds, log);
     }
 
     /// The avoid-chip search `req_id` ended: a usable `ok` with both `facts_ref` and
@@ -1344,7 +1513,17 @@ impl Session {
             self.frames.observe_sample(route, at, None);
         }
         match r {
-            FixResult::OnRoute { along_cm, mode, .. } => {
+            FixResult::OnRoute {
+                along_cm,
+                lateral_cm,
+                mode,
+            } => {
+                self.last_fix_lateral_ok = lateral_cm <= u64::from(self.align_cfg.lateral_tol_cm);
+                self.last_fix_acc_and_bearing_ok = fix.acc_cm <= self.align_cfg.max_acc_cm
+                    && fix.bearing_cdeg.is_some()
+                    && fix
+                        .speed_cm_s
+                        .is_some_and(|v| v >= self.align_cfg.heading_min_speed_cm_s);
                 if !was_tracking {
                     let how = if mode == Mode::Grid { "grid" } else { "local" };
                     log.push(log_at(
@@ -1363,6 +1542,8 @@ impl Session {
                 }
             }
             FixResult::Ambiguous { parts } => {
+                self.last_fix_lateral_ok = false;
+                self.last_fix_acc_and_bearing_ok = false;
                 if was_tracking || parts > 1 {
                     log.push(log_at(
                         at,
@@ -1372,6 +1553,8 @@ impl Session {
                 }
             }
             FixResult::Off { run, confirmed_now } => {
+                self.last_fix_lateral_ok = false;
+                self.last_fix_acc_and_bearing_ok = false;
                 if confirmed_now {
                     log.push(log_at(
                         at,
@@ -1381,6 +1564,8 @@ impl Session {
                 }
             }
             FixResult::LowAccuracy { run } => {
+                self.last_fix_lateral_ok = false;
+                self.last_fix_acc_and_bearing_ok = false;
                 if run == self.align_cfg.confirm_fixes {
                     log.push(log_at(at, "fix_low_accuracy", Some(format!("run={run}"))));
                 }
@@ -1414,17 +1599,29 @@ impl Session {
         now
     }
 
-    fn finish(&mut self, now: u64, fx: Effects, mut extra_log: Vec<LogEvent>) -> TickOutput {
+    fn finish(&mut self, now: u64, fx: Effects, extra_log: Vec<LogEvent>) -> TickOutput {
+        let horizon = self.next_horizon(now);
+        self.finish_with_horizon(now, horizon, fx, Vec::new(), extra_log)
+    }
+
+    fn finish_with_horizon(
+        &mut self,
+        now: u64,
+        horizon: Option<ManeuverHorizon>,
+        fx: Effects,
+        tick_voice: Vec<VoiceCmd>,
+        mut extra_log: Vec<LogEvent>,
+    ) -> TickOutput {
         let mut log = std::mem::take(&mut self.pending_log);
         log.extend(fx.log);
         log.append(&mut extra_log);
         log.sort_by_key(|l| l.at_mono_ms); // stable: deterministic order
-        let horizon = self.next_horizon(now);
-        // The freshness limit can turn tracking into uncertain without new input.
+                                           // The freshness limit can turn tracking into uncertain without new input.
         let stale_at = self.route.as_ref().and_then(|_| self.aligner.stale_at(now));
         let mut ui_cmds = std::mem::take(&mut self.pending_ui);
         ui_cmds.extend(fx.ui_cmds);
-        let voice_cmds = std::mem::take(&mut self.pending_voice);
+        let mut voice_cmds = std::mem::take(&mut self.pending_voice);
+        voice_cmds.extend(tick_voice);
         let mut planner_cmds = std::mem::take(&mut self.pending_planner);
         planner_cmds.extend(fx.planner_cmds);
         // In order: a consent and its cancel in the same output leave nothing waiting.
@@ -1454,6 +1651,7 @@ impl Session {
             stale_at,
             self.frames.last_ref_expires_at(),
             self.frames.window_expires_at(),
+            self.history.next_wake(now),
         ]
         .into_iter()
         .flatten()
@@ -1514,6 +1712,34 @@ impl Session {
                 match r {
                     Ok(req_id) => Ok(ValidateOverrideResult::Undone { req_id }),
                     Err(code) => rejected(code),
+                }
+            }
+            // L3 BMK ("あとで詳しく", 03 §4.1, 05 §6.2): target is the currently Speaking POI,
+            // otherwise the most recent Completed / Interrupted POI within p3_bmk_window_ms
+            // (default 60 s). Never guesses another POI -> NO_PENDING_TARGET.
+            Command::Bmk => {
+                let at = req.utterance_mono_ms;
+                match self.history.resolve_bmk_target(at) {
+                    Some(poi_id) => {
+                        self.pending_ui.push(UiCmd::SaveForLater {
+                            poi_id: poi_id.clone(),
+                            reason: SaveForLaterReason::Bmk,
+                        });
+                        self.pending_log.push(log_at(
+                            at,
+                            "p3_bmk_saved",
+                            Some(format!("poi_id={poi_id}")),
+                        ));
+                        Ok(ValidateOverrideResult::Bookmarked { poi_id })
+                    }
+                    None => {
+                        self.pending_log.push(log_at(
+                            at,
+                            "p3_bmk_rejected",
+                            Some("NO_PENDING_TARGET".to_owned()),
+                        ));
+                        rejected(RejectCode::NoPendingTarget)
+                    }
                 }
             }
             // NO_PENDING_TARGET = YES / NO without a target (team decision #3).

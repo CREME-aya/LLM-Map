@@ -11,7 +11,7 @@
 
 use crate::geo::{lerp_u64, LocalFrame};
 use contracts::horizon::Maneuver;
-use contracts::route::{RouteBundle, K_Q16_MAX};
+use contracts::route::{HistoryPoi, RouteBundle, K_Q16_MAX};
 use contracts::tick::BEARING_CDEG_FULL;
 use contracts::RouteKey;
 use std::collections::BTreeMap;
@@ -93,6 +93,8 @@ pub struct LoadedRoute {
     pub segs: Vec<Seg>,
     /// All maneuvers in route order (validated non-decreasing `anchor.along_route_cm`).
     pub maneuvers: Vec<Maneuver>,
+    /// History commentary POIs along the route corridor, ordered by `along_route_cm` (05 §6.2).
+    pub history_pois: Vec<HistoryPoi>,
     edges: Vec<EdgeSpan>,
     group_heads: Vec<Option<usize>>,
     /// (anchor distance, earliest P1 time offset among this anchor and all following it).
@@ -314,6 +316,29 @@ impl LoadedRoute {
         if prev_time != b.eta_ms {
             return Err("eta_ms != cum_time_ms of the last edge".into());
         }
+        let mut history_pois = Vec::with_capacity(b.history_pois.len());
+        for (pi, poi) in b.history_pois.iter().enumerate() {
+            let at = |s: &str| format!("history_pois[{pi}]: {s}");
+            if poi.poi_id.is_empty() {
+                return Err(at("empty poi_id"));
+            }
+            if poi.along_route_cm > b.length_cm {
+                return Err(at("along_route_cm beyond route length"));
+            }
+            if poi.versions.is_empty() {
+                return Err(at("versions: empty"));
+            }
+            for (vi, v) in poi.versions.iter().enumerate() {
+                if v.content_ref.is_empty() {
+                    return Err(at("empty content_ref"));
+                }
+                if poi.versions[..vi].iter().any(|prev| prev.kind == v.kind) {
+                    return Err(at("duplicate version kind"));
+                }
+            }
+            history_pois.push(poi.clone());
+        }
+        history_pois.sort_by_key(|p| p.along_route_cm);
         let mut route = Self {
             group_heads: vec![None; maneuvers.len()],
             p1_deadlines: Vec::new(),
@@ -323,6 +348,7 @@ impl LoadedRoute {
             chunks,
             segs,
             maneuvers,
+            history_pois,
             edges,
         };
         route.index_groups();

@@ -293,6 +293,11 @@ impl HorizonFrames {
         self.last.as_ref().map(|h| &h.refs)
     }
 
+    /// Last built horizon content (valid even on ticks where `frame_seq` did not change).
+    pub fn last(&self) -> Option<&ManeuverHorizon> {
+        self.last.as_ref()
+    }
+
     /// When a complex window kept after its last maneuver ends (the frame changes then).
     pub fn window_expires_at(&self) -> Option<u64> {
         if !self.window_kept {

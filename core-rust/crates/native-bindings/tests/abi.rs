@@ -606,3 +606,112 @@ fn fix_bearing_range_through_dc_tick() {
         dc_session_free(s);
     }
 }
+
+/// P3 history commentary end-to-end through the C ABI: history_pois + history_consent ->
+/// voice_cmds speak{priority: p3, content_ref}, L3 BMK -> bookmarked + ui_cmds save_for_later{bmk}.
+#[test]
+fn p3_history_and_bmk_through_c_abi() {
+    unsafe {
+        let mut s = ptr::null_mut();
+        take(dc_session_new(
+            din(br#"{"p3_corridor_far_cm": 25000, "p3_corridor_near_cm": 5000}"#),
+            &mut s,
+        ));
+        let mut bundle: Value = serde_json::from_slice(
+            &std::fs::read(schema_fixture_dir("valid").join("route-bundle.history-pois.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        // Give enough ETA so the 11 s short version fits before the turn at 200 m (20_000 cm)
+        bundle["eta_ms"] = serde_json::json!(60_000);
+        bundle["legs"][0]["edges"][0]["cum_time_ms"] = serde_json::json!(40_000);
+        bundle["legs"][0]["edges"][1]["cum_time_ms"] = serde_json::json!(60_000);
+
+        let mut snapshot: Value = serde_json::from_slice(
+            &std::fs::read(schema_fixture_dir("valid").join("trip-plan-snapshot.min.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        snapshot["trip_id"] = bundle["route_key"]["trip_id"].clone();
+        snapshot["trip_revision"] = bundle["route_key"]["trip_revision"].clone();
+        snapshot["graph_version"] = bundle["route_key"]["graph_version"].clone();
+        let plan_req = serde_json::json!({"now_mono_ms": 100, "snapshot": snapshot});
+        let plan_res = take(dc_plan_candidates(
+            s,
+            din(&serde_json::to_vec(&plan_req).unwrap()),
+        ));
+        let req_id = plan_res["data"]["planner_cmds"][0]["req_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let plan_rk = plan_res["data"]["planner_cmds"][0]["route_key"].clone();
+        let fin = serde_json::json!({
+            "now_mono_ms": 200,
+            "events": [{
+                "at_mono_ms": 200, "kind": "search_finished",
+                "req_id": req_id, "route_key": plan_rk,
+                "graph_version": "jp-2026.11.0", "outcome": "ok",
+                "facts_ref": "f1", "engine_ms": 10
+            }]
+        });
+        take(dc_tick(s, din(&serde_json::to_vec(&fin).unwrap())));
+
+        let commit = serde_json::json!({
+            "req_id": req_id,
+            "expected_route_key": null,
+            "bundle": bundle
+        });
+        let committed = take(dc_route_commit(
+            s,
+            din(&serde_json::to_vec(&commit).unwrap()),
+        ));
+        assert_eq!(committed["ok"], true, "{committed}");
+
+        // Consent ON + fix at origin (0 cm, 250 m before poi-castle at 25_000 cm -> inside [5000, 25000])
+        let t1 = serde_json::json!({
+            "now_mono_ms": 1_000,
+            "fix": {
+                "at_mono_ms": 1_000,
+                "lat_e7": 350_000_000,
+                "lon_e7": 1_390_000_000,
+                "acc_cm": 300,
+                "bearing_cdeg": 9_000,
+                "speed_cm_s": 500
+            },
+            "events": [{"at_mono_ms": 1_000, "kind": "history_consent", "on": true}]
+        });
+        let o1 = take(dc_tick(s, din(&serde_json::to_vec(&t1).unwrap())));
+        assert_eq!(o1["ok"], true, "{o1}");
+        let vc = o1["data"]["voice_cmds"].as_array().unwrap();
+        assert_eq!(vc.len(), 1, "{o1}");
+        assert_eq!(vc[0]["voice"], "speak");
+        assert_eq!(vc[0]["priority"], "p3");
+        assert_eq!(vc[0]["content_ref"], "pack:castle:short");
+        assert!(vc[0].get("template_id").is_none());
+
+        // L3 BMK while speaking -> bookmarked + next tick emits save_for_later{poi-castle, bmk}
+        let bmk_req = serde_json::json!({
+            "code_line": "BMK\n",
+            "contract": {},
+            "utterance_id": "u-bmk",
+            "utterance_mono_ms": 1_500,
+            "ref_frame_seq": o1["data"]["horizon"]["frame_seq"]
+        });
+        let bmk_res = take(dc_validate_override(
+            s,
+            din(&serde_json::to_vec(&bmk_req).unwrap()),
+        ));
+        assert_eq!(bmk_res["ok"], true, "{bmk_res}");
+        assert_eq!(bmk_res["data"]["result"], "bookmarked");
+        assert_eq!(bmk_res["data"]["poi_id"], "poi-castle");
+
+        let t2 = serde_json::json!({"now_mono_ms": 1_600});
+        let o2 = take(dc_tick(s, din(&serde_json::to_vec(&t2).unwrap())));
+        assert_eq!(
+            o2["data"]["ui_cmds"],
+            serde_json::json!([{"ui": "save_for_later", "poi_id": "poi-castle", "reason": "bmk"}])
+        );
+
+        dc_session_free(s);
+    }
+}
