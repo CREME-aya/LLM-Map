@@ -111,12 +111,12 @@ fn null_handle_and_bad_json() {
 fn unimplemented_functions_are_explicit() {
     unsafe {
         for v in [
-            take(dc_rank(din(b"{}"))),
             take(dc_trip_score(din(b"{}"))),
             take(dc_exchange_validate(din(b"{}"))),
         ] {
             assert_eq!(v["error"]["code"], "E_UNIMPLEMENTED");
         }
+        assert_eq!(take(dc_rank(din(b"{}")))["error"]["code"], "E_SCHEMA");
         assert_eq!(take(dc_rank(din(b"nope")))["error"]["code"], "E_SCHEMA");
         assert_eq!(
             take(dc_route_commit(ptr::null_mut(), din(b"{}")))["error"]["code"],
@@ -130,6 +130,44 @@ fn unimplemented_functions_are_explicit() {
             take(dc_plan_candidates(ptr::null_mut(), din(b"{}")))["error"]["code"],
             "E_INVALID_HANDLE"
         );
+    }
+}
+
+/// dc_rank through the C ABI: scores candidates, drops over-detour-cap (keeping baseline),
+/// applies L2 * L3 weights, outputs raw unweighted 3-axis display figures, and validates schema.
+#[test]
+fn rank_through_c_abi() {
+    unsafe {
+        let req =
+            std::fs::read(schema_fixture_dir("valid").join("route-comparison.request.full.json"))
+                .unwrap();
+        let v = take(dc_rank(din(&req)));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["data"]["baseline_id"], "c1");
+        assert_eq!(v["data"]["base_eta_ms"], 600_000);
+        let r0 = &v["data"]["ranked"][0];
+        assert_eq!(r0["rank"], 1);
+        assert_eq!(r0["is_baseline"], true);
+        // Display values are raw and unweighted even though L2*L3 weights are active
+        assert_eq!(r0["display"]["eta_ms"], 600_000);
+        assert_eq!(r0["display"]["delta_eta_ms"], 0);
+        assert_eq!(r0["display"]["right_turns"]["right_entry"], 1);
+        assert_eq!(r0["display"]["right_turns"]["right_entry_unknown"], 1);
+        assert_eq!(r0["display"]["narrow"]["unknown_width_residential_m"], 200);
+        // Out-of-range L2 weight (249 / 4001) and max_detour_ratio_permille (999 / 1351) -> E_SCHEMA
+        for fixture in [
+            "route-comparison.request.zero-l2-weight.json",
+            "route-comparison.request.l2-weight-over-max.json",
+            "route-comparison.request.detour-ratio-over-max.json",
+            "route-comparison.request.detour-ratio-below-min.json",
+        ] {
+            let bad = std::fs::read(schema_fixture_dir("invalid").join(fixture)).unwrap();
+            assert_eq!(
+                take(dc_rank(din(&bad)))["error"]["code"],
+                "E_SCHEMA",
+                "{fixture}"
+            );
+        }
     }
 }
 

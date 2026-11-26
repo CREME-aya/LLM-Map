@@ -33,7 +33,8 @@ public final class JniSmoke {
         check("planCandidates", DcNative.planCandidates(h[0], b("{\"now_mono_ms\":20,\"eta_estimate_s\":1799,\"snapshot\":{\"schema_version\":1,\"trip_id\":\"t1\",\"trip_revision\":\"3\",\"plan_request_id\":\"p1\",\"graph_version\":\"g\",\"policy_version\":\"pol-1\",\"origin\":{\"lat\":35.681,\"lon\":139.767},\"destination\":{\"display_point\":{\"lat\":35.69,\"lon\":139.70}},\"vias\":[],\"vehicle\":{\"profile\":\"standard_car\",\"width_mm\":1695,\"height_mm\":1550},\"avoid\":{\"toll\":false,\"ferry\":true},\"depart_at_unix_s\":1795000000,\"budget\":{\"max_requests\":3,\"deadline_ms\":3000}}}")), "\"candidate_id\":\"c1\"");
         check("planCandidates bad", DcNative.planCandidates(h[0], b("{\"now_mono_ms\":1}")), "E_SCHEMA");
         check("planCandidates handle 0", DcNative.planCandidates(0L, b("{}")), "E_INVALID_HANDLE");
-        check("rank", DcNative.rank(b("{}")), "E_UNIMPLEMENTED");
+        check("rank bad", DcNative.rank(b("{}")), "E_SCHEMA");
+        check("rank", DcNative.rank(b("{\"facts\":[{\"candidate_id\":\"c1\",\"label\":\"baseline\",\"plan_request_id\":\"p1\",\"graph_version\":\"g\",\"fingerprint\":\"fp1\",\"legal\":true,\"complete\":true,\"eta_ms\":600000,\"length_m\":5000,\"counts\":{\"right_unprotected\":0,\"right_signal_unknown_protection\":0,\"right_signal_unknown\":0,\"right_protected\":0,\"right_entry\":1,\"merges\":0},\"narrow_m\":{\"confirmed\":0,\"inferred\":0},\"unknown_width_residential_m\":0,\"unknown_length_m\":0,\"junctions\":[],\"through_anchors\":[]}]}")), "\"score_ms\":690000");
         check("tripScore", DcNative.tripScore(b("{}")), "E_UNIMPLEMENTED");
         check("exchangeValidate", DcNative.exchangeValidate(b("{}")), "E_UNIMPLEMENTED");
         // large payload pass-through (≈1 MB) still round-trips as a ByteArray

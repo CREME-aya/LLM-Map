@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 const BASE: &str = "https://slm-map.invalid/schema/";
-const SCHEMAS: [&str; 7] = [
+const SCHEMAS: [&str; 8] = [
     "common",
     "trip-plan-snapshot",
     "candidate-facts",
@@ -17,6 +17,7 @@ const SCHEMAS: [&str; 7] = [
     "personal-routing-override",
     "tick",
     "route-bundle",
+    "route-comparison",
 ];
 
 fn schema_dir() -> PathBuf {
@@ -202,6 +203,56 @@ fn rust_mirror_agrees_on_candidate_facts() {
         }
     }
     assert!(seen >= 3);
+}
+
+/// contracts::rank::{RankRequest, RouteComparison} agrees with route-comparison.schema.json
+/// on every valid and invalid fixture, including unknown fields and weight constraints.
+#[test]
+fn rust_mirror_agrees_on_route_comparison() {
+    use contracts::rank::{RankRequest, RouteComparison};
+    let req_schema = compile_doc(
+        "RankRequest",
+        &serde_json::json!({ "$ref": format!("{BASE}route-comparison.schema.json#/$defs/RankRequest") }),
+    );
+    let out_schema = compile_doc(
+        "RouteComparison",
+        &serde_json::json!({ "$ref": format!("{BASE}route-comparison.schema.json#/$defs/RouteComparison") }),
+    );
+    let mut seen = 0;
+    for kind in ["valid", "invalid"] {
+        for (schema, path) in fixtures(kind) {
+            if schema != "route-comparison" {
+                continue;
+            }
+            seen += 1;
+            let f = path.file_name().unwrap().to_string_lossy().to_string();
+            let v = load(&path);
+            let is_req = f.starts_with("route-comparison.request.");
+            assert!(is_req || f.starts_with("route-comparison.output."), "{f}");
+            let c = if is_req { &req_schema } else { &out_schema };
+            let serde_back: Result<Value, String> = if is_req {
+                serde_json::from_value::<RankRequest>(v.clone())
+                    .map(|t| serde_json::to_value(t).unwrap())
+                    .map_err(|e| e.to_string())
+            } else {
+                serde_json::from_value::<RouteComparison>(v.clone())
+                    .map(|t| serde_json::to_value(t).unwrap())
+                    .map_err(|e| e.to_string())
+            };
+            if kind == "valid" {
+                assert_eq!(errors(c, &v), Vec::<String>::new(), "{f}");
+                let back = serde_back.unwrap_or_else(|e| panic!("serde {f}: {e}"));
+                assert_eq!(errors(c, &back), Vec::<String>::new(), "round trip {f}");
+                if !is_req {
+                    assert_eq!(back, v, "exact round trip {f}");
+                }
+            } else {
+                assert!(!c.is_valid(&v), "schema should reject {f}");
+                assert!(serde_back.is_err(), "serde should reject {f}");
+            }
+        }
+    }
+    assert!(seen >= 6, "route-comparison fixtures found: {seen}");
 }
 
 #[test]

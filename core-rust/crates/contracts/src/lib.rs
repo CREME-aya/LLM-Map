@@ -14,6 +14,7 @@ pub mod facts;
 pub mod horizon;
 pub mod override_types;
 pub mod plan;
+pub mod rank;
 pub mod route;
 pub mod tick;
 

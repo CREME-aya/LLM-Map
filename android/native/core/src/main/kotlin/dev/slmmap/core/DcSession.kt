@@ -114,6 +114,14 @@ class DcSession private constructor(private var handle: Long) : Closeable {
     }
 
     companion object {
+        /**
+         * Stateless dc_rank: {facts: CandidateFacts[], policy?, profile?} -> RouteComparison
+         * (schema/route-comparison.schema.json; 02 §2.1 #6, 03 §3.2). Integer-only 3-axis scoring
+         * with shared DetourPolicy (baseline always kept) and raw unweighted 3-axis display values.
+         */
+        fun rank(reqJson: ByteArray): ByteArray =
+            DcNative.rank(reqJson) ?: throw OutOfMemoryError("dc_core: rank result ByteArray allocation failed")
+
         /** Returns the session, or the error envelope bytes from dc_session_new. */
         fun open(configJson: ByteArray): Result<DcSession> {
             check(DcNative.abiVersion() == DcNative.EXPECTED_ABI_VERSION) { "dc_core ABI mismatch" }

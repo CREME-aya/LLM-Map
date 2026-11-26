@@ -4,6 +4,7 @@
 use contracts::facts::AvoidOfferEvalRequest;
 use contracts::override_types::ValidateOverrideRequest;
 use contracts::plan::PlanCandidatesRequest;
+use contracts::rank::RankRequest;
 use contracts::route::RouteCommitRequest;
 use contracts::tick::TickInput;
 use contracts::{envelope_err, envelope_ok, ErrorCode, RouteKey};
@@ -152,6 +153,17 @@ pub fn avoid_offer_eval(s: &mut Session, input: &[u8]) -> Vec<u8> {
     match serde_json::from_slice::<AvoidOfferEvalRequest>(input) {
         Ok(r) => envelope_ok(&s.avoid_offer_eval(&r)),
         Err(e) => envelope_err(ErrorCode::Schema, &format!("avoid_offer_eval: {e}")),
+    }
+}
+
+/// `dc_rank({facts[], policy?, profile?})` → `RouteComparison` (02 §2.1 #6, 03 §3.2).
+pub fn rank(input: &[u8]) -> Vec<u8> {
+    match serde_json::from_slice::<RankRequest>(input) {
+        Ok(r) => match drive_core::rank::rank(&r) {
+            Ok(res) => envelope_ok(&res),
+            Err(e) => err(e),
+        },
+        Err(e) => envelope_err(ErrorCode::Schema, &format!("rank: {e}")),
     }
 }
 

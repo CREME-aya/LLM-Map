@@ -45,7 +45,15 @@ typedef struct dc_session dc_session;
           *       next_wake_mono_ms: u64|null, log[]}
           * Same plan_request_id as the current plan -> class kept, nothing re-queued; a new one
           * supersedes the current plan (its running search gets cancel). Unknown fields -> E_SCHEMA. */
-/* 6  */ dc_out   dc_rank(dc_in rank_req_json);         /* {facts[], policy, profile} -> RouteComparison (TODO: E_UNIMPLEMENTED) */
+/* 6  */ dc_out   dc_rank(dc_in rank_req_json);
+         /* in : {facts: CandidateFacts[], policy?, profile?} (schema/route-comparison.schema.json; 03 §3.2)
+          *      profile: *_penalty_permille (250..=4000, default 1000), max_detour_ratio_permille (1000..=1350 | null),
+          *      l3_weights, detour. Integer-only 3-axis scoring (no floats), shared DetourPolicy with
+          *      dc_avoid_offer_eval (baseline always kept), L2 * L3 / 1000 per-mille weights (L3 low/normal/high
+          *      = 500/1000/2000), right_entry (+90 s replacement) and unknown_width_residential_m (+15 s / 100 m),
+          *      tiebreak: score_ms -> eta_ms -> unknown_length_m -> fingerprint (lex).
+          * out: RouteComparison {baseline_id, base_eta_ms, ranked[], dropped[]}
+          *      display holds raw unweighted 3-axis figures (ETA unmodified). Malformed / out-of-range -> E_SCHEMA. */
 /* 7  */ dc_out   dc_validate_override(dc_session* s, dc_in req_json);
          /* req: {code_line, contract, utterance_id (required), utterance_mono_ms, ref_frame_seq, pending_offer_id?}
           * -> {"result":"applied", override_id, override, review_proposal?, route_key, expires_at_mono_ms}
