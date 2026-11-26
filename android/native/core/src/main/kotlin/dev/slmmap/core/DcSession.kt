@@ -54,6 +54,19 @@ import java.io.Closeable
 // - planner_cmds start{priority: reroute, fix}: Rust decided the vehicle left the route
 //   (on-route alignment is in Rust, docs 04 §3.1); search from that fix.
 // - "経路を確認中" is horizon.status off_route / rerouting; there is no show_checking_route UiCmd.
+// - P3 history commentary (docs 05 §6.2, ADR-0008):
+//   * Pass corridor POIs in route_bundle.history_pois (content_ref + duration_ms only; no text).
+//     Also pass empty history_pois when consent is OFF (defense in depth).
+//   * Send history_consent{on: Boolean} via dc_tick (default OFF; persists across routeCommit).
+//     Consent OFF expires Eligible/Pending POIs and emits voice_cmds stop{token} if speaking
+//     (without save_for_later).
+//   * voice_cmds speak carries either (template_id + params) OR content_ref (priority: p3 only).
+//     Echo tts_started / tts_done / tts_stopped with the same token; on stop{token} do NOT wait
+//     for onStop before starting P1.
+//   * ui_cmds save_for_later{poi_id, reason: interrupted | bmk}: persist to the "save for later"
+//     list. L3 BMK via validateOverride targets the Speaking POI or the most recent Completed /
+//     Interrupted POI within 60 s (provisional), returning {result: "bookmarked", poi_id} and
+//     emitting save_for_later{poi_id, bmk} on the next tick (else NO_PENDING_TARGET).
 //
 // TODO(android): NOT COMPILED (no Gradle/Android SDK yet).
 // TODO(android): JSON parsing of the envelope (kotlinx.serialization?) is not decided;

@@ -51,7 +51,11 @@ typedef struct dc_session dc_session;
           * -> {"result":"applied", override_id, override, review_proposal?, route_key, expires_at_mono_ms}
           *  | {"result":"rejected", code: SYNTAX|UNKNOWN_REF|STALE_REVISION|EXPIRED
           *                               |FORBIDDEN_WHILE_DRIVING|NO_EFFECT|NO_PENDING_TARGET}
-          * (skeleton: SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only, else E_UNIMPLEMENTED) */
+          *  | {"result":"undone", req_id}       (CXL undo within 5 s, 03 §3.1; shape provisional)
+          *  | {"result":"bookmarked", poi_id}   (L3 BMK targeting Speaking or <= 60 s Completed/Interrupted POI,
+          *                                       05 §6.2; emits save_for_later{poi_id, bmk} on next dc_tick;
+          *                                       shape provisional; else REJECTED NO_PENDING_TARGET)
+          * (skeleton: SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF / CXL undo / BMK; else E_UNIMPLEMENTED) */
 /* 8  */ dc_out   dc_trip_score(dc_in trip_summary_json);                      /* TODO: E_UNIMPLEMENTED */
 /* 9  */ dc_out   dc_route_commit(dc_session* s, dc_in route_bundle_json);     /* route body only here */
          /* in : {req_id: string, expected_route_key: RouteKey|null, bundle: RouteBundle}
@@ -76,7 +80,10 @@ typedef struct dc_session dc_session;
           *      bundle = {route_key (new, route_revision "0"), eta_ms, length_cm, legs[{leg_index, along_route_start_cm,
           *      length_cm, chunks[{first_shape_index, origin_e7{lat,lon}, k_lat_q16, k_lon_q16,
           *      points_cm[[dx,dy]], seg_along_cm[], bearing_cdeg[]}], edges[{edge_id, from_pt, to_pt,
-          *      length_cm, cum_time_ms, flags}], maneuvers[Maneuver]}]}; invalid -> E_SCHEMA.
+          *      length_cm, cum_time_ms, flags}], maneuvers[Maneuver]}],
+          *      history_pois?[{poi_id, along_route_cm, versions[{kind: short|summary, content_ref, duration_ms}]}]};
+          *      invalid -> E_SCHEMA. Replacing the route replaces history_pois while preserving history_consent,
+          *      once-per-trip spoken POIs, and the 5-minute P3 interval (05 §6.2).
           * out: {route_key (with the assigned route_revision), legs, segments, maneuvers}. The next dc_tick returns the new horizon
           *      (uncertain until a fix is aligned on the new route). */
 /* 10 */ dc_out   dc_tick(dc_session* s, dc_in tick_json);
@@ -101,12 +108,15 @@ typedef struct dc_session dc_session;
           *             // no timeout outcome: Rust detects the watchdog deadline from now_mono_ms
           *             // (-> engine_stuck); an ok returned after cancel is discarded_late,
           *             // after engine_stuck discarded_after_stuck
-          *       | engine_reset }
+          *       | engine_reset
+          *       | history_consent{on: bool} }      // P3 history commentary consent (default OFF; persists across routes)
           * out: {horizon? (only when frame_seq changed),
           *       voice_cmds[speak{token, priority: p0|p1|p2|p3, template_id, params{name: int}}
+          *                 | speak{token, priority: p3, content_ref}   // content_ref is P3-only (ADR-0008, 05 §6.2)
           *                 | stop{token}],
           *       ui_cmds[show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}
-          *              | dismiss{target_id, reason: expired|cancelled|route_changed|superseded}],
+          *              | dismiss{target_id, reason: expired|cancelled|route_changed|superseded}
+          *              | save_for_later{poi_id, reason: interrupted|bmk}],
           *       planner_cmds[start{req_id, priority, distance_class: short|long, route_key,
           *                    graph_version, candidate_id?, fix?} | cancel{req_id}
           *                  | rank{plan_request_id, facts_refs[], reason: all_done|budget_expired}

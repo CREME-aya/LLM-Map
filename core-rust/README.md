@@ -21,10 +21,10 @@ core-rust/
 | 4 | `dc_session_free(s)` | Frees the session when the actor explicitly closes it. NULL is safe; double free is undefined | Implemented |
 | 5 | `dc_plan_candidates(s, req)` | `{now_mono_ms, eta_estimate_s?, snapshot}` → `{plan_request_id, distance_class, candidates, planner_cmds, next_wake_mono_ms, log}`: fixes the plan's distance class, builds `CandidateRequest[]` from the `TripPlanSnapshot`, queues their searches and returns the first `start` | Implemented (`Session::plan_candidates`; candidate triggers / `through_anchor` TODO) |
 | 6 | `dc_rank(req)` | Applies L1/L2 3-axis scoring and the detour cap (shared with #11) to `{facts[], policy, profile}` and returns a `RouteComparison` | `E_UNIMPLEMENTED` |
-| 7 | `dc_validate_override(s, req)` | Parses and validates the SLM's 1-line command code in Rust and returns `Applied` or `Rejected{code}` | SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only; everything else `E_UNIMPLEMENTED` |
+| 7 | `dc_validate_override(s, req)` | Parses and validates the SLM's 1-line command code in Rust and returns `Applied`, `Rejected{code}`, `Undone{req_id}`, or `Bookmarked{poi_id}` | SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF / CXL undo / L3 BMK (Speaking or ≤ 60 s Completed/Interrupted POI → `save_for_later{bmk}` on next tick, else `NO_PENDING_TARGET`); everything else `E_UNIMPLEMENTED` |
 | 8 | `dc_trip_score(summary)` | Computes the trip score (long-distance/trip detection) from a trip summary | `E_UNIMPLEMENTED` |
 | 9 | `dc_route_commit(s, req)` | Loads the confirmed route body (the only place it is passed) | Implemented: `{req_id: string, expected_route_key: RouteKey\|null, bundle: RouteBundle}` (02 §2.1 #9) — `req_id` is mandatory (`null` / omitted → `E_SCHEMA`). Guard checked first (`E_STALE` / `E_FORBIDDEN_WHILE_DRIVING`, nothing replaced): `expected_route_key` (`null` only before the first route) must equal the current route, and `req_id` must name either (1) an unsettled `commit` Rust issued for that key or (2) an `ok` candidate search of the current plan while its commit window is open (closed on next plan, after one candidate commits → `E_STALE`, or once driving, `>= drive_start_speed_cm_s` [222 cm/s = 8 km/h] continuously for `drive_start_hold_ms` [3000 ms], reset by slow / missing-speed / low-accuracy fixes → `E_FORBIDDEN_WHILE_DRIVING`). The bundle must carry `route_revision` "0" (`E_SCHEMA`; Rust assigns current + 1, first route 1, never reset on `trip_revision` + 1, rewrites every `route_key` in the bundle and returns it); while a route is current its `trip_id` / `graph_version` must match and `trip_revision` must match or (only for a plan candidate matching the plan's `trip_revision`) be current + 1 (`E_STALE`), then the bundle is validated (`E_SCHEMA`) and indexed |
-| 10 | `dc_tick(s, tick)` | The only event entry point. Takes `TickInput` and returns `horizon?/voice_cmds/ui_cmds/planner_cmds/next_wake_mono_ms/log` | Search planner (incl. watchdog → `engine_stuck` detected from `now_mono_ms`), on-route alignment of `fix` (off-route → `reroute` start with the fix), remaining ETA, `ManeuverHorizon` (3 ahead, `frame_seq` only on change, `next_complex_window` from the junction classes of `drive_core::junction` / groups while tracking; P3 available time `horizon::p3_available_ms`, 05 §6.2), time clamping and thermal collapse |
+| 10 | `dc_tick(s, tick)` | The only event entry point. Takes `TickInput` and returns `horizon?/voice_cmds/ui_cmds/planner_cmds/next_wake_mono_ms/log` | Search planner (incl. watchdog → `engine_stuck` detected from `now_mono_ms`), on-route alignment of `fix` (off-route → `reroute` start with the fix), remaining ETA, `ManeuverHorizon` (3 ahead, `frame_seq` only on change, `next_complex_window` from the junction classes of `drive_core::junction` / groups while tracking; P3 available time `horizon::p3_available_ms`, 05 §6.2), P3 history commentary state machine (`drive_core::history`: `Eligible → Pending → Speaking → Completed / Interrupted / Expired`, `history_consent`, `short`/`summary` version selection, once-per-trip + 5-min interval persisting across route changes, P0/P1 interruption → `stop` + `save_for_later{interrupted}`, consent OFF → `stop` without `save_for_later`), time clamping and thermal collapse |
 | 11 | `dc_avoid_offer_eval(s, req)` | Decides whether to show an `AvoidOffer` from `{req_id, now_mono_ms, alt_facts, base_facts}` (called for `planner_cmds: evaluate_offer{req_id, facts_ref, base_facts_ref}`; `base_facts_ref` comes optionally with the avoid search's `search_finished`, no offer without it; 04 §4.3 item 2: (a) the target's `(edge_in, edge_out)` not in `alt_facts.junctions`, (b) against `base_facts` target category strictly improves and the other does not worsen — right-turn target: fewer avoid right turns and `narrow_m` not longer; `narrow` target: shorter `narrow_m` and avoid right turns not more, else declined), using the same detour-cap function as #6 (`drive_core::avoid::DetourPolicy`) → `{result: offered, avoid_offer} \| {result: declined, reason}` (shape provisional) | implemented |
 | 12 | `dc_exchange_validate(req)` | Validates `{kind, payload}` received via `exchange-v1` | `E_UNIMPLEMENTED` |
 
@@ -103,19 +103,19 @@ Unknown fields are rejected with `E_SCHEMA` wherever the schema says `additional
 (TickInput, Fix, every Event kind, PlannerCmd, VoiceCmd, UiCmd, TickOutput, LogEvent) and in the schema-less
 `dc_validate_override` request and `dc_session_new` config.
 
-`voice_cmds` / `ui_cmds` (types only; nothing emits voice / confirm yet, `dismiss` only for the
-avoid chip) hold only
-what docs v1.2 names:
+`voice_cmds` / `ui_cmds` (emitted for avoid-chip `dismiss` / `undo_unavailable` and P3 history commentary / L3 `BMK`; P0/P1 TBT voice scheduling and override confirm screens not wired yet) hold only what docs v1.2 name:
 - `voice_cmds`: `speak{token, priority: p0|p1|p2|p3, template_id, params{name: integer}}` |
-  `stop{token}` (05 §5; no text crosses the boundary, Kotlin renders the template).
+  `speak{token, priority: p3, content_ref}` (P3-only, enforced by schema and Rust types; 05 §6.2, ADR-0008) |
+  `stop{token}` (05 §5; no raw text crosses the boundary, Kotlin renders templates / history pack entries).
 - `ui_cmds`: `show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}` (05 §3.2, ADR-0007) |
-  `dismiss{target_id, reason: expired|cancelled|route_changed|superseded}` (04 §4.3, 05 §3.2, ADR-0007).
+  `dismiss{target_id, reason: expired|cancelled|route_changed|superseded}` (04 §4.3, 05 §3.2, ADR-0007) |
+  `save_for_later{poi_id, reason: interrupted|bmk}` (05 §6.2, ADR-0008).
 
 Not defined because docs do not (TODO, needs a docs decision first):
 - `show_avoid_offer` / `horizon_update`: the chip (`HorizonEntry.avoid_offer`) and the 3-ahead
   cards come from `TickOutput.horizon`, the single source (04 §1); a separate UiCmd would duplicate it.
 - The crossfade switch of an avoid chip (04 §4.3 item 3).
-- "あとで見る" save of an interrupted P3 commentary (05 §6, ADR-0006).
+- Audio focus recovery event (`audio_focus_gained` is not in ADR-0008 / `tick.schema.json`; once `audio_focus_lost` arrives, P3 stays suppressed).
 - Thermal / low-memory degradation notices (05 §3.1), Tier 0 fallback chips after an SLM timeout (05 §3.2).
 - The `utterance_token {route_key, event_id, generation}` encoding (string today, same as `tts_*{token}`),
   the template id catalogue and the param names.
