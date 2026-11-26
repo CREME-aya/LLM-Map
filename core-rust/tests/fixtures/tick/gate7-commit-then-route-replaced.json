@@ -5,7 +5,7 @@
     {"expect_starts": [{"req_id": "r1", "priority": "reroute", "distance_class": "long"}], "step": "request", "now_mono_ms": 1000, "priority": "reroute"},
     {"expect_cmds": [{"cmd": "commit", "req_id": "r1", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"}}], "step": "tick", "input": {"now_mono_ms": 2000, "events": [{"at_mono_ms": 2000, "kind": "search_finished", "req_id": "r1", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"}, "graph_version": "jp-2026.11.0", "outcome": "ok", "facts_ref": "facts-r1", "engine_ms": 1000}]}},
     {"step": "set_route", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"8","graph_version":"jp-2026.11.0"}},
-    {"expect_error": "E_STALE", "step": "route_commit", "expected_route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"}},
+    {"expect_error": "E_STALE", "step": "route_commit", "req_id": "r1", "expected_route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"jp-2026.11.0"}},
     {"step": "tick", "input": {"now_mono_ms": 3000, "events": []}},
     {"expect_starts": [{"req_id": "r2", "priority": "avoid_chip", "distance_class": "long"}], "step": "request", "now_mono_ms": 4000, "priority": "avoid_chip"},
     {"expect_cmds": [], "step": "tick", "input": {"now_mono_ms": 5000, "events": [{"at_mono_ms": 5000, "kind": "search_finished", "req_id": "r2", "route_key": {"trip_id":"t1","trip_revision":"3","route_revision":"8","graph_version":"jp-2026.11.0"}, "graph_version": "jp-2026.11.0", "outcome": "ok", "facts_ref": "facts-r2", "engine_ms": 1000}]}}

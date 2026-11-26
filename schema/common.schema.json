@@ -58,8 +58,8 @@
       ]
     },
     "ErrorCode": {
-      "description": "dc_core error codes (devteam #40). E_UNIMPLEMENTED is a skeleton-only placeholder, TODO(abi-v1): remove before ABI freeze.",
-      "enum": ["E_SCHEMA", "E_VERSION", "E_STALE", "E_REJECTED", "E_PANIC", "E_INVALID_HANDLE", "E_UNIMPLEMENTED"]
+      "description": "dc_core error codes (devteam #40 + FORBIDDEN_WHILE_DRIVING for plan-candidate dc_route_commit while driving, 02 §2.1 #9). E_UNIMPLEMENTED is a skeleton-only placeholder, TODO(abi-v1): remove before ABI freeze.",
+      "enum": ["E_SCHEMA", "E_VERSION", "E_STALE", "E_REJECTED", "E_PANIC", "E_INVALID_HANDLE", "FORBIDDEN_WHILE_DRIVING", "E_UNIMPLEMENTED"]
     },
     "DcEnvelope": {
       "description": "Every dc_out is {ok:true,data} | {ok:false,error{code,msg}} (dc_core.h).",

@@ -100,10 +100,11 @@ pub fn plan_candidates(s: &mut Session, input: &[u8]) -> Vec<u8> {
 }
 
 /// `dc_route_commit`: `{req_id, expected_route_key, bundle}` (`contracts::route::RouteCommitRequest`).
-/// The guard is checked first (`E_STALE`, nothing replaced): `expected_route_key` (from `commit`,
-/// or `null` for the first route) against the current route, and `req_id` (the `commit`'s; may
-/// be `null` for the first route) against the commits Rust issued (provisional); then the request is parsed
-/// (`E_SCHEMA`, including a bundle `route_revision` other than "0"), and
+/// `req_id` is mandatory (`null` / omitted → `E_SCHEMA`). The guard is checked before the
+/// body (`E_STALE` or `FORBIDDEN_WHILE_DRIVING`, nothing replaced): `expected_route_key`
+/// against the current route, and `req_id` against unsettled commits Rust issued or `ok`
+/// candidates of the current plan while its selection window is open; then the request is
+/// parsed (`E_SCHEMA`, including a bundle `route_revision` other than "0"), and
 /// `Session::route_commit` checks trip / graph (`E_STALE`) and the bundle body (`E_SCHEMA`),
 /// assigns the revision (current + 1) and makes it the current route.
 pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
@@ -111,8 +112,8 @@ pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
         Ok(v) => v,
         Err(e) => return envelope_err(ErrorCode::Schema, &format!("route_commit: {e}")),
     };
-    // The guard is checked before the body so a late route is refused as E_STALE even if
-    // its body would not parse.
+    // The guard is checked before the body so a late route is refused as E_STALE (or
+    // FORBIDDEN_WHILE_DRIVING) even if its body would not parse.
     let key = match v.get("expected_route_key").cloned() {
         Some(serde_json::Value::Null) => None,
         Some(k) => match serde_json::from_value::<RouteKey>(k) {
@@ -127,14 +128,8 @@ pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
         }
     };
     let req_id = match v.get("req_id") {
-        Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(r)) => Some(r.as_str()),
-        Some(_) => {
-            return envelope_err(
-                ErrorCode::Schema,
-                "route_commit: req_id: expected string or null",
-            )
-        }
+        Some(serde_json::Value::String(r)) => r.as_str(),
+        Some(_) => return envelope_err(ErrorCode::Schema, "route_commit: req_id: expected string"),
         None => return envelope_err(ErrorCode::Schema, "route_commit: missing field `req_id`"),
     };
     if let Err(e) = s.check_route_guard(req_id, key.as_ref()) {

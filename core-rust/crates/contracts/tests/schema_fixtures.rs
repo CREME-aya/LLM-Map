@@ -403,8 +403,8 @@ mod tick {
                         serde_json::from_value::<SearchPriority>(step["priority"].clone()).unwrap();
                     }
                     "plan" => {}
-                    // test hook standing in for a commit{req_id, route_key} not driven here
-                    "issue_commit" => {
+                    // test hook standing in for a commit{req_id, route_key} or plan ok not driven here
+                    "issue_commit" | "plan_ok" => {
                         let key = compile_doc(
                             "RouteKey",
                             &serde_json::json!({ "$ref": format!("{BASE}common.schema.json#/$defs/RouteKey") }),
@@ -918,19 +918,23 @@ fn rust_mirror_agrees_on_route_bundle() {
         }
     }
     assert!(n >= 5, "route-bundle fixtures found: {n}");
-    // RouteCommitRequest: req_id and expected_route_key are required and nullable; unknown
-    // fields rejected.
+    // RouteCommitRequest: req_id is a required non-null string; expected_route_key is
+    // required and nullable; unknown fields rejected.
     let req = route_def("RouteCommitRequest");
     let rk = serde_json::json!({"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"g"});
     let b = minimal_bundle();
     for (v, ok) in [
         (
-            serde_json::json!({"req_id": null, "expected_route_key": null, "bundle": b}),
+            serde_json::json!({"req_id": "r1", "expected_route_key": null, "bundle": b}),
             true,
         ),
         (
             serde_json::json!({"req_id": "r1", "expected_route_key": rk, "bundle": b}),
             true,
+        ),
+        (
+            serde_json::json!({"req_id": null, "expected_route_key": null, "bundle": b}),
+            false,
         ),
         (
             serde_json::json!({"expected_route_key": rk, "bundle": b}),
@@ -940,17 +944,17 @@ fn rust_mirror_agrees_on_route_bundle() {
             serde_json::json!({"req_id": 1, "expected_route_key": rk, "bundle": b}),
             false,
         ),
-        (serde_json::json!({"req_id": null, "bundle": b}), false),
+        (serde_json::json!({"req_id": "r1", "bundle": b}), false),
         (
-            serde_json::json!({"req_id": null, "route_key": null, "bundle": b}),
+            serde_json::json!({"req_id": "r1", "route_key": null, "bundle": b}),
             false,
         ),
         (
-            serde_json::json!({"req_id": null, "expected_route_key": null}),
+            serde_json::json!({"req_id": "r1", "expected_route_key": null}),
             false,
         ),
         (
-            serde_json::json!({"req_id": null, "expected_route_key": null, "bundle": b, "x": 1}),
+            serde_json::json!({"req_id": "r1", "expected_route_key": null, "bundle": b, "x": 1}),
             false,
         ),
     ] {

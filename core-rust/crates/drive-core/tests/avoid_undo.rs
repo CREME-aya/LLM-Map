@@ -175,8 +175,9 @@ struct Consented {
 /// edge 1001); ok → offer (`consented_on`: consent at 3 s).
 fn offered_on(orig: RouteBundle) -> (Session, RouteBundle, AvoidOffer, RouteKey) {
     let mut s = Session::new(config());
+    s.record_plan_ok_for_test("p-init", orig.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: None,
+        req_id: "p-init".into(),
         expected_route_key: None,
         bundle: orig.clone(),
     })
@@ -232,7 +233,7 @@ fn consented_on(orig: RouteBundle) -> Consented {
 /// Kotlin runs the consent commit: the avoid route goes in (expected = the original key).
 fn load(c: &mut Consented, avoid: RouteBundle) -> RouteKey {
     c.s.route_commit(&RouteCommitRequest {
-        req_id: Some("r1".into()),
+        req_id: "r1".into(),
         expected_route_key: Some(c.orig_key.clone()),
         bundle: avoid,
     })
@@ -355,7 +356,7 @@ fn undo_route_must_be_passed_with_revision_zero() {
     held.route_key = c.orig_key.clone();
     let e =
         c.s.route_commit(&RouteCommitRequest {
-            req_id: Some(req_id.clone()),
+            req_id: req_id.clone(),
             expected_route_key: Some(guard.clone()),
             bundle: held.clone(),
         })
@@ -366,7 +367,7 @@ fn undo_route_must_be_passed_with_revision_zero() {
     held.route_key.route_revision = U64Str(0);
     let r =
         c.s.route_commit(&RouteCommitRequest {
-            req_id: Some(req_id.clone()),
+            req_id: req_id.clone(),
             expected_route_key: Some(guard),
             bundle: held,
         })
@@ -521,7 +522,7 @@ fn cancels(o: &TickOutput) -> Vec<String> {
 fn load_raw(c: &mut Consented) -> Result<RouteKey, ErrorCode> {
     let avoid = avoid_line(&c.orig);
     c.s.route_commit(&RouteCommitRequest {
-        req_id: Some("r1".into()),
+        req_id: "r1".into(),
         expected_route_key: Some(c.orig_key.clone()),
         bundle: avoid,
     })
@@ -563,10 +564,12 @@ fn undo_before_the_avoid_route_is_loaded_cancels_the_commit() {
     assert!(refused(&o, "NO_PENDING_TARGET"));
 
     let mut s = Session::new(config());
+    let main = main_line();
+    s.record_plan_ok_for_test("p-init", main.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: None,
+        req_id: "p-init".into(),
         expected_route_key: None,
-        bundle: main_line(),
+        bundle: main,
     })
     .unwrap();
     let o = tick(&mut s, 1_000, None, vec![tap(1_000, "avoid-r1", "undo")]);
@@ -721,7 +724,7 @@ fn undone_route_does_not_offer_the_same_junction_again() {
     let mut held = c.orig.clone();
     held.route_key.route_revision = U64Str(0);
     c.s.route_commit(&RouteCommitRequest {
-        req_id: Some(req_id),
+        req_id,
         expected_route_key: Some(guard),
         bundle: held,
     })

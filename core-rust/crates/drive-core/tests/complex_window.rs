@@ -69,8 +69,9 @@ fn session(b: &RouteBundle) -> Session {
         fix_stale_ms: 1_000_000,
         ..Default::default()
     });
+    s.record_plan_ok_for_test("p-init", b.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: None,
+        req_id: "p-init".into(),
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -483,8 +484,9 @@ fn eta_range_is_a_band_on_the_remaining_time() {
         eta_latest_permille: 1_001,
         ..Default::default()
     });
+    s.record_plan_ok_for_test("p-init", b.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: None,
+        req_id: "p-init".into(),
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -511,8 +513,9 @@ fn eta_range_is_a_band_on_the_remaining_time() {
         eta_latest_permille: 1_000,
         ..Default::default()
     });
+    s.record_plan_ok_for_test("p-init", b.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: None,
+        req_id: "p-init".into(),
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -663,8 +666,9 @@ fn window_only_while_tracking() {
     let mut b = main_line();
     make_right_unprotected(&mut b.legs[0].maneuvers[0]);
     let mut s = Session::new(SessionConfig::default());
+    s.record_plan_ok_for_test("p-init", b.route_key.clone());
     s.route_commit(&RouteCommitRequest {
-        req_id: None,
+        req_id: "p-init".into(),
         expected_route_key: None,
         bundle: b.clone(),
     })

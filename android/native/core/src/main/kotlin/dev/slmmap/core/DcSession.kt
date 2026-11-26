@@ -19,18 +19,25 @@ import java.io.Closeable
 //     bearing_cdeg = Math.round(location.bearing * 100.0) % 36000   (only if hasBearing();
 //                    359.996° rounds to 36000 and wraps to 0; Rust rejects >= 36000 with E_SCHEMA)
 //     speed_cm_s   = Math.round(location.speed * 100.0)          (only if hasSpeed(); m/s -> cm/s)
-// - planner_cmds commit{req_id, route_key}: call routeCommit() with
-//   {req_id, expected_route_key, bundle}: that commit's req_id, its route_key (the route's key
-//   when the search started) and the route bundle of search req_id
-//   (schema/route-bundle.schema.json, built by C++). req_id is provisional (proposed to the
-//   team): Rust accepts only a commit it issued and has not settled, so two commits with the
-//   same route_key (a reroute and the avoid route) are never mixed up; any other req_id is
-//   E_STALE. The first route of a session goes in with req_id = null and
-//   expected_route_key = null. The bundle always carries
-//   route_revision "0": Rust assigns current + 1 (first route: 1) and returns the new key in the
-//   result's route_key (use that key from then on). E_STALE means the route was replaced
-//   meanwhile, or the bundle's trip_revision / graph_version differ from the current route:
-//   drop the result (nothing was replaced). A non-"0" route_revision is E_SCHEMA.
+// - routeCommit({req_id, expected_route_key, bundle}) (02 §2.1 #9): req_id is mandatory
+//   (null or omitted is E_SCHEMA; the "null for the first route" exception is abolished).
+//   Rust accepts req_id only when it names either:
+//   (1) an unsettled planner_cmds commit{req_id, route_key} Rust emitted (reroute, consented
+//       avoid_chip, or undo-<req_id>), with expected_route_key = that commit's route_key; or
+//   (2) an ok candidate search of the current plan (from planCandidates / dc_tick) chosen by
+//       the user from the comparison table (first route with expected_route_key = null, or
+//       mid-trip replan with expected_route_key = current route's key). A plan's commit window
+//       closes when the next plan starts, when one candidate is committed (E_STALE), or once
+//       the vehicle starts driving (>= drive_start_speed_cm_s [222 cm/s = 8 km/h] continuously
+//       for drive_start_hold_ms [3000 ms]; slow / missing-speed / acc_cm > max_acc_cm fixes
+//       reset the run -> FORBIDDEN_WHILE_DRIVING).
+//   The bundle always carries route_revision "0" (non-"0" is E_SCHEMA): Rust assigns
+//   current + 1 (first route: 1; never reset when trip_revision advances) and returns the new
+//   key in the result's route_key (use that key from then on). E_STALE means the route was
+//   replaced meanwhile, req_id is unknown/stale, or the bundle's trip_id / graph_version
+//   differ from the current route, or trip_revision is neither current nor (for a plan
+//   candidate matching the plan's trip_revision) current + 1: drop the result (nothing was
+//   replaced).
 // - planner_cmds commit{..., undo_req_id} (only the avoid-chip consent commit): when you commit
 //   that avoid route, keep the route body that was current until then for 5 s under
 //   undo_req_id (provisional "undo-<req_id>"). It still carries the route_revision it was
