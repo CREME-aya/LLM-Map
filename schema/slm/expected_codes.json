@@ -224,7 +224,7 @@
     }
   },
   "deterministic_prefilter": {
-    "description": "Exact normalized Japanese short phrases handled deterministically by Rust dictionary matching (asr_result{text_class: dict, dict_norm}, < 50 ms, works in Tier 0) without invoking the SLM. YES matched here is one of the two valid route confirmation entry points (alongside user_tap); when pending_offer is none, YES/NO/CXL are rejected with NO_PENDING_TARGET (effective NOOP).",
+    "description": "Exact normalized Japanese short phrases handled deterministically by Rust dictionary matching (asr_result{text_class: dict, dict_norm}, < 50 ms, works in Tier 0) without invoking the SLM. YES matched here is one of the two valid route confirmation entry points (alongside user_tap); when pending_offer is none, YES/NO/CXL are rejected with NO_PENDING_TARGET (effective NOOP). While P3 history commentary is speaking, context_scoped_matches.P3_STOP takes precedence for ['やめて', '止めて', 'とめて', 'ストップ'] to stop P3 (Expired, save_for_later=false) without triggering CXL; outside P3 speaking, 'やめて' resolves to exact_matches.CXL as before, while 'キャンセル' / '取り消し' / '取り消して' / '戻して' / '元に戻して' always resolve to CXL.",
     "normalization": [
       "strip_whitespace",
       "strip_trailing_punctuation"
@@ -265,6 +265,37 @@
         "保存して",
         "ブックマーク"
       ]
+    },
+    "context_scoped_matches": {
+      "P3_STOP": {
+        "phrases": [
+          "やめて",
+          "止めて",
+          "とめて",
+          "ストップ"
+        ],
+        "active_when": "p3_speaking",
+        "is_slm_command": false,
+        "effect": {
+          "stop_p3_tts": true,
+          "poi_state": "Expired",
+          "save_for_later": false,
+          "trigger_cxl": false
+        },
+        "dispatch_rules": {
+          "when_p3_speaking": "['やめて', '止めて', 'とめて', 'ストップ'] stop P3 history commentary only (POI -> Expired, save_for_later=false) and do not invoke CXL or other cancellations.",
+          "when_p3_not_speaking": "'やめて' resolves to exact_matches.CXL as before (rejected with NO_PENDING_TARGET / effective NOOP when pending_offer is none). '止めて', 'とめて', and 'ストップ' do not trigger P3_STOP or CXL outside P3 speaking.",
+          "always_cxl_phrases": [
+            "キャンセル",
+            "取り消し",
+            "取り消して",
+            "戻して",
+            "元に戻して"
+          ],
+          "always_cxl_rule": "'キャンセル', '取り消し', '取り消して', '戻して', and '元に戻して' always resolve to CXL and never stop P3 history commentary."
+        },
+        "spec_reference": "docs/specs/05-inference-tier-and-audio.md#6.2"
+      }
     }
   },
   "gate4_scoring_policy": {
