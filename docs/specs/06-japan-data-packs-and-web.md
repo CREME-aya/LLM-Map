@@ -89,7 +89,32 @@ Web 版（`TypeScript + Vite + React + Tailwind CSS + Zod + MapLibre GL JS + pmt
 |---|---|
 | `IntentPreset` | `schema_version`, チップ ID 列, ハード/ソフト区別, 許容迂回, 重みプリセット |
 | `TripPlan` | `schema_version`, 出発地・経由地・目的地（座標・名前）, プリセット参照, 旅モード設定（**経路形状ポリラインは送らず受信端末で同版再計算**） |
-| `DriveDiary` | 走行軌跡 GPX ＋ 構造化 JSON（回避難所統計・再生/保存済み歴史チャプター ID） |
+| `DriveDiary` | 走行軌跡（区間ごとの点の列）＋ 構造化 JSON（回避難所統計・再生/保存済み歴史チャプター ID）。**`.drivediary` 内の JSON が正本で、GPX は書き出し形式**（Kotlin / Web の側で変換） |
+
+#### JSON の形（`exchange-v1`。数値はすべて暫定）
+JSON の形の正本は `schema/exchange.schema.json`（作成予定）。決まりは次のとおり。
+- 最上位に `kind: "intent_preset" | "trip_plan" | "drive_diary"` を置き、種類ごとの形を `oneOf` で決める。`schema_version`（= 1）は必須。全階層で `additionalProperties: false`。
+- 座標は `lat_e7` / `lon_e7`（e7 の整数、Fix と同じ単位）、OSM / Valhalla 由来の ID は十進文字列（`U64Str`）。
+
+```text
+IntentPreset = { kind, schema_version, preset_id, name (≤ 40 字),
+                 chips: [chip_id] (≤ 8), hard_soft: { [chip_id]: "hard" | "soft" },
+                 detour: "standard" | "tight",
+                 weights_permille: { right_turn, narrow_road, merge } }   // 各 250〜4000（03 §5 と同じ）
+TripPlan     = { kind, schema_version, origin: Place, vias: [Place] (≤ 5), destination: Place,
+                 preset_ref?: preset_id, history_mode: "off" | "on" }    // 経路形状は送らない
+Place        = { lat_e7, lon_e7, name? (≤ 60 字), vehicle_entry_id?: U64Str }
+DriveDiary   = { kind, schema_version, trip_id, started_at_unix_s,
+                 track: { segments: [{ points: [[lat_e7, lon_e7, t_offset_s | null]] }] },
+                 avoided: { right_unprotected, narrow_m, merges },
+                 history: [{ poi_id, outcome: "completed" | "interrupted" | "saved" }] (≤ 200) }
+```
+- **軌跡は区間（`segments`）に分ける**：トンネルなどで測位が途切れた前後を直線で結ばないため。区間をまたいで点を結ばない。
+- `t_offset_s`（始まった時刻からの秒）は `null` を許す。値がある点では、同じ区間の中で時刻が逆向きに進まないことを検証する。
+- 点の数の上限は **全区間の合計で 20,000**（1 Hz で約 5 時間 33 分）。長い記録は、書き出すときに各区間の最初と最後の点を残して間引く。`.drivediary`（zip）は、これとは別に **展開後のバイト数** も制限する。
+- URL フラグメント（≤ 1,000 文字）に入れるのは `IntentPreset` と `TripPlan` だけ。`DriveDiary` は `.drivediary` のファイルでだけ受け渡す。
+- `TripPlan.history_mode` は共有する相手に伝えるためだけの値で、受け取った端末では [05 §6.2](05-inference-tier-and-audio.md) のとおり `history_consent` で改めて確かめる（共有された設定で歴史解説を自動で ON にしない）。
+- 共通テスト（Android の Rust と Web の Zod で同じ結果になること）：2 区間のあいだを結ばない、20,000 点を受け付け 20,001 点を拒否する、時刻の逆行を拒否する、未知のキーを拒否する。
 
 - **受け渡し媒体**:
   1. **URL フラグメント (`https://<domain>/p#<圧縮データ base64url>`) + QR コード**: 短いデータ（暫定上限 1,000 文字）用。フラグメント `#` 以降は HTTP サーバへ送信されない（[RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html#section-3.5)）一方、ブラウザ履歴やコピー・ページ内 JS から参照し得るため、**Web ページに第三者解析スクリプトを一切入れない** とともに、受渡画面に「含まれる出発地・行先」を明示確認させます。Android 側は `/.well-known/assetlinks.json` による App Links で受け取ります。
