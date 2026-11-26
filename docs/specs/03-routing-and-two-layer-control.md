@@ -105,6 +105,7 @@ engine_stuck ──search_finished{req_id}──▶ Idle
   - 予算超過時は待っている比較探索を取り消し、新しい `start` は出さない。実行中の探索は `search_finished` まで枠を占有したまま。
   - **計画の中の探索**: Rust（`Session::plan_candidates`）が計画ごとに `plan_request_id` と `distance_class` を固定し、候補を待ち行列に積む。基準経路は `explicit_plan`、追加候補は `comparison` の優先度で、**1 本ずつ** `start` を出す。`start` には任意の `candidate_id`（計画内の `CandidateRequest` を指す。計画の外の探索では付けない）を付ける。
   - **比較予算** = `min(距離区分の予算 3 s / 8 s, TripPlanSnapshot.budget.deadline_ms)`。`deadline_ms` は呼び出し側が予算を **短くする方向にだけ** 使え、無ければ距離区分の予算をそのまま使う。
+  - **計画の候補を経路にする**：`rank` を出すと新しい探索は始めないが、**候補の `commit` はまだ受け付ける**（2 つの状態を分ける）。Rust は計画に `ok` で戻った探索の `{req_id, candidate_id, facts_ref}` と計画の `trip_revision` を持っておき、利用者が比較表から選んだ候補はその `req_id` で `dc_route_commit` に入れる（[02 §2.1](02-architecture-and-stack.md)）。候補を受け付けなくなるのは、次の計画が始まったとき、候補の 1 つが commit されたとき、走り出したとき（走行中ソフトモードの突入条件、暫定）。
   - **新しい計画が来たら**、古い計画は打ち切り、古い計画の `rank` は出さない（実行中の探索は `search_finished` まで枠を占有し、戻った結果は `discarded_late`）。
   - 計画の中の探索の `route_key.route_revision` は `"0"`（未確定）。版は経路を入れる `dc_route_commit` で Rust が付ける（[02 §2.1](02-architecture-and-stack.md)）。
   - **計画の外の探索（逸脱再探索・回避チップ）の `distance_class`**: 探索開始時点で、現在の経路に対する **有効な残り ETA が 30 分未満なら `short`、30 分以上・不明・失効なら `long`**。その探索の間は固定し、直前の計画の区分は引き継がない（逸脱で残り ETA が失効したら、直前の計画が `short` でも `long`）。計画の外でこの区分が選ぶのは **監視上限 5 s / 10 s だけ**（3 s / 8 s は出発前の計画の比較予算）。回避チップは引き続き **計算予算 1.5 s・分岐 20 s 前の締切** で提示を判断し、監視上限まで待って提示してよいという意味ではない。
