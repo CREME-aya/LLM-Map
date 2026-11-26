@@ -29,7 +29,7 @@ Event = { at_mono_ms } & (
   | user_tap{target_id, action: confirm|avoid|undo}   // target_id = offer_id（回避チップ）| override_id | confirm_screen_id
   | thermal{status: none|light|moderate|severe|critical|emergency|shutdown}   // Rust で critical 以上を 1 つに
   | low_memory | inference_down{reason} | inference_up{tier}
-  | audio_focus_lost | call_state{active}
+  | audio_focus_lost | audio_focus_gained | call_state{active}
   | search_finished{req_id, route_key, graph_version, outcome, facts_ref?, engine_ms}
   | engine_reset
   | history_consent{on: bool} )   // 歴史解説の同意。既定 OFF（05 §6.2）
