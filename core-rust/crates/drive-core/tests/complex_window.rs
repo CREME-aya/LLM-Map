@@ -70,6 +70,7 @@ fn session(b: &RouteBundle) -> Session {
         ..Default::default()
     });
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -483,6 +484,7 @@ fn eta_range_is_a_band_on_the_remaining_time() {
         ..Default::default()
     });
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -510,6 +512,7 @@ fn eta_range_is_a_band_on_the_remaining_time() {
         ..Default::default()
     });
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -661,6 +664,7 @@ fn window_only_while_tracking() {
     make_right_unprotected(&mut b.legs[0].maneuvers[0]);
     let mut s = Session::new(SessionConfig::default());
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: b.clone(),
     })

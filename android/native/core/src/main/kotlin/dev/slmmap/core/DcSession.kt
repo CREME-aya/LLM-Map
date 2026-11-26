@@ -20,9 +20,13 @@ import java.io.Closeable
 //                    359.996° rounds to 36000 and wraps to 0; Rust rejects >= 36000 with E_SCHEMA)
 //     speed_cm_s   = Math.round(location.speed * 100.0)          (only if hasSpeed(); m/s -> cm/s)
 // - planner_cmds commit{req_id, route_key}: call routeCommit() with
-//   {expected_route_key, bundle}: that route_key (the route's key when the search started) and the
-//   route bundle of search req_id (schema/route-bundle.schema.json, built by C++). The first
-//   route of a session goes in with expected_route_key = null. The bundle always carries
+//   {req_id, expected_route_key, bundle}: that commit's req_id, its route_key (the route's key
+//   when the search started) and the route bundle of search req_id
+//   (schema/route-bundle.schema.json, built by C++). req_id is provisional (proposed to the
+//   team): Rust accepts only a commit it issued and has not settled, so two commits with the
+//   same route_key (a reroute and the avoid route) are never mixed up; any other req_id is
+//   E_STALE. The first route of a session goes in with req_id = null and
+//   expected_route_key = null. The bundle always carries
 //   route_revision "0": Rust assigns current + 1 (first route: 1) and returns the new key in the
 //   result's route_key (use that key from then on). E_STALE means the route was replaced
 //   meanwhile, or the bundle's trip_revision / graph_version differ from the current route:
@@ -32,8 +36,8 @@ import java.io.Closeable
 //   undo_req_id (provisional "undo-<req_id>"). It still carries the route_revision it was
 //   loaded with. "戻して" (user_tap{target_id: offer_id, action: undo}, or CXL through
 //   validateOverride -> {result: "undone", req_id}, the commit then comes with the next tick)
-//   yields commit{req_id: undo_req_id, route_key: the current avoid route's key}: set the held
-//   body's route_revision back to "0" before routeCommit (Rust assigns current + 1; passing the
+//   yields commit{req_id: undo_req_id, route_key: the current avoid route's key}: pass
+//   req_id = undo_req_id and set the held body's route_revision back to "0" before routeCommit (Rust assigns current + 1; passing the
 //   old revision is E_SCHEMA). Drop the held body after 5 s. A refused undo comes back as one
 //   voice_cmds speak{template_id: "undo_unavailable"} (template provisional).
 // - planner_cmds start{priority: reroute, fix}: Rust decided the vehicle left the route

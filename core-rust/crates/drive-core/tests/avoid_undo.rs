@@ -176,6 +176,7 @@ struct Consented {
 fn consented_on(orig: RouteBundle) -> Consented {
     let mut s = Session::new(config());
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: orig.clone(),
     })
@@ -220,6 +221,7 @@ fn consented_on(orig: RouteBundle) -> Consented {
 /// Kotlin runs the consent commit: the avoid route goes in (expected = the original key).
 fn load(c: &mut Consented, avoid: RouteBundle) -> RouteKey {
     c.s.route_commit(&RouteCommitRequest {
+        req_id: Some("r1".into()),
         expected_route_key: Some(c.orig_key.clone()),
         bundle: avoid,
     })
@@ -342,6 +344,7 @@ fn undo_route_must_be_passed_with_revision_zero() {
     held.route_key = c.orig_key.clone();
     let e =
         c.s.route_commit(&RouteCommitRequest {
+            req_id: Some(req_id.clone()),
             expected_route_key: Some(guard.clone()),
             bundle: held.clone(),
         })
@@ -352,6 +355,7 @@ fn undo_route_must_be_passed_with_revision_zero() {
     held.route_key.route_revision = U64Str(0);
     let r =
         c.s.route_commit(&RouteCommitRequest {
+            req_id: Some(req_id.clone()),
             expected_route_key: Some(guard),
             bundle: held,
         })
@@ -508,6 +512,7 @@ fn undo_before_the_avoid_route_is_loaded_or_without_consent() {
 
     let mut s = Session::new(config());
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: main_line(),
     })

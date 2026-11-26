@@ -99,9 +99,10 @@ pub fn plan_candidates(s: &mut Session, input: &[u8]) -> Vec<u8> {
     }
 }
 
-/// `dc_route_commit`: `{expected_route_key, bundle}` (`contracts::route::RouteCommitRequest`).
-/// `expected_route_key` (from `commit`, or `null` for the first route) is re-checked against the
-/// current route first (`E_STALE`, nothing replaced); then the request is parsed
+/// `dc_route_commit`: `{req_id, expected_route_key, bundle}` (`contracts::route::RouteCommitRequest`).
+/// The guard is checked first (`E_STALE`, nothing replaced): `expected_route_key` (from `commit`,
+/// or `null` for the first route) against the current route, and `req_id` (the `commit`'s; may
+/// be `null` for the first route) against the commits Rust issued (provisional); then the request is parsed
 /// (`E_SCHEMA`, including a bundle `route_revision` other than "0"), and
 /// `Session::route_commit` checks trip / graph (`E_STALE`) and the bundle body (`E_SCHEMA`),
 /// assigns the revision (current + 1) and makes it the current route.
@@ -125,7 +126,18 @@ pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
             )
         }
     };
-    if let Err(e) = s.check_route_guard(key.as_ref()) {
+    let req_id = match v.get("req_id") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(r)) => Some(r.as_str()),
+        Some(_) => {
+            return envelope_err(
+                ErrorCode::Schema,
+                "route_commit: req_id: expected string or null",
+            )
+        }
+        None => return envelope_err(ErrorCode::Schema, "route_commit: missing field `req_id`"),
+    };
+    if let Err(e) = s.check_route_guard(req_id, key.as_ref()) {
         return err(e);
     }
     let req: RouteCommitRequest = match serde_json::from_value(v) {

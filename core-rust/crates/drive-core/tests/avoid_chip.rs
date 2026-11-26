@@ -52,6 +52,7 @@ fn config() -> SessionConfig {
 fn session_with(b: &RouteBundle, cfg: SessionConfig) -> Session {
     let mut s = Session::new(cfg);
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -468,6 +469,7 @@ fn consent_before_the_deadline_commits() {
     alt.route_key.route_revision = contracts::U64Str(0);
     let r = s
         .route_commit(&RouteCommitRequest {
+            req_id: Some("r1".into()),
             expected_route_key: Some(k.clone()),
             bundle: alt,
         })
@@ -643,7 +645,9 @@ fn route_commit_resets_the_chip() {
     let k = key(&s);
     let mut alt = b.clone();
     alt.route_key.route_revision = contracts::U64Str(0);
+    s.issue_commit_for_test("r9", k.clone());
     s.route_commit(&RouteCommitRequest {
+        req_id: Some("r9".into()),
         expected_route_key: Some(k),
         bundle: alt,
     })

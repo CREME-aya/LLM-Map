@@ -24,13 +24,66 @@ fn min_bundle() -> RouteBundle {
     serde_json::from_value(min_value()).unwrap()
 }
 
-fn commit(s: &mut Session, guard: Option<RouteKey>, b: RouteBundle) -> Result<(), ErrorCode> {
-    s.route_commit(&RouteCommitRequest {
+/// The `dc_route_commit` request for `guard`; a non-null guard comes with a `commit` Rust
+/// issued for it (test hook), so these tests exercise the route_key half of the guard.
+fn request(s: &mut Session, guard: Option<RouteKey>, b: RouteBundle) -> RouteCommitRequest {
+    let req_id = guard.as_ref().map(|k| {
+        s.issue_commit_for_test("t-commit", k.clone());
+        "t-commit".to_owned()
+    });
+    RouteCommitRequest {
+        req_id,
         expected_route_key: guard,
         bundle: b,
-    })
-    .map(|_| ())
-    .map_err(|e| e.code)
+    }
+}
+
+fn commit(s: &mut Session, guard: Option<RouteKey>, b: RouteBundle) -> Result<(), ErrorCode> {
+    let req = request(s, guard, b);
+    s.route_commit(&req).map(|_| ()).map_err(|e| e.code)
+}
+
+/// The req_id half of the guard (provisional): while a route is current, `req_id` must
+/// name a commit Rust issued for that `expected_route_key` and not settled yet; the first
+/// route may carry any req_id or null.
+#[test]
+fn guard_req_id_must_name_an_issued_commit() {
+    let mut s = Session::new(SessionConfig::default());
+    let raw = |req_id: Option<&str>, guard: Option<RouteKey>| RouteCommitRequest {
+        req_id: req_id.map(str::to_owned),
+        expected_route_key: guard,
+        bundle: min_bundle(),
+    };
+    s.route_commit(&raw(Some("anything"), None)).unwrap();
+    let k1 = s.route().unwrap().route_key.clone();
+    let stale = |s: &mut Session, r: RouteCommitRequest| s.route_commit(&r).unwrap_err().code;
+    assert_eq!(stale(&mut s, raw(None, Some(k1.clone()))), ErrorCode::Stale);
+    assert_eq!(
+        stale(&mut s, raw(Some("r1"), Some(k1.clone()))),
+        ErrorCode::Stale
+    );
+    // issued for another route_key: not this guard's commit
+    let mut other = k1.clone();
+    other.route_revision = contracts::U64Str(7);
+    s.issue_commit_for_test("r1", other);
+    assert_eq!(
+        stale(&mut s, raw(Some("r1"), Some(k1.clone()))),
+        ErrorCode::Stale
+    );
+    s.issue_commit_for_test("r2", k1.clone());
+    s.issue_commit_for_test("r3", k1.clone());
+    assert_eq!(s.route().unwrap().route_key, k1, "nothing replaced");
+    let k2 = s
+        .route_commit(&raw(Some("r3"), Some(k1.clone())))
+        .unwrap()
+        .route_key;
+    // r2 had the same guard: settled by the route change
+    assert_eq!(s.issued_commits().count(), 0);
+    assert_eq!(
+        stale(&mut s, raw(Some("r2"), Some(k2.clone()))),
+        ErrorCode::Stale
+    );
+    assert_eq!(s.route().unwrap().route_key, k2);
 }
 
 #[test]
@@ -174,12 +227,8 @@ fn bundle_rev(rev: u64, trip_rev: Option<u64>, graph: Option<&str>) -> RouteBund
 }
 
 fn commit_key(s: &mut Session, guard: Option<RouteKey>, b: RouteBundle) -> RouteKey {
-    let r = s
-        .route_commit(&RouteCommitRequest {
-            expected_route_key: guard,
-            bundle: b,
-        })
-        .unwrap();
+    let req = request(s, guard, b);
+    let r = s.route_commit(&req).unwrap();
     let route = s.route().unwrap();
     assert_eq!(
         r.route_key, route.route_key,

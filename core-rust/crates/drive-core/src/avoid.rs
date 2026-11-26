@@ -148,6 +148,8 @@ pub struct AvoidTarget {
 /// Consent given (`commit` issued), the avoid route not loaded yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Consent {
+    /// The avoid search's `req_id` (= the consent `commit`'s; `dc_route_commit` names it).
+    pub req_id: String,
     pub offer_id: String,
     pub undo_req_id: String,
     /// The route the avoid search started on (= the consent `commit`'s `route_key`).

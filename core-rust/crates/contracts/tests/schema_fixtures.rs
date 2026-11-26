@@ -403,6 +403,15 @@ mod tick {
                         serde_json::from_value::<SearchPriority>(step["priority"].clone()).unwrap();
                     }
                     "plan" => {}
+                    // test hook standing in for a commit{req_id, route_key} not driven here
+                    "issue_commit" => {
+                        let key = compile_doc(
+                            "RouteKey",
+                            &serde_json::json!({ "$ref": format!("{BASE}common.schema.json#/$defs/RouteKey") }),
+                        );
+                        assert!(key.is_valid(&step["route_key"]), "{}", p.display());
+                        assert!(step["req_id"].is_string(), "{}", p.display());
+                    }
                     "set_route" => {
                         let key = compile_doc(
                             "RouteKey",
@@ -413,9 +422,9 @@ mod tick {
                     // with a bundle: a full RouteCommitRequest; without: the guard only
                     "route_commit" => {
                         let req = if step.get("bundle").is_some() {
-                            serde_json::json!({"expected_route_key": step["expected_route_key"], "bundle": step["bundle"]})
+                            serde_json::json!({"req_id": step["req_id"], "expected_route_key": step["expected_route_key"], "bundle": step["bundle"]})
                         } else {
-                            serde_json::json!({"expected_route_key": step["expected_route_key"], "bundle": minimal_bundle()})
+                            serde_json::json!({"req_id": step.get("req_id").cloned().unwrap_or(serde_json::Value::Null), "expected_route_key": step["expected_route_key"], "bundle": minimal_bundle()})
                         };
                         let c = route_def("RouteCommitRequest");
                         // E_SCHEMA steps (e.g. a bundle route_revision other than "0") must
@@ -909,26 +918,39 @@ fn rust_mirror_agrees_on_route_bundle() {
         }
     }
     assert!(n >= 5, "route-bundle fixtures found: {n}");
-    // RouteCommitRequest: expected_route_key is required and nullable; unknown fields rejected.
+    // RouteCommitRequest: req_id and expected_route_key are required and nullable; unknown
+    // fields rejected.
     let req = route_def("RouteCommitRequest");
     let rk = serde_json::json!({"trip_id":"t1","trip_revision":"3","route_revision":"7","graph_version":"g"});
+    let b = minimal_bundle();
     for (v, ok) in [
         (
-            serde_json::json!({"expected_route_key": null, "bundle": minimal_bundle()}),
+            serde_json::json!({"req_id": null, "expected_route_key": null, "bundle": b}),
             true,
         ),
         (
-            serde_json::json!({"expected_route_key": rk, "bundle": minimal_bundle()}),
+            serde_json::json!({"req_id": "r1", "expected_route_key": rk, "bundle": b}),
             true,
         ),
-        (serde_json::json!({"bundle": minimal_bundle()}), false),
         (
-            serde_json::json!({"route_key": null, "bundle": minimal_bundle()}),
+            serde_json::json!({"expected_route_key": rk, "bundle": b}),
             false,
         ),
-        (serde_json::json!({"expected_route_key": null}), false),
         (
-            serde_json::json!({"expected_route_key": null, "bundle": minimal_bundle(), "x": 1}),
+            serde_json::json!({"req_id": 1, "expected_route_key": rk, "bundle": b}),
+            false,
+        ),
+        (serde_json::json!({"req_id": null, "bundle": b}), false),
+        (
+            serde_json::json!({"req_id": null, "route_key": null, "bundle": b}),
+            false,
+        ),
+        (
+            serde_json::json!({"req_id": null, "expected_route_key": null}),
+            false,
+        ),
+        (
+            serde_json::json!({"req_id": null, "expected_route_key": null, "bundle": b, "x": 1}),
             false,
         ),
     ] {

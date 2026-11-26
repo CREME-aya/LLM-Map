@@ -59,7 +59,11 @@ fn start_fix(b: &RouteBundle, at_mono_ms: u64) -> Fix {
 /// Commits `b` (first route or replacing the current one).
 fn commit(s: &mut Session, b: &RouteBundle) {
     let guard = s.route().map(|r| r.route_key.clone());
+    if let Some(k) = &guard {
+        s.issue_commit_for_test("t-commit", k.clone());
+    }
     s.route_commit(&RouteCommitRequest {
+        req_id: guard.as_ref().map(|_| "t-commit".to_owned()),
         expected_route_key: guard,
         bundle: b.clone(),
     })
@@ -135,7 +139,8 @@ fn run_with_wakes(name: &str) -> (Session, Vec<TickOutput>, usize, Vec<Option<u6
                 // A request serde rejects (e.g. bundle route_revision != "0") is E_SCHEMA,
                 // as dc_route_commit reports it.
                 let parsed = serde_json::from_value::<RouteCommitRequest>(serde_json::json!({
-                    "expected_route_key": step["expected_route_key"], "bundle": step["bundle"]}));
+                    "req_id": step["req_id"], "expected_route_key": step["expected_route_key"],
+                    "bundle": step["bundle"]}));
                 let got = if let (Some(_), Err(_)) = (step.get("bundle"), &parsed) {
                     Some("E_SCHEMA")
                 } else if let (Some(_), Ok(req)) = (step.get("bundle"), &parsed) {
@@ -163,6 +168,14 @@ fn run_with_wakes(name: &str) -> (Session, Vec<TickOutput>, usize, Vec<Option<u6
                     s.check_route_commit(&key).err().map(|e| e.code.as_str())
                 };
                 assert_eq!(got, want, "{name}: step {step}");
+                TickOutput::default()
+            }
+            // Stands in for a `commit{req_id, route_key}` the fixture does not drive.
+            "issue_commit" => {
+                s.issue_commit_for_test(
+                    step["req_id"].as_str().unwrap(),
+                    serde_json::from_value(step["route_key"].clone()).unwrap(),
+                );
                 TickOutput::default()
             }
             "tick" => s.tick(serde_json::from_value::<TickInput>(step["input"].clone()).unwrap()),
@@ -844,15 +857,19 @@ fn reroute_hold_expires_after_10s() {
 
 /// Gate 7 (commit versioning, team decision 2026-11-26): bundles carry route_revision "0"
 /// (else E_SCHEMA) and Rust assigns current + 1 (first route: 1); a bundle trip_revision /
-/// graph_version differing from the current route, and guard mismatches, are E_STALE.
+/// graph_version differing from the current route, and guard mismatches (route_key, or a
+/// req_id Rust did not issue / already settled), are E_STALE.
 /// See gate7-commit-route-revision.json.
 #[test]
 fn commit_assigns_route_revision_current_plus_one() {
     let (s, o, _) = run("gate7-commit-route-revision.json");
     assert_eq!(s.route().unwrap().route_key.route_revision.0, 2);
     // the tick right after the refused commits still shows rev 1
-    assert_eq!(o[7].horizon.as_ref().unwrap().route_key.route_revision.0, 1);
-    let h = o[9].horizon.as_ref().unwrap();
+    assert_eq!(
+        o[10].horizon.as_ref().unwrap().route_key.route_revision.0,
+        1
+    );
+    let h = o[13].horizon.as_ref().unwrap();
     assert_eq!(h.route_key.route_revision.0, 2);
     assert!(h
         .upcoming

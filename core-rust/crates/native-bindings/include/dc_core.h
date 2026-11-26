@@ -53,7 +53,13 @@ typedef struct dc_session dc_session;
           * (skeleton: SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only, else E_UNIMPLEMENTED) */
 /* 8  */ dc_out   dc_trip_score(dc_in trip_summary_json);                      /* TODO: E_UNIMPLEMENTED */
 /* 9  */ dc_out   dc_route_commit(dc_session* s, dc_in route_bundle_json);     /* route body only here */
-         /* in : {expected_route_key: RouteKey|null, bundle: RouteBundle}   (schema/route-bundle.schema.json)
+         /* in : {req_id: string|null, expected_route_key: RouteKey|null, bundle: RouteBundle}
+          *      (schema/route-bundle.schema.json)
+          *      req_id (provisional, proposed to the team) = the req_id of the planner_cmds
+          *      commit this route answers (undo-<req_id> for an undo). While a route is current
+          *      it must name a commit Rust issued with route_key = expected_route_key and not
+          *      settled yet (loading any route settles them all; cancel_commit withdraws one)
+          *      -> otherwise E_STALE, nothing replaced. null / any value for the first route.
           *      expected_route_key = guard: from planner_cmds commit (the current route's key when the
           *      search started), or null for the first route. Must equal the current route
           *      (null = none) -> otherwise E_STALE, nothing replaced (checked first).

@@ -217,6 +217,10 @@ pub struct Session {
     pending_voice: Vec<VoiceCmd>,
     pending_planner: Vec<PlannerCmd>,
     pending_log: Vec<LogEvent>,
+    /// `commit{req_id, route_key}` Rust emitted and `dc_route_commit` has not settled yet
+    /// (provisional req_id check, proposed to the team). Cleared when a route is loaded:
+    /// every one of them was issued against the route that was current until then.
+    issued_commits: Vec<(String, RouteKey)>,
 }
 
 impl Session {
@@ -242,6 +246,7 @@ impl Session {
             pending_voice: Vec::new(),
             pending_planner: Vec::new(),
             pending_log: Vec::new(),
+            issued_commits: Vec::new(),
         }
     }
 
@@ -336,6 +341,19 @@ impl Session {
         self.last_fix_at = None;
         self.reset_avoid();
         self.undo = UndoState::None;
+        self.issued_commits.clear();
+    }
+
+    /// Test hook: records `commit{req_id, route_key}` as if a `dc_tick` had emitted it, so a
+    /// test can replace the current route through `route_commit` without driving a search.
+    #[doc(hidden)]
+    pub fn issue_commit_for_test(&mut self, req_id: &str, route_key: RouteKey) {
+        self.issued_commits.push((req_id.to_owned(), route_key));
+    }
+
+    /// `commit` req_ids Rust emitted that no `dc_route_commit` has settled yet.
+    pub fn issued_commits(&self) -> impl Iterator<Item = &str> {
+        self.issued_commits.iter().map(|(r, _)| r.as_str())
     }
 
     /// The avoid chip state (04 §4.3).
@@ -366,18 +384,48 @@ impl Session {
     /// If the current route is no longer that one (replaced after the commit was issued,
     /// or none), the late route is refused with `E_STALE` and nothing is replaced, so it
     /// never reaches the horizon or voice_cmds.
+    /// Only the `route_key` half of the guard (see [`Self::check_route_guard`] for the
+    /// `req_id` half).
     pub fn check_route_commit(&self, route_key: &RouteKey) -> Result<(), CoreError> {
-        self.check_route_guard(Some(route_key))
+        self.check_route_key(Some(route_key))
     }
 
-    /// Same guard with `null` allowed: `None` passes only when no route is committed yet.
-    pub fn check_route_guard(&self, route_key: Option<&RouteKey>) -> Result<(), CoreError> {
+    fn check_route_key(&self, route_key: Option<&RouteKey>) -> Result<(), CoreError> {
         if self.current_route_key.as_ref() == route_key {
             Ok(())
         } else {
             Err(CoreError::new(
                 ErrorCode::Stale,
                 "route_key no longer matches the current route",
+            ))
+        }
+    }
+
+    /// The full `dc_route_commit` guard: `expected_route_key` equals the current route
+    /// (`None` only when no route is committed yet), and while a route is current `req_id`
+    /// names a `commit{req_id, route_key}` Rust issued with that same `route_key` and no
+    /// route was loaded since (provisional, proposed to the team). The first route may come
+    /// with any `req_id` or `null`. `E_STALE` otherwise.
+    pub fn check_route_guard(
+        &self,
+        req_id: Option<&str>,
+        route_key: Option<&RouteKey>,
+    ) -> Result<(), CoreError> {
+        self.check_route_key(route_key)?;
+        if self.current_route_key.is_none() {
+            return Ok(());
+        }
+        let issued = req_id.is_some_and(|id| {
+            self.issued_commits
+                .iter()
+                .any(|(r, k)| r == id && Some(k) == route_key)
+        });
+        if issued {
+            Ok(())
+        } else {
+            Err(CoreError::new(
+                ErrorCode::Stale,
+                "req_id does not name a commit Rust issued for the current route",
             ))
         }
     }
@@ -402,7 +450,7 @@ impl Session {
         &mut self,
         req: &RouteCommitRequest,
     ) -> Result<RouteCommitResult, CoreError> {
-        self.check_route_guard(req.expected_route_key.as_ref())?;
+        self.check_route_guard(req.req_id.as_deref(), req.expected_route_key.as_ref())?;
         let bundle_key = &req.bundle.route_key;
         if bundle_key.route_revision.0 != 0 {
             return Err(CoreError::new(
@@ -461,7 +509,7 @@ impl Session {
             segments: loaded.segs.len() as u32,
             maneuvers: loaded.maneuvers.len() as u32,
         };
-        let undo = self.undo_window_for(req.expected_route_key.as_ref(), &loaded);
+        let undo = self.undo_window_for(req.req_id.as_deref(), &loaded);
         let now = self.last_now_mono_ms.unwrap_or(0);
         let mut fx = Effects::default();
         self.planner
@@ -475,23 +523,23 @@ impl Session {
         self.last_fix_at = None;
         self.reset_avoid();
         self.undo = undo;
+        self.issued_commits.clear();
         Ok(result)
     }
 
     /// The undo state after loading `loaded` (03 §3.1, team decision 2026-11-26): when this
-    /// commit loads the consented avoid route (guard = the route the avoid search started
-    /// on), the divergence point is computed once, here, from the old route and the new one
-    /// and kept for "戻して". Any other commit (including the undo itself) ends the window.
-    /// TODO(abi-v1): `dc_route_commit` carries no req_id, so another commit with the same
-    /// guard arriving first (a reroute) would be taken for the avoid route.
-    fn undo_window_for(&self, expected: Option<&RouteKey>, loaded: &LoadedRoute) -> UndoState {
+    /// commit loads the consented avoid route (its `req_id` is the consent commit's, so a
+    /// reroute committed against the same guard is never taken for it), the divergence
+    /// point is computed once, here, from the old route and the new one and kept for
+    /// "戻して". Any other commit (including the undo itself) ends the window.
+    fn undo_window_for(&self, req_id: Option<&str>, loaded: &LoadedRoute) -> UndoState {
         let UndoState::Consented(c) = &self.undo else {
             return UndoState::None;
         };
-        let (Some(old), Some(exp)) = (self.route.as_ref(), expected) else {
+        let Some(old) = self.route.as_ref() else {
             return UndoState::None;
         };
-        if *exp != c.from_route_key {
+        if req_id != Some(c.req_id.as_str()) {
             return UndoState::None;
         }
         UndoState::Window(UndoWindow {
@@ -829,6 +877,7 @@ impl Session {
         });
         log.push(log_req(at, "avoid_consent_commit", req_id, &offer.offer_id));
         self.undo = UndoState::Consented(Consent {
+            req_id: req_id.clone(),
             offer_id: offer.offer_id.clone(),
             undo_req_id,
             from_route_key: target.route_key.clone(),
@@ -1082,6 +1131,15 @@ impl Session {
         let voice_cmds = std::mem::take(&mut self.pending_voice);
         let mut planner_cmds = std::mem::take(&mut self.pending_planner);
         planner_cmds.extend(fx.planner_cmds);
+        for c in &planner_cmds {
+            if let PlannerCmd::Commit {
+                req_id, route_key, ..
+            } = c
+            {
+                self.issued_commits
+                    .push((req_id.clone(), route_key.clone()));
+            }
+        }
         let next_wake_mono_ms = [
             self.planner.next_wake(),
             self.avoid.target().map(|t| t.deadline_mono_ms),
