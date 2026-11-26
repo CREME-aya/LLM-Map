@@ -681,6 +681,74 @@ fn consent_before_the_deadline_commits() {
     assert_eq!(r.route_key.route_revision.0, k.route_revision.0 + 1);
 }
 
+fn asr(at: u64, text_class: &str, dict_norm: Option<&str>) -> Value {
+    let mut v = json!({"at_mono_ms": at, "kind": "asr_result", "utterance_id": "u1",
+                       "text_class": text_class});
+    if let Some(n) = dict_norm {
+        v["dict_norm"] = n.into();
+    }
+    v
+}
+
+/// The dictionary "はい" (`asr_result{text_class: dict, dict_norm: "はい"}`, Rust's match;
+/// ADR-0007) consents to the offer on screen like the tap: `commit{r1, route_key,
+/// undo-r1}`. A natural-language "はい", another dictionary word, no offer on screen or a
+/// past deadline change nothing.
+#[test]
+fn dictionary_yes_consents_to_the_offer_on_screen() {
+    // no offer yet (search running): nothing
+    let (mut s, _, _) = started(config());
+    let o = tick(&mut s, 1_200, None, vec![asr(1_150, "dict", Some("はい"))]);
+    assert!(commits(&o).is_empty());
+    assert!(matches!(s.avoid_state(), AvoidState::Searching { .. }));
+
+    let (mut s, b, _) = offered();
+    let k = key(&s);
+    for ev in [
+        asr(1_650, "natural", Some("はい")),
+        asr(1_660, "natural", None),
+        asr(1_670, "dict", Some("いいえ")),
+        asr(1_680, "dict", None),
+    ] {
+        let o = tick(&mut s, 1_700, None, vec![ev.clone()]);
+        assert!(commits(&o).is_empty(), "{ev}");
+        assert!(s.avoid_state().offer().is_some(), "{ev}");
+    }
+    let o = tick(
+        &mut s,
+        1_800,
+        Some(fix_xy(&b, 1_800, 11_200, 0)),
+        vec![asr(1_790, "dict", Some("はい"))],
+    );
+    assert_eq!(
+        o.planner_cmds,
+        vec![PlannerCmd::Commit {
+            req_id: "r1".into(),
+            route_key: k.clone(),
+            undo_req_id: Some("undo-r1".into()),
+        }]
+    );
+    assert!(o.log.iter().any(|l| l.what == "avoid_consent_commit"
+        && l.detail.as_deref() == Some("avoid-r1 source=dict_yes")));
+    assert_eq!(*s.avoid_state(), AvoidState::Idle);
+    assert!(matches!(
+        s.undo_state(),
+        drive_core::avoid::UndoState::Consented(_)
+    ));
+    // a second "はい": no offer on screen any more
+    let o = tick(&mut s, 1_900, None, vec![asr(1_850, "dict", Some("はい"))]);
+    assert!(commits(&o).is_empty());
+
+    // after the deadline: refused
+    let (mut s, _, offer) = offered();
+    let d = offer.decision_deadline_monotonic_ms;
+    let o = tick(&mut s, d - 1, None, vec![asr(d, "dict", Some("はい"))]);
+    assert!(commits(&o).is_empty());
+    assert!(o.log.iter().any(
+        |l| l.what == "avoid_consent_refused" && l.detail.as_deref() == Some("deadline_passed")
+    ));
+}
+
 /// Gate 4 / 7 "表示後に締切超過" (07 §2.5): at the deadline the chip is removed with
 /// `dismiss{offer_id, expired}` and a later tap changes nothing.
 #[test]

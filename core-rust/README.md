@@ -47,7 +47,7 @@ route): Kotlin calls `dc_route_commit` with that search's route body. `route_key
 route's key when the search started (not the new route's); `dc_route_commit` re-checks it and
 returns `E_STALE` if the route was replaced meanwhile. An avoid-chip search still running 1.5 s after its start gets `cancel` (04 §4.3; it keeps the slot until `search_finished`). An avoid-chip `ok` is not committed when
 it returns: it waits for `dc_avoid_offer_eval`, the `AvoidOffer` rides on its `HorizonEntry`,
-and only `user_tap{target_id: offer_id, action: avoid}` before the deadline (while tracking,
+and only `user_tap{target_id: offer_id, action: avoid}` or the dictionary "はい" (`asr_result{text_class: dict, dict_norm: "はい"}`, provisional dictionary, only while an offer is shown) before the deadline (while tracking,
 same route_key) issues `commit` (`drive_core::avoid`; look-ahead off by default,
 `avoid_chip_lookahead`, 04 §4.3 item 6). The deadline removes it with `dismiss{expired}`. "経路を確認中" for a search in
 progress is `horizon.status` (`off_route` / `rerouting`), not a per-result UiCmd.

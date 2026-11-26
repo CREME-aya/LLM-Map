@@ -16,7 +16,7 @@ use contracts::plan::{PlanCandidates, TripPlanSnapshot};
 use contracts::route::{RouteCommitRequest, RouteCommitResult};
 use contracts::tick::{
     DismissReason, DistanceClass, EventBody, Fix, LogEvent, PlannerCmd, SearchPriority, TapAction,
-    ThermalStatus, TickInput, TickOutput, UiCmd, VoiceCmd, VoicePriority,
+    TextClass, ThermalStatus, TickInput, TickOutput, UiCmd, VoiceCmd, VoicePriority,
 };
 use contracts::{ErrorCode, RouteKey};
 use serde::Deserialize;
@@ -784,6 +784,16 @@ impl Session {
                 EventBody::UserTap { target_id, action } => {
                     self.on_user_tap(now, at, &target_id, action, &mut fx, &mut extra_log);
                 }
+                EventBody::AsrResult {
+                    text_class: TextClass::Dict,
+                    dict_norm: Some(norm),
+                    ..
+                } if avoid::is_dict_yes(&norm) => {
+                    // Consent to the offer on screen only (no offer → nothing; 04 §4.3).
+                    if matches!(self.avoid, AvoidState::Offered { .. }) {
+                        self.consent(now, at, "dict_yes", &mut fx, &mut extra_log);
+                    }
+                }
                 EventBody::EngineReset {} => self.planner.on_engine_reset(at, &mut fx),
                 EventBody::Thermal { status } => {
                     let lvl = ThermalLevel::from(status);
@@ -792,7 +802,7 @@ impl Session {
                         self.thermal = lvl;
                     }
                 }
-                // TODO(drive-core): voice scheduler (tts_*), ASR/consent (asr_*, override_ready,
+                // TODO(drive-core): voice scheduler (tts_*), ASR (asr_* other than the dict "はい" consent, override_ready,
                 // user_tap for overrides / confirm screens), inference tier, audio focus,
                 // call state, low memory.
                 _ => {}
@@ -875,6 +885,41 @@ impl Session {
             }
             return;
         }
+        let AvoidState::Offered { offer, .. } = &self.avoid else {
+            return;
+        };
+        if offer.offer_id != target_id {
+            return;
+        }
+        if action != TapAction::Avoid {
+            let req_id = self.avoid_req_id().unwrap_or_default();
+            log.push(log_req(at, "avoid_consent_refused", &req_id, "action"));
+            return;
+        }
+        self.consent(now, at, "tap", fx, log);
+    }
+
+    fn avoid_req_id(&self) -> Option<String> {
+        match &self.avoid {
+            AvoidState::Searching { req_id, .. }
+            | AvoidState::Ready { req_id, .. }
+            | AvoidState::Offered { req_id, .. } => Some(req_id.clone()),
+            AvoidState::Idle => None,
+        }
+    }
+
+    /// Consent to the offer on screen at `at` (`user_tap{offer_id, avoid}` or the dictionary
+    /// "はい", ADR-0007: the only two confirming inputs): before the deadline, while
+    /// tracking, on the route the search started on → `commit{req_id, route_key,
+    /// undo_req_id}`. Otherwise refused (logged, nothing changes).
+    fn consent(
+        &mut self,
+        now: u64,
+        at: u64,
+        source: &str,
+        fx: &mut Effects,
+        log: &mut Vec<LogEvent>,
+    ) {
         let AvoidState::Offered {
             req_id,
             target,
@@ -883,12 +928,7 @@ impl Session {
         else {
             return;
         };
-        if offer.offer_id != target_id {
-            return;
-        }
-        let refused = if action != TapAction::Avoid {
-            Some("action")
-        } else if at >= target.deadline_mono_ms {
+        let refused = if at >= target.deadline_mono_ms {
             Some("deadline_passed")
         } else if self.horizon_status(now) != Some(HorizonStatus::Tracking) {
             Some("not_tracking")
@@ -907,7 +947,12 @@ impl Session {
             route_key: target.route_key.clone(),
             undo_req_id: Some(undo_req_id.clone()),
         });
-        log.push(log_req(at, "avoid_consent_commit", req_id, &offer.offer_id));
+        log.push(log_req(
+            at,
+            "avoid_consent_commit",
+            req_id,
+            &format!("{} source={source}", offer.offer_id),
+        ));
         self.undo = UndoState::Consented(Consent {
             req_id: req_id.clone(),
             offer_id: offer.offer_id.clone(),

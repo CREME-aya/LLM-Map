@@ -36,8 +36,11 @@
 //! Disabled by default: "停止遅延を実測するまでは、走行中の回避チップ先読みは無効（既定）"
 //! (04 §4.3 item 6, 03 §3.1); `SessionConfig::avoid_chip_lookahead` turns it on.
 //!
-//! TODO(04 §4.3): not built yet — consent by the dictionary "はい" (`asr_result.dict_norm`;
-//! the dictionary values are not specified), the voice preannouncement about 60 s before
+//! Consent also by the dictionary "はい" (`asr_result{text_class: dict, dict_norm}` in
+//! [`DICT_YES`], only while an offer is on screen; same checks as the tap).
+//!
+//! TODO(04 §4.3): not built yet — the dictionary word "回避" (values not specified), the
+//! voice preannouncement about 60 s before
 //! (max 5 per trip; no voice scheduler yet), skipping spots accepted in the pre-departure
 //! comparison (item 4; that state is not passed to Rust), `avoided.narrow_m` (the bundle has no narrow length: 0 for now),
 //! `profile_weights.max_detour_ratio` (03 §5) and the `dt=T` tight factor while driving.
@@ -286,6 +289,16 @@ pub fn avoided(m: &Maneuver) -> Avoided {
         unprotected_right: u8::from(right),
         narrow_m: 0,
     }
+}
+
+/// Dictionary "yes" words that consent to the offer on screen (`asr_result{text_class:
+/// dict, dict_norm}`; Rust's dictionary match, ADR-0007 / 05 §3.2). TODO(05 §3.2): the
+/// dictionary values are not specified; provisional: "はい" only ("回避" of 04 §4.3 item 4
+/// is not accepted yet).
+pub const DICT_YES: &[&str] = &["はい"];
+
+pub fn is_dict_yes(dict_norm: &str) -> bool {
+    DICT_YES.contains(&dict_norm)
 }
 
 /// Provisional template id of the chip text (Kotlin renders it; TODO(04 §2): not named).

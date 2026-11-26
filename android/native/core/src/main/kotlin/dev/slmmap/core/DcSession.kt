@@ -67,7 +67,8 @@ class DcSession private constructor(private var handle: Long) : Closeable {
      * base_facts with the alternative (the current route from the search-start position to the
      * destination; no new search) and pass base_facts_ref in its search_finished: without it
      * Rust makes no offer. The chip is shown only from the next tick's horizon;
-     * consent is user_tap{target_id: offer_id, action: avoid}, then Rust emits commit.
+     * consent is user_tap{target_id: offer_id, action: avoid} or the dictionary "はい"
+     * (asr_result{text_class: dict, dict_norm: "はい"}), then Rust emits commit.
      */
     fun avoidOfferEval(reqJson: ByteArray): ByteArray = call { DcNative.avoidOfferEval(it, reqJson) }
 

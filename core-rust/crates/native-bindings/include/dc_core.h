@@ -118,7 +118,8 @@ typedef struct dc_session dc_session;
           *   cancelled / stuck, route_key current, horizon.status not uncertain / finished); Kotlin calls
           *   dc_route_commit with that search's route body (never for plan candidates). For an
           *   avoid_chip search only after consent: user_tap{target_id: offer_id, action: avoid}
-          *   before the offer's deadline, while tracking, route_key unchanged (04 §4.3, 03 §3.1).
+          *   or asr_result{text_class: dict, dict_norm: "はい"} (Rust's dictionary, provisional
+          *   values; only while an offer is shown) before the offer's deadline, while tracking, route_key unchanged (04 §4.3, 03 §3.1).
           *   That consent commit carries undo_req_id ("undo-<req_id>", provisional): keep the
           *   route body current until then for 5 s under it. "戻して" (user_tap{offer_id, undo}
           *   or CXL via dc_validate_override → {result: undone, req_id}) within 5 s and before
