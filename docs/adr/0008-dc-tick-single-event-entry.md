@@ -31,7 +31,8 @@ Event = { at_mono_ms } & (
   | low_memory | inference_down{reason} | inference_up{tier}
   | audio_focus_lost | call_state{active}
   | search_finished{req_id, route_key, graph_version, outcome, facts_ref?, engine_ms}
-  | engine_reset )
+  | engine_reset
+  | history_consent{on: bool} )   // 歴史解説の同意。既定 OFF（05 §6.2）
 TickOutput = { horizon?, voice_cmds, ui_cmds, planner_cmds, next_wake_mono_ms: u64 | null, log: [LogEvent] }
 ```
 
@@ -42,7 +43,7 @@ TickOutput = { horizon?, voice_cmds, ui_cmds, planner_cmds, next_wake_mono_ms: u
    - `horizon` は `frame_seq` が変わったときだけ返す（[04 §2](../specs/04-maneuver-horizon-and-hmi.md)）。
    - `planner_cmds: start{req_id, priority, distance_class, route_key, graph_version} | cancel{req_id} | commit{req_id, route_key, undo_req_id?} | cancel_commit{req_id} | evaluate_offer{req_id, facts_ref, base_facts_ref} | rank{plan_request_id, facts_refs, reason: all_done | budget_expired}` は Rust が出し、Kotlin が実行する。`commit` は逸脱再探索の結果を確定する指示で、Kotlin が `dc_route_commit` を呼ぶ（回避チップの結果には、利用者が同意するまで出さない）。`rank` を受けた Kotlin が `dc_rank` を呼ぶ（Rust は `CandidateFacts` を持たないため）。`search_finished.facts_ref` は採点前の `CandidateFacts` への参照（意味の詳細は [03 §3.1](../specs/03-routing-and-two-layer-control.md)）。
    - `voice_cmds`: `speak{token, priority: p0|p1|p2|p3, template_id, params}` | `stop{token}`（判別タグ `voice`）。文面は持たず、Kotlin が画面と同じテンプレートで組み立てる（ADR-0007）。`stop` の後、Kotlin は `onStop` を待たずに次の P1 を出してよい（[05 §5](../specs/05-inference-tier-and-audio.md)）。
-   - `ui_cmds`（判別タグ `ui`）: `show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}` | `dismiss{target_id, reason: expired|cancelled|route_changed|superseded}`。`superseded` は新しい提案に差し替わったときで、承認は引き継がない。3 手先カードと回避チップ（`HorizonEntry.avoid_offer`）は `horizon` だけで伝え、`ui_cmds` には重ねて出さない（単一ソース、[04 §1](../specs/04-maneuver-horizon-and-hmi.md)）。「経路を確認中」も `ui_cmds` では出さず `horizon.status` で表す（旧 `show_checking_route` は廃止）。回避チップは **表示は `horizon` だけで行い、取り下げ（締切切れ・経路変更）だけは `dismiss` で知らせる**（Kotlin が画面と音声の後始末をするため）。
+   - `ui_cmds`（判別タグ `ui`）: `save_for_later{poi_id, reason: interrupted|bmk}`（「あとで見る」一覧への保存。05 §6.2） | `show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}` | `dismiss{target_id, reason: expired|cancelled|route_changed|superseded}`。`superseded` は新しい提案に差し替わったときで、承認は引き継がない。3 手先カードと回避チップ（`HorizonEntry.avoid_offer`）は `horizon` だけで伝え、`ui_cmds` には重ねて出さない（単一ソース、[04 §1](../specs/04-maneuver-horizon-and-hmi.md)）。「経路を確認中」も `ui_cmds` では出さず `horizon.status` で表す（旧 `show_checking_route` は廃止）。回避チップは **表示は `horizon` だけで行い、取り下げ（締切切れ・経路変更）だけは `dismiss` で知らせる**（Kotlin が画面と音声の後始末をするため）。
    - `next_wake_mono_ms` は、**新しい入力がなくても出力が変わり得る最も早い単調時刻**（探索の監視期限を含む）。Kotlin はそれまでに `dc_tick` を呼ぶ（早めに呼ぶのは可）。待つものがなければ **null** で、その場合は Fix が届くたびの tick だけでよい。
 4. **状態は持つが、IO・スレッド・時計は持たない**: Rust はセッション（`dc_session_new` / `dc_session_free`）の中に状態を持つ。IO・スレッド・時計は持たない。
 5. **単調時刻の規約**
