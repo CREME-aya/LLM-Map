@@ -116,4 +116,11 @@ pub enum AvoidDeclineReason {
     NotLegalOrComplete,
     /// The extra time exceeds the detour cap (03 §3.2, base_eta = remaining ETA).
     OverDetourCap,
+    /// 04 §4.3 (a): the target's `(edge_in, edge_out)` is among `alt_facts.junctions`.
+    TargetNotAvoided,
+    /// 04 §4.3 (a) cannot be checked: the target's edge pair is unknown on the current route.
+    TargetEdgesUnknown,
+    /// 04 §4.3 (b): against `base_facts`, the alternative does not have fewer avoid targets,
+    /// or its `narrow_m` is longer.
+    NotFewerHazards,
 }

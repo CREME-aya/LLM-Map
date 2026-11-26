@@ -417,6 +417,133 @@ fn ok_without_both_refs_makes_no_offer() {
     }
 }
 
+fn junction(edge_in: &str, edge_out: &str) -> contracts::facts::FactJunction {
+    serde_json::from_value(json!({
+        "ref": "j", "edge_in": edge_in, "edge_out": edge_out, "kind": "right_turn",
+        "evidence": {"kind": "inferred", "value": "across_oncoming", "rule_id": "r1",
+                     "source_refs": []}
+    }))
+    .unwrap()
+}
+
+/// 04 §4.3 item 2: the alternative must (a) not pass the target's `(edge_in, edge_out)`
+/// (here 1006 → 1007, the right turn at 2.5 km mid-edge 1006) and (b) against `base_facts`
+/// have fewer avoid targets and a `narrow_m` not longer. Otherwise no offer.
+#[test]
+fn alternative_must_avoid_the_target_and_not_add_hazards() {
+    let ready = || {
+        let (mut s, _, _) = started(config());
+        let k = key(&s);
+        tick(&mut s, 1_500, None, vec![finished(1_400, "r1", &k, "ok")]);
+        assert_eq!(
+            s.avoid_state().target().unwrap().edge_pair,
+            Some((1006, 1007))
+        );
+        let base = s.avoid_state().target().unwrap().base_eta_ms;
+        (s, k.graph_version, base)
+    };
+    let run = |alt: CandidateFacts, base_f: CandidateFacts| {
+        let (mut s, _, _) = ready();
+        let r = s.avoid_offer_eval(&AvoidOfferEvalRequest {
+            req_id: "r1".into(),
+            now_mono_ms: 1_600,
+            alt_facts: alt,
+            base_facts: base_f,
+        });
+        match r {
+            AvoidOfferEvalResult::Offered { .. } => {
+                assert!(s.avoid_state().offer().is_some());
+                None
+            }
+            AvoidOfferEvalResult::Declined { reason } => {
+                assert_eq!(*s.avoid_state(), AvoidState::Idle, "dropped");
+                Some(reason)
+            }
+        }
+    };
+    let (_, gv, base) = ready();
+    let alt = |f: &dyn Fn(&mut CandidateFacts)| {
+        let mut a = facts(&gv, base + 30_000);
+        f(&mut a);
+        a
+    };
+    let b = |f: &dyn Fn(&mut CandidateFacts)| {
+        let mut x = base_facts(&gv, base);
+        f(&mut x);
+        x
+    };
+    // (a) the pair is in alt.junctions → declined; same edge_in with another edge_out is fine
+    assert_eq!(
+        run(
+            alt(&|a| a.junctions = vec![junction("1006", "1007")]),
+            b(&|_| {})
+        ),
+        Some(AvoidDeclineReason::TargetNotAvoided)
+    );
+    assert_eq!(
+        run(
+            alt(&|a| a.junctions = vec![junction("1006", "2001")]),
+            b(&|_| {})
+        ),
+        None
+    );
+    assert_eq!(
+        run(
+            alt(&|a| a.junctions = vec![junction("1007", "1006")]),
+            b(&|_| {})
+        ),
+        None
+    );
+    // (b) fewer targets (the 3 right-turn classes): equal → declined, whatever the class
+    assert_eq!(
+        run(alt(&|a| a.counts.right_signal_unknown = 1), b(&|_| {})),
+        Some(AvoidDeclineReason::NotFewerHazards)
+    );
+    assert_eq!(
+        run(
+            alt(&|a| a.counts.right_signal_unknown_protection = 1),
+            b(&|x| x.counts.right_unprotected = 2)
+        ),
+        None
+    );
+    // right_protected / merges are not targets
+    assert_eq!(
+        run(
+            alt(&|a| {
+                a.counts.right_protected = 5;
+                a.counts.merges = 5
+            }),
+            b(&|_| {})
+        ),
+        None
+    );
+    // (b) narrow_m (confirmed + inferred) not longer: equal is fine, longer is declined
+    assert_eq!(
+        run(
+            alt(&|a| a.narrow_m.inferred = 40),
+            b(&|x| x.narrow_m.confirmed = 40)
+        ),
+        None
+    );
+    assert_eq!(
+        run(
+            alt(&|a| a.narrow_m.inferred = 41),
+            b(&|x| x.narrow_m.confirmed = 40)
+        ),
+        Some(AvoidDeclineReason::NotFewerHazards)
+    );
+    // base_facts of another graph version
+    assert_eq!(
+        run(alt(&|_| {}), b(&|x| x.graph_version = "other".into())),
+        Some(AvoidDeclineReason::GraphMismatch)
+    );
+    // (a) and (b) pass but the detour cap does not: the cap still declines
+    assert_eq!(
+        run(alt(&|a| a.eta_ms = base + 180_001), b(&|_| {})),
+        Some(AvoidDeclineReason::OverDetourCap)
+    );
+}
+
 /// Declines (03 §3.2 / 03 §3.1): detour cap (base = remaining ETA at the start, short:
 /// min(180 s, base × 0.35)), graph version, illegal / incomplete, deadline, not tracking.
 #[test]

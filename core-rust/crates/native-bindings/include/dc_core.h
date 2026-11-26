@@ -140,7 +140,11 @@ typedef struct dc_session dc_session;
           * → {result: "offered", avoid_offer: AvoidOffer} (shown on its HorizonEntry from the
           *   next dc_tick; dismiss{expired} at the deadline) | {result: "declined", reason:
           *   no_pending_result|not_tracking|deadline_passed|graph_mismatch|not_legal_or_complete
-          *   |over_detour_cap}. Result shape provisional (not in docs). */
+          *   |target_edges_unknown|target_not_avoided|not_fewer_hazards|over_detour_cap}.
+          *   04 §4.3 item 2: (a) the target's (edge_in, edge_out) must not be in
+          *   alt_facts.junctions; (b) against base_facts, fewer avoid targets (right_unprotected
+          *   + right_signal_unknown_protection + right_signal_unknown) and narrow_m
+          *   (confirmed + inferred) not longer. Result shape provisional (not in docs). */
 /* 12 */ dc_out   dc_exchange_validate(dc_in req_json);                        /* {kind, payload} (TODO: E_UNIMPLEMENTED) */
 
 #ifdef __cplusplus

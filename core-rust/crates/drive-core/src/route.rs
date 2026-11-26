@@ -347,6 +347,19 @@ impl LoadedRoute {
             .collect()
     }
 
+    /// The `(edge_in, edge_out)` pair of a maneuver at `along` (04 §4.3 (a), the pair
+    /// `CandidateFacts.junctions` lists): `edge_in` is the edge the anchor lies on, ending at
+    /// or after it (`along_start < along <= along_end`; the edge arriving at a boundary),
+    /// `edge_out` the next one. `None` at the route start or on the last edge.
+    pub fn edge_pair_at(&self, along: u32) -> Option<(u64, u64)> {
+        let i = self
+            .edges
+            .iter()
+            .position(|e| e.along_start < along && along <= e.along_end)?;
+        let next = self.edges.get(i + 1)?;
+        Some((self.edges[i].edge_id, next.edge_id))
+    }
+
     pub(crate) fn motorway_approach(&self, along: u32) -> bool {
         let edge = self.edges.partition_point(|e| e.along_end < along);
         self.edges

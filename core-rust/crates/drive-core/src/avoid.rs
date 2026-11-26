@@ -35,12 +35,13 @@
 //! (04 §4.3 item 6, 03 §3.1); `SessionConfig::avoid_chip_lookahead` turns it on.
 //!
 //! TODO(04 §4.3): not built yet — consent by the dictionary "はい" (`asr_result.dict_norm`;
-//! the dictionary values are not specified), the voice preannouncement about 60 s before (max 5 per trip; no
-//! voice scheduler yet), skipping spots accepted in the pre-departure comparison (item 4;
-//! that state is not passed to Rust), cancelling a search that outlives the 1.5 s budget,
-//! checking that the alternative really avoids the target (the bundle has no edge ids per
-//! maneuver), `avoided.narrow_m` (the bundle has no narrow length: 0 for now),
+//! the dictionary values are not specified), the voice preannouncement about 60 s before
+//! (max 5 per trip; no voice scheduler yet), skipping spots accepted in the pre-departure
+//! comparison (item 4; that state is not passed to Rust), cancelling a search that outlives
+//! the 1.5 s budget, `avoided.narrow_m` (the bundle has no narrow length: 0 for now),
 //! `profile_weights.max_detour_ratio` (03 §5) and the `dt=T` tight factor while driving.
+//! (a) only sees `alt_facts.junctions`: a pair the alternative passes but C++ does not list
+//! there is not caught (docs say "the alternative's edge sequence"; `CandidateFacts` has none).
 #![deny(clippy::float_arithmetic, clippy::cast_precision_loss)]
 
 use crate::junction::{classify, JunctionClass};
@@ -145,6 +146,9 @@ pub struct AvoidTarget {
     /// Matched position on the current route when the search started (`along_route_cm`):
     /// the origin of the divergence search (03 §3.1 "探索開始時の位置").
     pub start_progress_cm: u32,
+    /// `(edge_in, edge_out)` of the target maneuver on the current route
+    /// ([`crate::route::LoadedRoute::edge_pair_at`]); `None` = unknown (no offer).
+    pub edge_pair: Option<(u64, u64)>,
 }
 
 /// Consent given (`commit` issued), the avoid route not loaded yet.
@@ -283,21 +287,64 @@ pub fn avoided(m: &Maneuver) -> Avoided {
 /// Provisional template id of the chip text (Kotlin renders it; TODO(04 §2): not named).
 pub const AVOID_TEMPLATE_ID: &str = "avoid_chip";
 
+/// Number of avoid-chip targets among the right turns of a `CandidateFacts` (04 §2.2 /
+/// §4.3: `right_unprotected`, `right_signal_unknown_protection`, `right_signal_unknown`;
+/// narrow roads are compared through `narrow_m`).
+pub fn target_count(f: &CandidateFacts) -> u64 {
+    f.counts
+        .right_unprotected
+        .saturating_add(f.counts.right_signal_unknown_protection)
+        .saturating_add(f.counts.right_signal_unknown)
+}
+
+/// Narrow length of a `CandidateFacts` (m): confirmed + inferred.
+pub fn narrow_total_m(f: &CandidateFacts) -> u64 {
+    f.narrow_m.confirmed.saturating_add(f.narrow_m.inferred)
+}
+
+/// 04 §4.3 item 2: is the alternative really better? (a) the target's `(edge_in, edge_out)`
+/// is not among `alt.junctions` (unknown pair → cannot be confirmed); (b) against
+/// `base` (the current route from the search start, also built by C++: same yardstick),
+/// fewer avoid targets and `narrow_m` not longer.
+pub fn check_alternative(
+    target: &AvoidTarget,
+    alt: &CandidateFacts,
+    base: &CandidateFacts,
+) -> Result<(), AvoidDeclineReason> {
+    let Some((edge_in, edge_out)) = target.edge_pair else {
+        return Err(AvoidDeclineReason::TargetEdgesUnknown);
+    };
+    if alt
+        .junctions
+        .iter()
+        .any(|j| j.edge_in.0 == edge_in && j.edge_out.0 == edge_out)
+    {
+        return Err(AvoidDeclineReason::TargetNotAvoided);
+    }
+    if target_count(alt) >= target_count(base) || narrow_total_m(alt) > narrow_total_m(base) {
+        return Err(AvoidDeclineReason::NotFewerHazards);
+    }
+    Ok(())
+}
+
 /// `dc_avoid_offer_eval` decision for a waiting result (`now` < deadline and tracking are
-/// checked by the caller first).
+/// checked by the caller first). Order: graph version (both), legal / complete,
+/// [`check_alternative`] (a) then (b), detour cap.
 pub fn build_offer(
     req_id: &str,
     target: &AvoidTarget,
     graph_version: &str,
     facts: &CandidateFacts,
+    base: &CandidateFacts,
     policy: &DetourPolicy,
 ) -> Result<AvoidOffer, AvoidDeclineReason> {
-    if facts.graph_version != graph_version {
+    if facts.graph_version != graph_version || base.graph_version != graph_version {
         return Err(AvoidDeclineReason::GraphMismatch);
     }
     if !facts.legal || !facts.complete {
         return Err(AvoidDeclineReason::NotLegalOrComplete);
     }
+    check_alternative(target, facts, base)?;
     if !policy.within(target.base_eta_ms, facts.eta_ms, false) {
         return Err(AvoidDeclineReason::OverDetourCap);
     }
@@ -322,6 +369,47 @@ pub fn build_offer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_edge_pair_cannot_be_confirmed() {
+        let f: CandidateFacts = serde_json::from_str(include_str!(
+            "../../../../schema/fixtures/valid/candidate-facts.min.json"
+        ))
+        .unwrap();
+        let mut base = f.clone();
+        base.counts.right_unprotected = f.counts.right_unprotected + 1;
+        base.narrow_m.confirmed = f.narrow_m.confirmed + f.narrow_m.inferred;
+        let mut alt = f;
+        alt.junctions.clear();
+        let key = RouteKey {
+            trip_id: "t".into(),
+            trip_revision: contracts::U64Str(1),
+            route_revision: contracts::U64Str(1),
+            graph_version: "g".into(),
+        };
+        let mut t = AvoidTarget {
+            maneuver_id: ManeuverId {
+                route_key: key.clone(),
+                leg_index: 0,
+                ordinal: 0,
+            },
+            route_key: key,
+            deadline_mono_ms: 0,
+            base_eta_ms: 0,
+            avoided: Avoided {
+                unprotected_right: 1,
+                narrow_m: 0,
+            },
+            start_progress_cm: 0,
+            edge_pair: None,
+        };
+        assert_eq!(
+            check_alternative(&t, &alt, &base),
+            Err(AvoidDeclineReason::TargetEdgesUnknown)
+        );
+        t.edge_pair = Some((1, 2));
+        assert_eq!(check_alternative(&t, &alt, &base), Ok(()));
+    }
 
     #[test]
     fn detour_cap_formula() {

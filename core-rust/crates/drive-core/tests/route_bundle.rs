@@ -569,3 +569,19 @@ fn fixed_point_error_at_20km_chunk() {
     assert_eq!(round_q16(1 << 15), 1);
     assert_eq!(round_q16(-(1 << 15)), 0);
 }
+
+/// `edge_pair_at` (04 §4.3 (a)): the edge the anchor lies on (arriving at a boundary) and the
+/// next one; none at the route start or on the last edge.
+#[test]
+fn edge_pair_at_boundaries() {
+    let mut s = Session::new(SessionConfig::default());
+    commit(&mut s, None, min_bundle()).unwrap();
+    let r = s.route().unwrap();
+    let e = r.edge_spans();
+    assert!(e.len() >= 2);
+    assert_eq!(r.edge_pair_at(0), None);
+    assert_eq!(r.edge_pair_at(1), Some((e[0].0, e[1].0)));
+    assert_eq!(r.edge_pair_at(e[0].2), Some((e[0].0, e[1].0)));
+    assert_eq!(r.edge_pair_at(e[0].2 + 1), e.get(2).map(|n| (e[1].0, n.0)));
+    assert_eq!(r.edge_pair_at(e[e.len() - 1].2), None);
+}

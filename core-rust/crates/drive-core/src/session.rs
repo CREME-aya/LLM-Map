@@ -992,6 +992,7 @@ impl Session {
                 base_eta_ms: u64::from(route.remaining_ms(progress)),
                 avoided: avoid::avoided(m),
                 start_progress_cm: progress,
+                edge_pair: route.edge_pair_at(m.anchor.along_route_cm),
             });
             break;
         }
@@ -1044,6 +1045,7 @@ impl Session {
             &target,
             &target.route_key.graph_version,
             &req.alt_facts,
+            &req.base_facts,
             &self.detour,
         ) {
             Ok(offer) => {
