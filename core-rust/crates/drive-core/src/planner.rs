@@ -914,3 +914,61 @@ fn log(fx: &mut Effects, at: u64, what: &str, req_id: Option<&str>, detail: Opti
         detail,
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contracts::U64Str;
+
+    fn rk() -> RouteKey {
+        RouteKey {
+            trip_id: "t1".into(),
+            trip_revision: U64Str(3),
+            route_revision: U64Str(1),
+            graph_version: "g".into(),
+        }
+    }
+
+    /// A reroute ok returned while uncertain is held (04 §3).
+    fn planner_with_hold() -> SearchPlanner {
+        let mut p = SearchPlanner::new(SearchLimits::default());
+        let mut fx = Effects::default();
+        p.request(1_000, SearchPriority::Reroute, rk(), None, &mut fx);
+        p.on_search_finished(
+            2_000,
+            "r1",
+            &rk(),
+            SearchOutcome::Ok,
+            None,
+            None,
+            Some(&rk()),
+            CommitGate::Hold,
+            &mut fx,
+        );
+        assert_eq!(p.held().map(|h| h.req_id.as_str()), Some("r1"));
+        p
+    }
+
+    /// "戻して" drops a held result before going back (03 §3.1): `discarded_hold_<why>`,
+    /// once; it is never committed afterwards, and its expiry no longer wakes Kotlin.
+    #[test]
+    fn discard_held_drops_the_hold_once() {
+        let mut p = planner_with_hold();
+        assert_eq!(p.next_wake(), Some(2_000 + 10_000 + 1));
+        let mut fx = Effects::default();
+        p.discard_held(2_500, "undo", &mut fx);
+        assert!(p.held().is_none());
+        assert_eq!(fx.log.len(), 1);
+        assert_eq!(fx.log[0].what, "discarded_hold_undo");
+        assert_eq!(fx.log[0].req_id.as_deref(), Some("r1"));
+        assert_eq!(fx.log[0].at_mono_ms, 2_500);
+        assert_eq!(p.next_wake(), None);
+        // nothing held: no log
+        let mut fx = Effects::default();
+        p.discard_held(2_600, "undo", &mut fx);
+        assert!(fx.log.is_empty());
+        // tracking again: nothing is committed
+        p.release_held(3_000, CommitGate::Allowed, Some(&rk()), &mut fx);
+        assert!(fx.planner_cmds.is_empty());
+    }
+}

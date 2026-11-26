@@ -695,3 +695,55 @@ fn cxl_refusals_return_the_code_and_speak_once() {
     let o = tick(&mut c.s, CONSENT_AT + 5_100, None, vec![]);
     assert_eq!(undo_speaks(&o), 1);
 }
+
+// ---- after the undo (#22) ----------------------------------------------------------------
+
+/// Back on the original route after "戻して" (the held body, rev "0" → current + 1): the
+/// junction the user just went back to is not offered again (`avoid_tried` of the original
+/// route survives the undo; the same maneuvers by ordinal on the reloaded body).
+#[test]
+fn undone_route_does_not_offer_the_same_junction_again() {
+    let (mut c, ak) = on_avoid_route_at(90_000);
+    // the (synthetic) avoid route has the same right turn and started its own search r2:
+    // let it end so that only avoid_tried decides below
+    let fin = json!({
+        "at_mono_ms": 4_400, "kind": "search_finished", "req_id": "r2", "route_key": ak,
+        "graph_version": ak.graph_version, "outcome": "error", "engine_ms": 300
+    });
+    let o = tick(
+        &mut c.s,
+        4_500,
+        None,
+        vec![fin, tap(4_500, &c.offer.offer_id, "undo")],
+    );
+    assert!(c.s.planner().is_idle());
+    let (req_id, guard, _) = commits(&o).remove(0);
+    let mut held = c.orig.clone();
+    held.route_key.route_revision = U64Str(0);
+    c.s.route_commit(&RouteCommitRequest {
+        req_id: Some(req_id),
+        expected_route_key: Some(guard),
+        bundle: held,
+    })
+    .unwrap();
+    for (i, t) in [5_000u64, 5_500, 6_000].into_iter().enumerate() {
+        let o = tick(
+            &mut c.s,
+            t,
+            Some(fix_x(&c.orig, t, 95_000 + i as i64 * 1_000)),
+            vec![],
+        );
+        assert_eq!(c.s.horizon_status(t), Some(HorizonStatus::Tracking));
+        assert!(
+            !o.planner_cmds.iter().any(|c| matches!(
+                c,
+                PlannerCmd::Start {
+                    priority: SearchPriority::AvoidChip,
+                    ..
+                }
+            )),
+            "{t}: {:?}",
+            o.planner_cmds
+        );
+    }
+}

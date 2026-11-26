@@ -31,7 +31,9 @@
 //!    divergence unknown, position not `tracking` (e.g.
 //!    `uncertain`), or at / past the divergence point → `NO_EFFECT`; otherwise
 //!    `commit{req_id: undo_req_id, route_key: current}` and any held result is dropped.
-//!    A refusal also speaks [`UNDO_UNAVAILABLE_TEMPLATE_ID`] once.
+//!    A refusal also speaks [`UNDO_UNAVAILABLE_TEMPLATE_ID`] once. When the undo's route
+//!    (the original body) is loaded, the original route's tried maneuvers are restored
+//!    (#22): the junction just undone is not offered again on it.
 //!
 //! Disabled by default: "停止遅延を実測するまでは、走行中の回避チップ先読みは無効（既定）"
 //! (04 §4.3 item 6, 03 §3.1); `SessionConfig::avoid_chip_lookahead` turns it on.
@@ -178,6 +180,16 @@ pub struct UndoWindow {
     pub consent_at_mono_ms: u64,
     /// Divergence point on the avoid route (`along_route_cm`); `None` = unknown (no undo).
     pub divergence_cm: Option<u32>,
+    /// `avoid_tried` of the original route when the avoid route was loaded (#22): restored
+    /// when the undo brings that route back, so its junctions are not offered again.
+    pub tried_before: Vec<ManeuverId>,
+}
+
+/// The undo `commit` was issued; the original route body comes back with it (#22).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoReturn {
+    pub undo_req_id: String,
+    pub tried_before: Vec<ManeuverId>,
 }
 
 /// Where the consent stands for "戻して".

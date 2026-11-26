@@ -63,7 +63,7 @@ and its late `dc_route_commit` is `E_STALE`; a success, no phrase; CXL → `undo
 divergence, not `tracking` (`uncertain`), or at / past the
 divergence point → `NO_EFFECT`; else `commit{req_id: undo_req_id, route_key: current}` and the
 held result is dropped. Kotlin passes the held body with `route_revision` "0" (Rust: current
-+ 1; the revision it carried is `E_SCHEMA`). A refusal speaks `undo_unavailable` (P2, no params;
++ 1; the revision it carried is `E_SCHEMA`). Once that route is loaded, the maneuvers already tried on it stay tried (#22: the junction just undone is not offered again). A refusal speaks `undo_unavailable` (P2, no params;
 template id provisional) once.
 A committable `ok` that returns while `uncertain` is held (one at most; a newer one replaces it,
 `discarded_hold_replaced`) and its `commit` is issued when the status is back to `tracking` /

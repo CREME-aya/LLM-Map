@@ -2,7 +2,8 @@
 
 use crate::align::{AlignConfig, AlignStats, Aligner, FixResult, Mode};
 use crate::avoid::{
-    self, AvoidConfig, AvoidState, AvoidTarget, Consent, DetourPolicy, UndoState, UndoWindow,
+    self, AvoidConfig, AvoidState, AvoidTarget, Consent, DetourPolicy, UndoReturn, UndoState,
+    UndoWindow,
 };
 use crate::command_line::{self, Command, JpRef};
 use crate::horizon::{arrived, eta_range, EtaFactors, HorizonFrames};
@@ -221,6 +222,8 @@ pub struct Session {
     /// (provisional req_id check, proposed to the team). Cleared when a route is loaded:
     /// every one of them was issued against the route that was current until then.
     issued_commits: Vec<(String, RouteKey)>,
+    /// The undo `commit` issued, its route not loaded yet (#22).
+    undo_return: Option<UndoReturn>,
 }
 
 impl Session {
@@ -247,6 +250,7 @@ impl Session {
             pending_planner: Vec::new(),
             pending_log: Vec::new(),
             issued_commits: Vec::new(),
+            undo_return: None,
         }
     }
 
@@ -342,6 +346,7 @@ impl Session {
         self.reset_avoid();
         self.undo = UndoState::None;
         self.issued_commits.clear();
+        self.undo_return = None;
     }
 
     /// Test hook: records `commit{req_id, route_key}` as if a `dc_tick` had emitted it, so a
@@ -522,6 +527,23 @@ impl Session {
         self.frames.reset_route();
         self.last_fix_at = None;
         self.reset_avoid();
+        // #22: the undo brings the original route back (the same body, by ordinal): its
+        // junctions already tried stay tried, so the one just undone is not offered again.
+        if let Some(r) = self.undo_return.take() {
+            if req.req_id.as_deref() == Some(r.undo_req_id.as_str()) {
+                let key = &self.current_route_key;
+                self.avoid_tried = r
+                    .tried_before
+                    .into_iter()
+                    .map(|mut id| {
+                        if let Some(k) = key {
+                            id.route_key = k.clone();
+                        }
+                        id
+                    })
+                    .collect();
+            }
+        }
         self.undo = undo;
         self.issued_commits.clear();
         Ok(result)
@@ -552,6 +574,7 @@ impl Session {
                 &loaded.edge_spans(),
                 c.start_progress_cm,
             ),
+            tried_before: self.avoid_tried.clone(),
         })
     }
 
@@ -623,6 +646,10 @@ impl Session {
             undo_req_id: None,
         });
         log.push(log_req(at, "avoid_undo_commit", &req_id, &w.offer_id));
+        self.undo_return = Some(UndoReturn {
+            undo_req_id: req_id.clone(),
+            tried_before: w.tried_before.clone(),
+        });
         self.undo = UndoState::None;
         Ok(req_id)
     }
