@@ -3,116 +3,55 @@ name: CI
 on:
   push:
     branches:
-      - master
       - main
-      - 'CREME/**'
   pull_request:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  foundation-and-hygiene:
-    name: Foundation & Hygiene
+  verify:
+    name: Verify (Rust, Host Smoke, make verify)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Run repository hygiene & script tests
-        run: |
-          python3 scripts/lib/repo_checks.py check-case --root .
-          python3 scripts/lib/repo_checks.py check-json --root .
-          python3 scripts/lib/repo_checks.py check-md-links --root .
-          python3 scripts/lib/repo_checks.py check-secrets --root .
-          for sh_file in scripts/*.sh; do bash -n "$sh_file"; done
-          python3 -m unittest discover -s scripts/tests -v
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  rust-core:
-    name: Rust Core
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check core-rust presence
-        id: check
-        run: |
-          if [ -f core-rust/Cargo.toml ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
       - name: Setup Rust toolchain
-        if: steps.check.outputs.exists == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Format, Clippy, and Test
-        if: steps.check.outputs.exists == 'true'
-        working-directory: core-rust
-        run: |
-          cargo fmt --check
-          cargo clippy --all-targets --all-features -- -D warnings
-          cargo test
 
-  web:
-    name: Web Companion
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check web presence
-        id: check
-        run: |
-          if [ -f web/package.json ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Setup Node.js
-        if: steps.check.outputs.exists == 'true'
-        uses: actions/setup-node@v4
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: Install, Typecheck, and Test
-        if: steps.check.outputs.exists == 'true'
-        working-directory: web
-        run: |
-          npm ci
-          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.lint ? 0 : 1)"; then
-            npm run lint
-          fi
-          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.typecheck ? 0 : 1)"; then
-            npm run typecheck
-          fi
-          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)"; then
-            npm test
-          fi
+          workspaces: core-rust
 
-  pipeline-harness:
-    name: Pipeline & Harness Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Run pipeline tests when present
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Rust format, clippy, and workspace tests
         run: |
-          if [ -d pipeline ]; then
-            TEST_DIRS="$(find pipeline \( -name target -o -name __pycache__ -o -name .venv -o -name venv \) -prune -o -type f -name 'test_*.py' -print | while IFS= read -r f; do dirname "$f"; done | LC_ALL=C sort -u)"
-            if [ -n "$TEST_DIRS" ]; then
-              while IFS= read -r d; do
-                python3 -m unittest discover -s "$d" -p 'test_*.py' -v
-              done <<< "$TEST_DIRS"
-            else
-              echo "No pipeline/ Python tests yet; skipping."
-            fi
-            if [ -f pipeline/harness/gate4/validate_gate4_dataset.py ]; then
-              python3 pipeline/harness/gate4/validate_gate4_dataset.py
-            fi
-          else
-            echo "No pipeline/ directory yet; skipping."
-          fi
+          cd core-rust && cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace
+
+      - name: Host C ABI & JNI smoke tests
+        run: |
+          cc --version
+          javac -version
+          java -version
+          bash core-rust/scripts/host-smoke.sh
+
+      - name: Run repository verification (make verify)
+        run: make verify
