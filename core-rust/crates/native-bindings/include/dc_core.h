@@ -107,6 +107,8 @@ typedef struct dc_session dc_session;
           *                  | rank{plan_request_id, facts_refs[], reason: all_done|budget_expired}
           *                  | commit{req_id, route_key, undo_req_id?} | cancel_commit{req_id}
           *                  | evaluate_offer{req_id, facts_ref, base_facts_ref}],
+          *   cancel{req_id} also comes for an avoid_chip search still running 1.5 s after its
+          *   start (04 §4.3; the slot stays occupied until its search_finished).
           *   evaluate_offer: an avoid_chip ok (valid, tracking) with both refs -> call
           *   dc_avoid_offer_eval with the CandidateFacts behind them. Without both: no offer.
           *   "経路を確認中" is horizon.status off_route / rerouting (show_checking_route is abolished).

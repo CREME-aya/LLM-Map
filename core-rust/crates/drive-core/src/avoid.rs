@@ -7,7 +7,9 @@
 //! 2. Start condition: decision deadline = branch `earliest` − 20 s (fixed when the search
 //!    starts, from that tick's sample); the search starts only when `now + 1.5 s budget <=
 //!    deadline` and the search slot is free (nothing running or waiting), so it starts at
-//!    once with priority `avoid_chip`. The remaining ETA then is the `base_eta`.
+//!    once with priority `avoid_chip`. The remaining ETA then is the `base_eta`. A search
+//!    still running at start + budget gets `cancel{req_id}` (04 §4.3 item 1; it keeps the
+//!    slot until its `search_finished`, whose `ok` is then `discarded_late`).
 //! 3. `search_finished{ok}` (valid: not cancelled / stuck, same `route_key`, `tracking`)
 //!    is **not** committed: it waits for `dc_avoid_offer_eval`, which checks the deadline,
 //!    the candidate and the detour cap (`DetourPolicy`, the function `dc_rank` uses too)
@@ -37,8 +39,7 @@
 //! TODO(04 §4.3): not built yet — consent by the dictionary "はい" (`asr_result.dict_norm`;
 //! the dictionary values are not specified), the voice preannouncement about 60 s before
 //! (max 5 per trip; no voice scheduler yet), skipping spots accepted in the pre-departure
-//! comparison (item 4; that state is not passed to Rust), cancelling a search that outlives
-//! the 1.5 s budget, `avoided.narrow_m` (the bundle has no narrow length: 0 for now),
+//! comparison (item 4; that state is not passed to Rust), `avoided.narrow_m` (the bundle has no narrow length: 0 for now),
 //! `profile_weights.max_detour_ratio` (03 §5) and the `dt=T` tight factor while driving.
 //! (a) only sees `alt_facts.junctions`: a pair the alternative passes but C++ does not list
 //! there is not caught (docs say "the alternative's edge sequence"; `CandidateFacts` has none).
@@ -236,6 +237,9 @@ pub enum AvoidState {
     Searching {
         req_id: String,
         target: AvoidTarget,
+        /// Start + compute budget (1.5 s): at this instant the search gets `cancel` (it keeps
+        /// the slot until its `search_finished`). `None` once the cancel was sent.
+        budget_deadline_mono_ms: Option<u64>,
     },
     /// `ok` returned; waiting for `dc_avoid_offer_eval`.
     Ready {

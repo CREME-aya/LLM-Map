@@ -753,6 +753,36 @@ fn deviation_just_before_consent_changes_nothing() {
     assert_eq!(*s.avoid_state(), AvoidState::Idle);
 }
 
+/// 04 §4.3 item 1: a search still running 1.5 s after its start gets `cancel{r1}` once
+/// (Kotlin wakes for it: `next_wake_mono_ms`); it keeps the slot until its
+/// `search_finished`, whose `ok` is `discarded_late` and ends the attempt (no
+/// `evaluate_offer`, no offer, the same maneuver is not tried again).
+#[test]
+fn search_over_the_budget_is_cancelled_and_keeps_the_slot() {
+    let (mut s, b, _) = started(config());
+    let k = key(&s);
+    let o = tick(&mut s, 2_499, Some(fix_xy(&b, 2_499, 11_500, 0)), vec![]);
+    assert!(o.planner_cmds.is_empty());
+    assert!(o.next_wake_mono_ms.unwrap() <= 2_500);
+    let o = tick(&mut s, 2_500, None, vec![]);
+    assert_eq!(
+        o.planner_cmds,
+        vec![PlannerCmd::Cancel {
+            req_id: "r1".into()
+        }]
+    );
+    assert!(logged(&o, "avoid_budget_expired"));
+    assert!(matches!(s.avoid_state(), AvoidState::Searching { .. }));
+    let o = tick(&mut s, 2_600, Some(fix_xy(&b, 2_600, 11_600, 0)), vec![]);
+    assert!(o.planner_cmds.is_empty(), "one cancel, nothing starts");
+    assert!(!s.planner().is_idle(), "slot held until search_finished");
+    let o = tick(&mut s, 2_800, None, vec![finished(2_700, "r1", &k, "ok")]);
+    assert!(logged(&o, "discarded_late"));
+    assert!(o.planner_cmds.is_empty(), "{:?}", o.planner_cmds);
+    assert_eq!(*s.avoid_state(), AvoidState::Idle);
+    assert!(s.planner().is_idle());
+}
+
 // ---- Gate 7 (07 §2.4) --------------------------------------------------------------------
 
 /// Gate 7 common test data with the real trigger: t0 start{r1, avoid_chip} → t1 off-route
@@ -760,7 +790,11 @@ fn deviation_just_before_consent_changes_nothing() {
 /// search_finished{r2, ok} → commit{r2}. Running ≤ 1; nothing from r1 is shown.
 #[test]
 fn gate7_avoid_chip_cancelled_by_a_reroute() {
-    let (mut s, b, _) = started(config());
+    // the 1.5 s compute budget is widened so that only the reroute cancels r1 here
+    let (mut s, b, _) = started(SessionConfig {
+        avoid_budget_ms: 10_000,
+        ..config()
+    });
     let k = key(&s);
     let mut outs = Vec::new();
     // t1: three valid off-route fixes (50 m north)
@@ -820,7 +854,12 @@ fn gate7_stuck_avoid_chip_blocks_new_chips_until_the_slot_frees() {
     b.legs[0].maneuvers[2].departure_width_mm =
         serde_json::from_value(json!({"kind": "confirmed", "value": 3_000, "source_ref": "t"}))
             .unwrap();
-    let mut s = session_with(&b, config());
+    // the compute budget is widened past the watchdog (this case is about engine_stuck)
+    let cfg = SessionConfig {
+        avoid_budget_ms: 10_000,
+        ..config()
+    };
+    let mut s = session_with(&b, cfg);
     let o = tick(&mut s, 1_000, Some(fix_xy(&b, 1_000, 10_000, 0)), vec![]);
     assert_eq!(starts(&o, SearchPriority::AvoidChip), vec!["r1".to_owned()]);
     let k = key(&s);

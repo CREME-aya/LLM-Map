@@ -802,6 +802,7 @@ impl Session {
             self.on_fix(now, fix, &mut fx, &mut extra_log);
         }
         self.planner.on_now(now, &mut fx);
+        self.avoid_budget(now, &mut fx, &mut extra_log);
         // A result held while uncertain is committed once the session may commit again.
         let gate = self.commit_gate(now);
         self.planner
@@ -823,7 +824,10 @@ impl Session {
         fx: &mut Effects,
         log: &mut Vec<LogEvent>,
     ) {
-        let AvoidState::Searching { req_id: r, target } = &self.avoid else {
+        let AvoidState::Searching {
+            req_id: r, target, ..
+        } = &self.avoid
+        else {
             return;
         };
         if r != req_id {
@@ -913,6 +917,27 @@ impl Session {
             consent_at_mono_ms: at,
         });
         self.avoid = AvoidState::Idle;
+    }
+
+    /// The avoid search outlived its compute budget (1.5 s, 04 §4.3 item 1): `cancel` once.
+    /// The slot stays occupied until `search_finished` (03 §3.1), which ends the attempt.
+    fn avoid_budget(&mut self, now: u64, fx: &mut Effects, log: &mut Vec<LogEvent>) {
+        let AvoidState::Searching {
+            req_id,
+            budget_deadline_mono_ms: budget,
+            ..
+        } = &mut self.avoid
+        else {
+            return;
+        };
+        if !budget.is_some_and(|at| now >= at) {
+            return;
+        }
+        *budget = None;
+        let req_id = req_id.clone();
+        if self.planner.cancel_search(now, &req_id, fx) {
+            log.push(log_req(now, "avoid_budget_expired", &req_id, "cancel"));
+        }
     }
 
     /// End of a tick: removes a chip past its deadline or off the route, then looks for a
@@ -1009,7 +1034,11 @@ impl Session {
             _ => None,
         });
         if let Some(req_id) = started {
-            self.avoid = AvoidState::Searching { req_id, target };
+            self.avoid = AvoidState::Searching {
+                req_id,
+                target,
+                budget_deadline_mono_ms: Some(now.saturating_add(self.avoid_cfg.budget_ms)),
+            };
         }
     }
 
@@ -1180,6 +1209,13 @@ impl Session {
         let next_wake_mono_ms = [
             self.planner.next_wake(),
             self.avoid.target().map(|t| t.deadline_mono_ms),
+            match &self.avoid {
+                AvoidState::Searching {
+                    budget_deadline_mono_ms,
+                    ..
+                } => *budget_deadline_mono_ms,
+                _ => None,
+            },
             stale_at,
             self.frames.last_ref_expires_at(),
             self.frames.window_expires_at(),

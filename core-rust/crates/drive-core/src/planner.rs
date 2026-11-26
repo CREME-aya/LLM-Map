@@ -25,7 +25,8 @@
 //!   off-route, `invalidate_route_eta`) → long. The latest plan's class is never inherited.
 //!   Only the watchdog limit (5 s / 10 s) applies to these searches; the comparison budget
 //!   (3 s / 8 s) is for plans only. The avoid chip's own compute budget (1.5 s) and the
-//!   20 s-before-branch deadline are separate (`crate::avoid`, decided by the session).
+//!   20 s-before-branch deadline are separate (`crate::avoid`, decided by the session; the
+//!   budget passing sends `cancel` through `cancel_search`, the slot stays occupied).
 //! - Plan queue (team decision 2026-11-25): `begin_plan_with` queues the plan's candidate
 //!   searches (baseline `explicit_plan`, the rest `comparison`); they share the single slot
 //!   with ad-hoc requests and start one at a time. The plan ends with exactly one
@@ -537,6 +538,32 @@ impl SearchPlanner {
                 };
             }
             _ => {}
+        }
+    }
+
+    /// Cancels search `req_id` if it occupies the slot and no cancel was sent yet (the slot
+    /// stays occupied until its `search_finished`). Returns whether a cancel went out.
+    pub fn cancel_search(&mut self, now: u64, req_id: &str, fx: &mut Effects) -> bool {
+        match &self.slot {
+            Slot::Running { req } if req.req_id == req_id => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::CancelRequested { req };
+                true
+            }
+            Slot::EngineStuck {
+                req,
+                cancel_sent: false,
+            } if req.req_id == req_id => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::EngineStuck {
+                    req,
+                    cancel_sent: true,
+                };
+                true
+            }
+            _ => false,
         }
     }
 
