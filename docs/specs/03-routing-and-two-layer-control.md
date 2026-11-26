@@ -279,6 +279,7 @@ level ::= "L" | "N" | "H"
 dc_validate_override(h, { code_line, contract, utterance_id, utterance_mono_ms, ref_frame_seq, pending_offer_id? })
   → Applied  { override_id, override, review_proposal?, route_key, expires_at_mono_ms }
   | Undone   { req_id }      // CXL で回避チップの経路変更を戻すとき（§3.1）
+  | Bookmarked { poi_id }    // BMK を受け付けたとき（05 §6.2）
   | Rejected { code }        // code は上記 7 種
 ```
 - `code_line` は §4.1 の 1 行命令コードそのもの。`utterance_id` は **必須**（`dc_tick` の `asr_started` / `asr_result` と同じ ID。Gate 4 で遅延を突き合わせるため）。`utterance_mono_ms` / `expires_at_mono_ms` は単調時刻（§5「時刻の種類」）。ABI 全体は [02 §2.1](02-architecture-and-stack.md)。
