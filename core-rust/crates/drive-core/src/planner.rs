@@ -567,6 +567,32 @@ impl SearchPlanner {
         }
     }
 
+    /// Cancels a running (or stuck, not yet cancelled) avoid-chip search in the slot.
+    /// The slot stays occupied until its `search_finished`.
+    pub fn cancel_avoid_in_slot(&mut self, now: u64, fx: &mut Effects) -> bool {
+        match &self.slot {
+            Slot::Running { req } if req.priority == SearchPriority::AvoidChip => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::CancelRequested { req };
+                true
+            }
+            Slot::EngineStuck {
+                req,
+                cancel_sent: false,
+            } if req.priority == SearchPriority::AvoidChip => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::EngineStuck {
+                    req,
+                    cancel_sent: true,
+                };
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn send_cancel(now: u64, req: &SearchReq, fx: &mut Effects) {
         fx.planner_cmds.push(PlannerCmd::Cancel {
             req_id: req.req_id.clone(),
@@ -607,8 +633,31 @@ impl SearchPlanner {
         }
     }
 
-    /// A new route was committed: a waiting request made for another route is dropped.
+    /// A new route was committed: waiting / held requests made for another route are
+    /// dropped, and a running avoid-chip search for another route gets `cancel` (the slot
+    /// stays occupied until its `search_finished`, whose `ok` is then `discarded_late`).
     pub fn on_route_changed(&mut self, now: u64, route_key: &RouteKey, fx: &mut Effects) {
+        match &self.slot {
+            Slot::Running { req }
+                if req.priority == SearchPriority::AvoidChip && req.route_key != *route_key =>
+            {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::CancelRequested { req };
+            }
+            Slot::EngineStuck {
+                req,
+                cancel_sent: false,
+            } if req.priority == SearchPriority::AvoidChip && req.route_key != *route_key => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::EngineStuck {
+                    req,
+                    cancel_sent: true,
+                };
+            }
+            _ => {}
+        }
         if self
             .pending
             .as_ref()

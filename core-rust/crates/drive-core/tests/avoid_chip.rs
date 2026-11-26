@@ -1091,3 +1091,126 @@ fn route_commit_resets_the_chip() {
         "new route, new attempt"
     );
 }
+
+/// If the current route changes via `dc_route_commit` while an `avoid_chip` search is
+/// running, Rust sends `cancel{req_id}` on the next tick, keeps the slot occupied until
+/// `search_finished`, and discards a late `ok` as `discarded_late` with no `evaluate_offer`
+/// and no offer.
+#[test]
+fn avoid_search_is_cancelled_on_route_commit_and_late_ok_is_discarded() {
+    let (mut s, b, _) = started(config());
+    let k1 = key(&s);
+    assert!(matches!(
+        s.planner().slot(),
+        drive_core::planner::Slot::Running { req } if req.req_id == "r1"
+    ));
+
+    // Current route changes via dc_route_commit while r1 is still running.
+    let mut next = b.clone();
+    next.route_key.route_revision = contracts::U64Str(0);
+    s.issue_commit_for_test("c-next", k1.clone());
+    let k2 = s
+        .route_commit(&RouteCommitRequest {
+            req_id: Some("c-next".into()),
+            expected_route_key: Some(k1.clone()),
+            bundle: next,
+        })
+        .unwrap()
+        .route_key;
+    assert_eq!(k2.route_revision.0, k1.route_revision.0 + 1);
+    assert_eq!(*s.avoid_state(), AvoidState::Idle);
+    assert!(matches!(
+        s.planner().slot(),
+        drive_core::planner::Slot::CancelRequested { req } if req.req_id == "r1"
+    ));
+
+    // Next tick emits cancel{r1}; slot is still occupied so no new avoid_chip starts yet.
+    let o = tick(&mut s, 1_500, Some(fix_xy(&b, 1_500, 10_000, 0)), vec![]);
+    assert_eq!(
+        o.planner_cmds,
+        vec![PlannerCmd::Cancel {
+            req_id: "r1".into()
+        }]
+    );
+    assert!(o.log.iter().any(|l| l.what == "search_cancel_requested"));
+    assert!(!s.planner().is_idle(), "slot held until search_finished");
+    assert!(starts(&o, SearchPriority::AvoidChip).is_empty());
+
+    // Another tick before search_finished: no duplicate cancel, slot still occupied.
+    let o = tick(&mut s, 1_800, Some(fix_xy(&b, 1_800, 11_000, 0)), vec![]);
+    assert!(o.planner_cmds.is_empty());
+    assert!(!s.planner().is_idle());
+
+    // Late ok for r1 arrives: discarded_late, no evaluate_offer, slot freed (new route may start r2).
+    let o = tick(&mut s, 2_000, None, vec![finished(1_900, "r1", &k1, "ok")]);
+    assert!(logged(&o, "discarded_late"));
+    assert!(
+        !o.planner_cmds
+            .iter()
+            .any(|c| matches!(c, PlannerCmd::EvaluateOffer { .. })),
+        "no evaluate_offer for discarded_late r1: {:?}",
+        o.planner_cmds
+    );
+    assert_eq!(
+        s.avoid_offer_eval(&AvoidOfferEvalRequest {
+            req_id: "r1".into(),
+            now_mono_ms: 2_100,
+            alt_facts: facts(&k1.graph_version, 1),
+            base_facts: base_facts(&k1.graph_version, 1),
+        }),
+        AvoidOfferEvalResult::Declined {
+            reason: AvoidDeclineReason::NoPendingResult
+        }
+    );
+    // Slot was freed and the new route (tracking) could start its own avoid search r2.
+    assert_eq!(starts(&o, SearchPriority::AvoidChip), vec!["r2".to_owned()]);
+}
+
+/// Leaving the route (`off_route` / `rerouting`) while an `avoid_chip` search is running
+/// cancels it once (without triggering a second budget cancel), holds the slot until
+/// `search_finished`, and treats a late `ok` as `discarded_late` with no `evaluate_offer`.
+#[test]
+fn avoid_search_cancelled_on_off_route_holds_slot_and_emits_no_evaluate_offer() {
+    let (mut s, b, _) = started(config()); // default 1.5 s avoid budget
+    let k = key(&s);
+    // Off-route confirmed at t=2_200 (before the 1.5 s avoid budget at t=2_500).
+    let mut last = None;
+    for (i, at) in [1_400u64, 1_800, 2_200].into_iter().enumerate() {
+        last = Some(tick(
+            &mut s,
+            at,
+            Some(fix_xy(&b, at, 12_000 + i as i64 * 1_000, 5_000)),
+            vec![],
+        ));
+    }
+    let o = last.unwrap();
+    assert_eq!(s.horizon_status(2_200), Some(HorizonStatus::OffRoute));
+    assert_eq!(
+        o.planner_cmds,
+        vec![PlannerCmd::Cancel {
+            req_id: "r1".into()
+        }]
+    );
+    assert!(!s.planner().is_idle());
+    // Passing the original 1.5 s avoid budget (2_500) emits no duplicate cancel or budget log.
+    let o = tick(&mut s, 2_600, None, vec![]);
+    assert!(o.planner_cmds.is_empty());
+    assert!(!logged(&o, "avoid_budget_expired"));
+    assert!(!s.planner().is_idle());
+    // Late ok for r1 arrives: discarded_late, no evaluate_offer, reroute r2 starts (→ rerouting).
+    let o = tick(&mut s, 2_800, None, vec![finished(2_700, "r1", &k, "ok")]);
+    assert!(logged(&o, "discarded_late"));
+    assert!(!o
+        .planner_cmds
+        .iter()
+        .any(|c| matches!(c, PlannerCmd::EvaluateOffer { .. })));
+    assert_eq!(starts(&o, SearchPriority::Reroute), vec!["r2".to_owned()]);
+    assert_eq!(s.horizon_status(2_800), Some(HorizonStatus::Rerouting));
+    assert_eq!(*s.avoid_state(), AvoidState::Idle);
+    assert_eq!(
+        eval(&mut s, 2_900, facts(&k.graph_version, 1)),
+        AvoidOfferEvalResult::Declined {
+            reason: AvoidDeclineReason::NoPendingResult
+        }
+    );
+}

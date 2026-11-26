@@ -518,6 +518,8 @@ impl Session {
         let mut fx = Effects::default();
         self.planner
             .on_route_changed(now, &loaded.route_key, &mut fx);
+        self.pending_planner.extend(fx.planner_cmds);
+        self.pending_log.extend(fx.log);
         self.planner.invalidate_route_eta();
         self.current_route_key = Some(loaded.route_key.clone());
         self.route = Some(loaded);
@@ -1011,16 +1013,30 @@ impl Session {
         }
     }
 
-    /// End of a tick: removes a chip past its deadline or off the route, then looks for a
-    /// new avoid target (see `crate::avoid`).
+    /// End of a tick: removes a chip past its deadline or off the route, cancels any running
+    /// avoid-chip search if the vehicle left the route, then looks for a new avoid target
+    /// (see `crate::avoid`).
     fn avoid_step(&mut self, now: u64, fx: &mut Effects, log: &mut Vec<LogEvent>) {
         let status = self.horizon_status(now);
+        let off = matches!(
+            status,
+            Some(HorizonStatus::OffRoute | HorizonStatus::Rerouting | HorizonStatus::Finished)
+        );
+        if off {
+            if let AvoidState::Searching {
+                req_id,
+                budget_deadline_mono_ms,
+                ..
+            } = &mut self.avoid
+            {
+                *budget_deadline_mono_ms = None;
+                let req_id = req_id.clone();
+                self.planner.cancel_search(now, &req_id, fx);
+            }
+            self.planner.cancel_avoid_in_slot(now, fx);
+        }
         if let Some(t) = self.avoid.target() {
             let expired = now >= t.deadline_mono_ms;
-            let off = matches!(
-                status,
-                Some(HorizonStatus::OffRoute | HorizonStatus::Rerouting | HorizonStatus::Finished)
-            );
             // A search still running ends through its own search_finished.
             let searching = matches!(self.avoid, AvoidState::Searching { .. });
             if expired || (off && !searching) {
