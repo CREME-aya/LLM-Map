@@ -566,7 +566,7 @@ fn old_plan_candidate_returns_e_stale() {
 /// Soft-mode / drive-start rule (02 §2.1 #9, 03 §3.1, 07 §1):
 /// - `>= 8 km/h` (222 cm/s) continuously for 2.9 s (2900 ms) still accepts plan-candidate commit;
 /// - at 3.0 s (3000 ms) continuous, plan-candidate commit is refused with
-///   `FORBIDDEN_WHILE_DRIVING` (both before the first route and during a mid-trip replan),
+///   `E_FORBIDDEN_WHILE_DRIVING` (both before the first route and during a mid-trip replan),
 ///   while issued commits (reroute / avoid_chip / undo) still succeed;
 /// - dropping below 222 cm/s (e.g. 7 km/h), missing `speed_cm_s`, or low accuracy
 ///   (`acc_cm > max_acc_cm`) resets the continuous duration.
@@ -593,7 +593,7 @@ fn plan_candidate_after_driving_returns_forbidden_while_driving() {
         .route_key;
     assert_eq!(k1.route_revision, U64Str(1));
 
-    // 2) 3.0 s (3000 ms) at 222 cm/s before first route -> FORBIDDEN_WHILE_DRIVING
+    // 2) 3.0 s (3000 ms) at 222 cm/s before first route -> E_FORBIDDEN_WHILE_DRIVING
     let mut s = Session::new(SessionConfig::default());
     s.plan_candidates(0, Some(600), &snapshot(1, 0));
     s.tick(finished_for(100, "r1", 3, "f1"));
@@ -608,19 +608,18 @@ fn plan_candidate_after_driving_returns_forbidden_while_driving() {
         s.planner().plan().unwrap().commit_state,
         PlanCommitState::ClosedDriving
     );
-    assert_eq!(
-        s.route_commit(&RouteCommitRequest {
+    let err = s
+        .route_commit(&RouteCommitRequest {
             req_id: "r1".into(),
             expected_route_key: None,
             bundle: min_bundle_for("t1", 3, "jp-2026.11.0"),
         })
-        .unwrap_err()
-        .code,
-        ErrorCode::ForbiddenWhileDriving
-    );
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::ForbiddenWhileDriving);
+    assert_eq!(err.code.as_str(), "E_FORBIDDEN_WHILE_DRIVING");
     assert!(s.route().is_none());
 
-    // 3) Mid-trip replan while stopped, then 3.0 s driving -> FORBIDDEN_WHILE_DRIVING,
+    // 3) Mid-trip replan while stopped, then 3.0 s driving -> E_FORBIDDEN_WHILE_DRIVING,
     //    while issued commits (reroute / avoid / undo) still succeed while driving
     let mut s = Session::new(SessionConfig::default());
     s.plan_candidates(0, Some(600), &snapshot(1, 0));
@@ -696,7 +695,7 @@ fn drive_start_hold_resets_on_slow_missing_speed_or_low_accuracy_fix() {
             PlanCommitState::Open,
             "{label}: 2.9 s after reset should still be Open"
         );
-        // At t = 7_000 (3.0 s continuous after reset) -> ClosedDriving -> FORBIDDEN_WHILE_DRIVING
+        // At t = 7_000 (3.0 s continuous after reset) -> ClosedDriving -> E_FORBIDDEN_WHILE_DRIVING
         s.tick(fix_speed(7_000, 222));
         assert_eq!(
             s.planner().plan().unwrap().commit_state,

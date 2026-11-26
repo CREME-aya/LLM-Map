@@ -101,7 +101,7 @@ pub fn plan_candidates(s: &mut Session, input: &[u8]) -> Vec<u8> {
 
 /// `dc_route_commit`: `{req_id, expected_route_key, bundle}` (`contracts::route::RouteCommitRequest`).
 /// `req_id` is mandatory (`null` / omitted → `E_SCHEMA`). The guard is checked before the
-/// body (`E_STALE` or `FORBIDDEN_WHILE_DRIVING`, nothing replaced): `expected_route_key`
+/// body (`E_STALE` or `E_FORBIDDEN_WHILE_DRIVING`, nothing replaced): `expected_route_key`
 /// against the current route, and `req_id` against unsettled commits Rust issued or `ok`
 /// candidates of the current plan while its selection window is open; then the request is
 /// parsed (`E_SCHEMA`, including a bundle `route_revision` other than "0"), and
@@ -113,7 +113,7 @@ pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
         Err(e) => return envelope_err(ErrorCode::Schema, &format!("route_commit: {e}")),
     };
     // The guard is checked before the body so a late route is refused as E_STALE (or
-    // FORBIDDEN_WHILE_DRIVING) even if its body would not parse.
+    // E_FORBIDDEN_WHILE_DRIVING) even if its body would not parse.
     let key = match v.get("expected_route_key").cloned() {
         Some(serde_json::Value::Null) => None,
         Some(k) => match serde_json::from_value::<RouteKey>(k) {

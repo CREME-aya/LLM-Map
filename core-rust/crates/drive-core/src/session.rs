@@ -499,7 +499,7 @@ impl Session {
     /// current route (`None` only when no route is committed yet), and `req_id` names either
     /// an unsettled `commit{req_id, route_key}` Rust issued for that `route_key`, or an `ok`
     /// candidate search of the current plan while its commit window is open
-    /// (`FORBIDDEN_WHILE_DRIVING` if closed by driving, `E_STALE` otherwise).
+    /// (`E_FORBIDDEN_WHILE_DRIVING` if closed by driving, `E_STALE` otherwise).
     pub fn check_route_guard(
         &self,
         req_id: &str,
@@ -509,7 +509,7 @@ impl Session {
     }
 
     /// `dc_route_commit` body (02 §2.1 #9, 04 §3.1): re-checks the guard
-    /// (`expected_route_key` + `req_id` → `E_STALE` / `FORBIDDEN_WHILE_DRIVING`, nothing
+    /// (`expected_route_key` + `req_id` → `E_STALE` / `E_FORBIDDEN_WHILE_DRIVING`, nothing
     /// replaced), validates and indexes the bundle (`E_SCHEMA`), then makes it the current
     /// route. Alignment starts over (status `uncertain` until a fix matches; the first fix
     /// is located through the spatial index). The next `dc_tick` returns the new horizon.
@@ -521,7 +521,7 @@ impl Session {
     /// current, the bundle's `trip_id` and `graph_version` must equal the current route's
     /// (06 §3: pinned while driving), and `trip_revision` must equal current or — only for a
     /// plan candidate whose plan has that `trip_revision` — equal current + 1 (`E_STALE`
-    /// otherwise). Order of checks: guard (`E_STALE` / `FORBIDDEN_WHILE_DRIVING`), revision
+    /// otherwise). Order of checks: guard (`E_STALE` / `E_FORBIDDEN_WHILE_DRIVING`), revision
     /// "0" (`E_SCHEMA`), trip_id / trip_revision / graph_version (`E_STALE`), bundle body
     /// (`E_SCHEMA`); nothing is replaced on any error.
     pub fn route_commit(
@@ -1300,7 +1300,7 @@ impl Session {
     /// Soft-mode entry / drive-start tracking (02 §2.1 #9, 03 §3.1, 07 §1):
     /// `speed_cm_s >= drive_start_speed_cm_s` (default 222 cm/s = 8 km/h) continuously for
     /// `drive_start_hold_ms` (default 3000 ms) closes the current plan's commit window
-    /// (`FORBIDDEN_WHILE_DRIVING`). A fix without speed, below threshold, or with
+    /// (`E_FORBIDDEN_WHILE_DRIVING`). A fix without speed, below threshold, or with
     /// `acc_cm > max_acc_cm` resets the continuous run; an out-of-order fix is ignored.
     fn observe_drive_start(&mut self, fix: &Fix) {
         let at = fix.at_mono_ms;

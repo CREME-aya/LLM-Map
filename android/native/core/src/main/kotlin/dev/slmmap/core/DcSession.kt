@@ -30,7 +30,7 @@ import java.io.Closeable
 //       closes when the next plan starts, when one candidate is committed (E_STALE), or once
 //       the vehicle starts driving (>= drive_start_speed_cm_s [222 cm/s = 8 km/h] continuously
 //       for drive_start_hold_ms [3000 ms]; slow / missing-speed / acc_cm > max_acc_cm fixes
-//       reset the run -> FORBIDDEN_WHILE_DRIVING).
+//       reset the run -> E_FORBIDDEN_WHILE_DRIVING).
 //   The bundle always carries route_revision "0" (non-"0" is E_SCHEMA): Rust assigns
 //   current + 1 (first route: 1; never reset when trip_revision advances) and returns the new
 //   key in the result's route_key (use that key from then on). E_STALE means the route was

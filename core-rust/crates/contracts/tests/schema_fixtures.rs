@@ -1023,3 +1023,54 @@ fn rust_mirror_agrees_on_maneuver_horizon() {
     }
     assert!(n >= 6);
 }
+
+/// ABI error code `ErrorCode::ForbiddenWhileDriving` (`E_FORBIDDEN_WHILE_DRIVING`, 02 §2.1 #9)
+/// and L3 override rejection code `RejectCode::ForbiddenWhileDriving` (`FORBIDDEN_WHILE_DRIVING`,
+/// 03 §4.2) are distinct types with distinct wire strings; `common.schema.json#/$defs/ErrorCode`
+/// accepts `E_FORBIDDEN_WHILE_DRIVING` and rejects `FORBIDDEN_WHILE_DRIVING`.
+#[test]
+fn abi_error_code_and_l3_reject_code_for_driving_are_distinct() {
+    use contracts::override_types::{RejectCode, ValidateOverrideResult};
+    use contracts::{envelope_err, ErrorCode};
+
+    let err_code_schema = compile_doc(
+        "ErrorCode",
+        &serde_json::json!({ "$ref": format!("{BASE}common.schema.json#/$defs/ErrorCode") }),
+    );
+    let envelope_schema = compile_doc(
+        "DcEnvelope",
+        &serde_json::json!({ "$ref": format!("{BASE}common.schema.json#/$defs/DcEnvelope") }),
+    );
+
+    // ABI ErrorCode uses E_FORBIDDEN_WHILE_DRIVING
+    assert_eq!(
+        ErrorCode::ForbiddenWhileDriving.as_str(),
+        "E_FORBIDDEN_WHILE_DRIVING"
+    );
+    let err_code_json = serde_json::to_value(ErrorCode::ForbiddenWhileDriving).unwrap();
+    assert_eq!(
+        err_code_json,
+        serde_json::json!("E_FORBIDDEN_WHILE_DRIVING")
+    );
+    assert_eq!(
+        errors(&err_code_schema, &err_code_json),
+        Vec::<String>::new()
+    );
+    let env: Value =
+        serde_json::from_slice(&envelope_err(ErrorCode::ForbiddenWhileDriving, "driving")).unwrap();
+    assert_eq!(env["error"]["code"], "E_FORBIDDEN_WHILE_DRIVING");
+    assert_eq!(errors(&envelope_schema, &env), Vec::<String>::new());
+
+    // L3 RejectCode remains FORBIDDEN_WHILE_DRIVING (without E_) and is NOT a valid ABI ErrorCode
+    let reject_json = serde_json::to_value(RejectCode::ForbiddenWhileDriving).unwrap();
+    assert_eq!(reject_json, serde_json::json!("FORBIDDEN_WHILE_DRIVING"));
+    assert!(!err_code_schema.is_valid(&reject_json));
+    let rejected = serde_json::to_value(ValidateOverrideResult::Rejected {
+        code: RejectCode::ForbiddenWhileDriving,
+    })
+    .unwrap();
+    assert_eq!(
+        rejected,
+        serde_json::json!({"result": "rejected", "code": "FORBIDDEN_WHILE_DRIVING"})
+    );
+}
