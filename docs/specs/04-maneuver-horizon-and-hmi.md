@@ -153,6 +153,24 @@ Android の単一 `NavigationSession` actor が、GNSS の受け取り・経路�
   - `finished` 時は先読み配列 `upcoming` を空にする。
   - `next_p1_deadline_monotonic_ms` には画面が省く中間案内ステップや連続グループ内側の締切も含める。
 
+### 3.2 Kotlin の `NavigationSession`（Rust を呼ぶ側の決まり。案・数値は暫定）
+Rust は IO・スレッド・時計を持たない（[ADR-0008](../adr/0008-dc-tick-single-event-entry.md)）ので、いつ呼ぶか・指示をどう実行するかは Kotlin の `NavigationSession` が受け持つ。ここに書くのは、決定論を崩さないための最低限の決まり。
+
+- **1 本の actor**: `dc_*` の呼び出しはすべて、1 本のスレッド（単一スレッドのコルーチン dispatcher）で順に行う。Valhalla の探索、TTS、ASR、`:inference` は別スレッド・別プロセスで動き、結果は actor へのメッセージとして戻す。`dc_*` を actor 以外から呼ばない。
+- **イベントの作り方**: 外から来たもの（Fix、`tts_*`、`asr_*`、`override_ready`、`user_tap`、熱、音声フォーカス、通話、探索の終わり、同意）は、**起きた時点** の `SystemClock.elapsedRealtimeNanos()/1e6` を `at_mono_ms` に付けて actor の受信箱に入れる。次の `dc_tick` で、受信箱の中身を `at_mono_ms` の昇順（同じ値なら届いた順）に並べて渡す。Fix の数値は渡す前に整数へ丸める（§3.1）。
+- **`dc_tick` を呼ぶとき**: (1) Fix が届いたとき、(2) イベントが届いたとき（届いた直後にまとめて 1 回）、(3) 前回の出力の `next_wake_mono_ms` になったとき（タイマーは 1 本だけで、tick のたびに張り直す。`null` なら張らない）。これ以外の定期的な呼び出しはしない（画面の距離は Fix で変わるので不要）。`now_mono_ms` は **呼び出した時点の時計の値** で、渡すイベントの `at_mono_ms` の最大値以上にする。
+- **出力の実行**（`TickOutput` の順に、同じ tick の中で処理する）:
+  - `voice_cmds`: 単一の TTS キューへ。`stop` は即時に行い、`onStop` を待たずに次の P1 を出してよい（[05 §5](05-inference-tier-and-audio.md)）。`speak` の `template_id` は画面と同じテンプレートで文にし、`content_ref` は歴史パックの文を読む。
+  - `ui_cmds`: 画面の状態に反映するだけ。`horizon` は単一ソース（§1）で、`ui_cmds` と重ねない。
+  - `planner_cmds`: `start` は探索スレッドに渡す（同時に 1 本。Rust がそう出すので、Kotlin 側では並べ替えない）。`cancel` は割り込みフラグを立てる。戻ったら必ず `search_finished` を 1 回、受信箱に入れる。`commit` は保持している経路本体で `dc_route_commit`（成功したら、返された `route_key`（Rust が付けた版）で手元のキーを置き換える。`E_STALE` なら保持している本体を捨てる）、`cancel_commit` は保持している本体を捨てる、`rank` は `dc_rank`、`evaluate_offer` は `dc_avoid_offer_eval` を、それぞれ actor 上で呼ぶ。
+- **Kotlin が持つもの**: `req_id` ごとの経路本体と `CandidateFacts`。捨てるのは、その探索の結果が使われなかったと分かったとき（`discarded_late` / `discarded_after_stuck` などのログ、計画の終了、`commit` の完了）。「戻して」用の直前の経路本体は 5 秒間だけ持つ（[03 §3.1](03-routing-and-two-layer-control.md)）。
+- **エラーの扱い**: `E_STALE` / `E_SCHEMA` / `E_FORBIDDEN_WHILE_DRIVING` はログに残し、画面と音声は Rust の出力に従う（Kotlin が独自に経路を変えない）。**`E_PANIC`** を返したセッションはその後使わない。Kotlin はすべての音声を止めてから作り直す：
+  - `dc_session_new` に任意の `resume{route_bundle, route_key}` を渡し、走行中の経路を **渡された版のまま** 読み込む（版を上げると画面の操作 ID が変わるため。`resume` は版を付け直さない唯一の入口）。位置合わせは `uncertain` から始める。
+  - 作り直した直後に、同意（`history_consent`）・通話・音声フォーカス・熱の **今の状態** をイベントとして一度送り直す。
+  - 引き継がないもの：P3 で話した記録、回避チップを試した交差点、保留中の結果。同じ POI をもう一度話すことがあり得るが PoC では許し、件数を Gate 7 で記録する。
+  - 2 回続けて `E_PANIC` になったら作り直しをやめ、停車したときに「Google Maps で開く」を出す（[07 §2.6](07-parameters-and-poc-gates.md) の Gate 0 と同じ退路）。
+- **ライフサイクル**: 案内を始めるときに `dc_session_new(SessionConfig)`（値の正本は [07 §1](07-parameters-and-poc-gates.md)）、終えるときに `dc_session_free`。GPX のリプレイでは、Fix とイベントを記録どおりの `at_mono_ms` で同じ順に入れ、時計は記録の値を使う（決定論のテストのため）。
+
 ---
 
 ## 4. 3 手先先読み HMI（`ManeuverLadder`）デザイン仕様
