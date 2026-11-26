@@ -136,7 +136,7 @@ pub enum PlanCommitState {
     Closed,
     /// The vehicle started driving (`>= drive_start_speed_cm_s` = 222 cm/s continuously for
     /// `drive_start_hold_ms` = 3000 ms, 07 §1); committing a candidate of this plan returns
-    /// `FORBIDDEN_WHILE_DRIVING`.
+    /// `E_FORBIDDEN_WHILE_DRIVING`.
     ClosedDriving,
 }
 
@@ -485,7 +485,7 @@ impl SearchPlanner {
     }
 
     /// Closes the current plan's commit window because the vehicle started moving
-    /// (`FORBIDDEN_WHILE_DRIVING` on any later plan-candidate commit).
+    /// (`E_FORBIDDEN_WHILE_DRIVING` on any later plan-candidate commit).
     pub fn close_plan_commit_driving(&mut self) {
         if let Some(p) = self.plan.as_mut() {
             if p.commit_state == PlanCommitState::Open {

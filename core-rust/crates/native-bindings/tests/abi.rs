@@ -247,7 +247,7 @@ fn tick_input_fixtures_agree_with_dc_tick() {
 /// its horizon and a fix aligns it (`tracking`). The bundle carries `route_revision` "0" and
 /// Rust assigns current + 1 (first route: 1), returned in `data.route_key` and used by the
 /// horizon and every ManeuverId. A replacement needs an unsettled commit Rust issued or an
-/// open plan candidate (`E_STALE` otherwise; `FORBIDDEN_WHILE_DRIVING` for a plan candidate
+/// open plan candidate (`E_STALE` otherwise; `E_FORBIDDEN_WHILE_DRIVING` for a plan candidate
 /// after driving starts); a non-"0" revision or broken bundle is `E_SCHEMA`; a bundle
 /// `trip_id` / `trip_revision` (other than +1 from a plan) / `graph_version` differing from
 /// the current route is `E_STALE`.
@@ -431,7 +431,7 @@ fn route_commit_loads_the_bundle() {
         next["expected_route_key"] = rk2.clone();
         let v = take(dc_route_commit(s, din(&serde_json::to_vec(&next).unwrap())));
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
-        // Mid-trip replan (trip_revision + 1) closed by driving → FORBIDDEN_WHILE_DRIVING
+        // Mid-trip replan (trip_revision + 1) closed by driving → E_FORBIDDEN_WHILE_DRIVING
         let mut snap2 = snapshot.clone();
         snap2["plan_request_id"] = "p2".into();
         snap2["trip_revision"] = "4".into();
@@ -488,7 +488,7 @@ fn route_commit_loads_the_bundle() {
             s,
             din(&serde_json::to_vec(&driving_commit).unwrap()),
         ));
-        assert_eq!(v["error"]["code"], "FORBIDDEN_WHILE_DRIVING", "{v}");
+        assert_eq!(v["error"]["code"], "E_FORBIDDEN_WHILE_DRIVING", "{v}");
         dc_session_free(s);
     }
 }

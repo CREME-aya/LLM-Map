@@ -9,7 +9,7 @@
  *            dc_out is allocated by Rust and MUST be released with dc_buf_free (exactly once).
  *            Every dc_out is {"ok":true,"data":...} | {"ok":false,"error":{"code":..,"msg":..}}
  *            code: E_SCHEMA | E_VERSION | E_STALE | E_REJECTED | E_PANIC | E_INVALID_HANDLE
- *                  | FORBIDDEN_WHILE_DRIVING
+ *                  | E_FORBIDDEN_WHILE_DRIVING
  *                  (+ E_UNIMPLEMENTED: skeleton-only placeholder, TODO remove before ABI freeze)
  * Threads:   dc_session is NOT thread-safe. Call only from the single NavigationSession actor.
  * Time:      *_mono_ms are SystemClock.elapsedRealtime based. Rust never reads a clock.
@@ -63,7 +63,7 @@ typedef struct dc_session dc_session;
           *      plan while its commit window is open (closed when the next plan starts or after
           *      one candidate commits -> E_STALE; closed once driving, >= drive_start_speed_cm_s
           *      [222 cm/s = 8 km/h] continuously for drive_start_hold_ms [3000 ms], reset by
-          *      slow / missing-speed / acc_cm > max_acc_cm fixes -> FORBIDDEN_WHILE_DRIVING).
+          *      slow / missing-speed / acc_cm > max_acc_cm fixes -> E_FORBIDDEN_WHILE_DRIVING).
           *      Any other req_id -> E_STALE.
           *      expected_route_key = guard: current route's key, or null for the first route.
           *      Must equal the current route (null = none) -> otherwise E_STALE, nothing replaced.

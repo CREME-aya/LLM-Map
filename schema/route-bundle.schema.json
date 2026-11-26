@@ -11,7 +11,7 @@
       "maximum": 4294967295
     },
     "RouteCommitRequest": {
-      "description": "dc_route_commit input {req_id, expected_route_key, bundle} (02 §2.1 #9). req_id is mandatory (null or omitted -> E_SCHEMA): it must name either (1) an unsettled planner_cmds commit{req_id, route_key} Rust emitted (or undo-<req_id>), or (2) an ok candidate search of the current plan while its commit window is open (closed on next plan, after one candidate commits -> E_STALE, or once moving -> FORBIDDEN_WHILE_DRIVING). expected_route_key = guard: the current route's key, or null when no route is committed yet; must equal the current route (E_STALE otherwise). bundle.route_key carries route_revision \"0\"; Rust assigns current + 1 (first route: 1; never reset on trip_revision + 1) and returns the key in the result {route_key, legs, segments, maneuvers}.",
+      "description": "dc_route_commit input {req_id, expected_route_key, bundle} (02 §2.1 #9). req_id is mandatory (null or omitted -> E_SCHEMA): it must name either (1) an unsettled planner_cmds commit{req_id, route_key} Rust emitted (or undo-<req_id>), or (2) an ok candidate search of the current plan while its commit window is open (closed on next plan, after one candidate commits -> E_STALE, or once driving -> E_FORBIDDEN_WHILE_DRIVING). expected_route_key = guard: the current route's key, or null when no route is committed yet; must equal the current route (E_STALE otherwise). bundle.route_key carries route_revision \"0\"; Rust assigns current + 1 (first route: 1; never reset on trip_revision + 1) and returns the key in the result {route_key, legs, segments, maneuvers}.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -22,7 +22,7 @@
       "properties": {
         "req_id": {
           "type": "string",
-          "description": "Required search req_id (null or omitted -> E_SCHEMA): either an unsettled planner_cmds commit{req_id, route_key} Rust emitted (undo-<req_id> for an undo), or an ok candidate search of the current plan while its selection window is open (E_STALE if unknown/old plan/already committed, FORBIDDEN_WHILE_DRIVING once the vehicle started moving)."
+          "description": "Required search req_id (null or omitted -> E_SCHEMA): either an unsettled planner_cmds commit{req_id, route_key} Rust emitted (undo-<req_id> for an undo), or an ok candidate search of the current plan while its selection window is open (E_STALE if unknown/old plan/already committed, E_FORBIDDEN_WHILE_DRIVING once the vehicle started driving)."
         },
         "expected_route_key": {
           "oneOf": [

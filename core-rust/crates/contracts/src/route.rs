@@ -22,7 +22,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// an undo) with `route_key == expected_route_key`, or (2) an `ok` candidate search of the
 /// current plan while its commit window is still open (closed when the next plan starts,
 /// when one of its candidates is committed, or when the vehicle starts moving →
-/// `FORBIDDEN_WHILE_DRIVING`). Any other `req_id` is `E_STALE`.
+/// `E_FORBIDDEN_WHILE_DRIVING`). Any other `req_id` is `E_STALE`.
 ///
 /// `expected_route_key` is the guard: the current route's key, or `null` when no route is
 /// committed yet (the first route of the session). It must equal the current route (`null` =
