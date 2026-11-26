@@ -129,6 +129,14 @@ Eligible ──▶ Pending ──▶ Speaking ──▶ Completed
    - `ManeuverHorizon` が `tracking` であり、複雑窓外・経路回廊内・他音声なし・熱縮退なし・方位/精度良好のときだけ候補評価。
    - 歴史パック内には出典付きの **短文（約 12 秒上限）** と **1 文要約（約 4〜7 秒）** の 2 版を事前格納。
    - `利用可能時間 = min(次の P1 締切, 複雑窓開始) - 推定 TTS 準備時間 - 安全余裕 5 秒`。`複雑窓開始` は `ManeuverHorizon.next_complex_window.start_monotonic_ms`（決め方は [04 §2.2](04-maneuver-horizon-and-hmi.md)）。`推定 TTS 準備時間` は Rust では測れないため入力として受け取る（Kotlin の実測値を渡すか固定値を設定で渡すかは未決。Gate 4 の TTS 実測後に決める）。開始前にこの枠へ収まる版を選択し、両方収まらなければ開始せず待機（同一 POI は 1 旅程 1 回、開始間隔は **最短 5 分**）。
-2. **割り込み後挙動**:
+2. **Rust での段取り（`dc_tick` の中で行う。数値はすべて暫定）**:
+   - **POI の入れ方**: `route_bundle.history_pois: [{poi_id, along_route_cm, versions: [{kind: short | summary, content_ref, duration_ms}]}]`（任意。[04 §3.1](04-maneuver-horizon-and-hmi.md)）。文面は渡さず、`content_ref`（歴史パック内の ID と版）と `duration_ms` だけ。読み上げるのは Kotlin。経路が変わったら（逸脱再探索・回避チップ・「戻して」）新しい `route_bundle` に回廊内の POI を詰め直す。
+   - **同意**: `dc_tick` のイベント `history_consent{on: bool}` で渡し、session の状態として持つ（経路が変わっても引き継ぐ）。何も届いていなければ OFF（§6.1 の既定 OFF）。Kotlin も同意 OFF なら `history_pois` を空で渡す（二重の守り）。`TripPlanSnapshot` には入れない（旅の途中で OFF にするだけで計画をやり直すことになるため）。OFF が届いたら Eligible / Pending をすべて Expired にし、話している途中なら `stop`。利用者が止めたので「あとで見る」には入れない。
+   - **Eligible**: 経路上の今の位置が、POI の `along_route_cm` の **手前 2 km から手前 0.5 km** の範囲にあるとき（「この先 1 km 付近に〜」と話すため、通り過ぎた POI は話さない）。通り過ぎたら Expired。
+   - **Pending → Speaking の条件**: 同意 ON・`status=tracking`・複雑窓の外・横方向のずれが `lateral_tol_cm` 以内・ほかの音声を話していない（`tts_started` / `tts_done` で追う）・`call_state.active` でない・`audio_focus_lost` でない・熱の段階が `none` か `light`（§3.1 で `moderate` から P3 を止めるため）・`acc_cm <= max_acc_cm` で方位が使える。満たしたら上の `利用可能時間` に収まる版を選び（短文 → 要約の順。どちらも収まらなければ待つ）、`speak{priority: p3, content_ref}` を出す。`推定 TTS 準備時間` は当面 `SessionConfig` の固定値 **800 ms**（Gate 4 の実測で決め直す）。
+   - **Expired**: 回廊の外に出た・Pending のまま 30 秒を過ぎた・利用者が止めた・同意 OFF・POI を通り過ぎた。
+   - **回数と間隔**: 同じ POI は 1 つの旅で 1 回、始める間隔は最短 5 分。どちらも session で数え、経路が変わっても数え直さない。
+   - **割り込まれたとき（Interrupted）**: P0 / P1 が入ったらすぐ `stop` を出し、`ui_cmds: save_for_later{poi_id, reason: interrupted}` を出す（Kotlin が「あとで見る」一覧に保存する）。L3 の `BMK`（「あとで詳しく」）も同じ `save_for_later{poi_id, reason: bmk}` を使う。
+3. **割り込み後挙動**:
    - **Phase 1 標準（「簡潔」モード）**: 発話開始後に P0/P1 ナビ案内等が入った場合は即座に停止し、**同じ地点の断片・再開は行わず「あとで見る」リストへ自動保存**（現在地と解説のズレ・TTS キュー複雑化をゼロにする）。
    - **Phase 2 オプション（「じっくり」モード）**: 高速道路など静かな長距離区間向けに設定で選択可能とし、再生進捗 50%（または 40%）未満かつ短時間内に次の空白が確保できた場合のみ事前生成したつなぎ 1 文で再開。
