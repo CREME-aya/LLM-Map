@@ -150,7 +150,7 @@ pub fn route_commit(s: &mut Session, input: &[u8]) -> Vec<u8> {
     }
 }
 
-/// `dc_avoid_offer_eval(s, {now_mono_ms, alt_facts})` → `{"result": "offered", avoid_offer}`
+/// `dc_avoid_offer_eval(s, {req_id, now_mono_ms, alt_facts, base_facts})` → `{"result": "offered", avoid_offer}`
 /// | `{"result": "declined", reason}` (`Session::avoid_offer_eval`). A malformed request
 /// (including `alt_facts` not matching schema/candidate-facts.schema.json) is `E_SCHEMA`.
 pub fn avoid_offer_eval(s: &mut Session, input: &[u8]) -> Vec<u8> {

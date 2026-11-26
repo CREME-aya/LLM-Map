@@ -209,6 +209,11 @@ pub enum EventBody {
         /// Renamed from `comparison_ref` (team decision 2026-11-25; docs still say comparison_ref).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         facts_ref: Option<String>,
+        /// Avoid-chip search only, optional (docs 2a8a727, 04 §4.3): the `CandidateFacts` C++
+        /// builds with the alternative for the current route from the search-start position
+        /// to the destination (no new search). Without it no offer is made.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_facts_ref: Option<String>,
         /// Wall time of the Valhalla call (measurement only, never used for decisions).
         engine_ms: u64,
     },
@@ -356,6 +361,15 @@ pub enum PlannerCmd {
     /// later; the undo first → this cancel.
     CancelCommit {
         req_id: String,
+    },
+    /// An avoid-chip search returned a usable `ok` with both refs (03 §3.1, docs 2a8a727):
+    /// Kotlin calls `dc_avoid_offer_eval {req_id, now_mono_ms, alt_facts, base_facts}` with
+    /// the `CandidateFacts` behind `facts_ref` (the alternative) and `base_facts_ref` (the
+    /// current route from the search-start position). Not emitted without both refs.
+    EvaluateOffer {
+        req_id: String,
+        facts_ref: String,
+        base_facts_ref: String,
     },
 }
 

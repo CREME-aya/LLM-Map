@@ -421,6 +421,10 @@
             "facts_ref": {
               "type": "string"
             },
+            "base_facts_ref": {
+              "type": "string",
+              "description": "Avoid-chip search only, optional (docs 2a8a727, 03 §3.1 / 04 §4.3): CandidateFacts C++ builds with the alternative for the current route from the search-start position to the destination (no new search; attributes of the current route's edges). Rust compares both with the same yardstick; without it no offer is made."
+            },
             "engine_ms": {
               "type": "integer",
               "minimum": 0,
@@ -666,6 +670,31 @@
               "const": "cancel_commit"
             },
             "req_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cmd",
+            "req_id",
+            "facts_ref",
+            "base_facts_ref"
+          ],
+          "description": "An avoid_chip search returned ok while valid (not cancelled / stuck, route_key current, tracking) with both facts_ref and base_facts_ref: Kotlin calls dc_avoid_offer_eval {req_id, now_mono_ms, alt_facts, base_facts} with the CandidateFacts behind them (03 §3.1, docs 2a8a727). Without base_facts_ref no evaluate_offer is emitted and no offer is made (logged).",
+          "properties": {
+            "cmd": {
+              "const": "evaluate_offer"
+            },
+            "req_id": {
+              "type": "string"
+            },
+            "facts_ref": {
+              "type": "string"
+            },
+            "base_facts_ref": {
               "type": "string"
             }
           }

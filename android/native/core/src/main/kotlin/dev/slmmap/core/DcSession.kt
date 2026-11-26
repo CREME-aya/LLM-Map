@@ -60,10 +60,13 @@ class DcSession private constructor(private var handle: Long) : Closeable {
     fun routeCommit(bundleJson: ByteArray): ByteArray = call { DcNative.routeCommit(it, bundleJson) }
 
     /**
-     * dc_avoid_offer_eval: {now_mono_ms, alt_facts: CandidateFacts} ->
-     * {result: "offered", avoid_offer} | {result: "declined", reason} (shape provisional).
-     * Call it after the tick that carried search_finished{ok} of an avoid_chip search, with the
-     * CandidateFacts behind its facts_ref. The chip is shown only from the next tick's horizon;
+     * dc_avoid_offer_eval: {req_id, now_mono_ms, alt_facts: CandidateFacts,
+     * base_facts: CandidateFacts} -> {result: "offered", avoid_offer} | {result: "declined",
+     * reason} (shape provisional). Call it for planner_cmds evaluate_offer{req_id, facts_ref,
+     * base_facts_ref}, with the CandidateFacts behind both refs. For an avoid_chip search, build
+     * base_facts with the alternative (the current route from the search-start position to the
+     * destination; no new search) and pass base_facts_ref in its search_finished: without it
+     * Rust makes no offer. The chip is shown only from the next tick's horizon;
      * consent is user_tap{target_id: offer_id, action: avoid}, then Rust emits commit.
      */
     fun avoidOfferEval(reqJson: ByteArray): ByteArray = call { DcNative.avoidOfferEval(it, reqJson) }

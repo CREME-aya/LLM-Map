@@ -202,8 +202,16 @@ pub struct Effects {
     pub ui_cmds: Vec<UiCmd>,
     pub log: Vec<LogEvent>,
     /// Avoid-chip searches that returned a usable `ok` (not committed: the session waits
-    /// for `dc_avoid_offer_eval`, 04 §4.3), as `(req_id, facts_ref)`.
-    pub avoid_ready: Vec<(String, Option<String>)>,
+    /// for `dc_avoid_offer_eval`, 04 §4.3).
+    pub avoid_ready: Vec<AvoidReady>,
+}
+
+/// A usable avoid-chip `ok` and the refs it came with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvoidReady {
+    pub req_id: String,
+    pub facts_ref: Option<String>,
+    pub base_facts_ref: Option<String>,
 }
 
 #[derive(Debug)]
@@ -682,6 +690,7 @@ impl SearchPlanner {
         route_key: &RouteKey,
         outcome: SearchOutcome,
         facts_ref: Option<&str>,
+        base_facts_ref: Option<&str>,
         current_route_key: Option<&RouteKey>,
         gate: CommitGate,
         fx: &mut Effects,
@@ -767,8 +776,11 @@ impl SearchPlanner {
             }
             // Never committed here: dc_avoid_offer_eval and consent first (04 §4.3).
             SearchOutcome::Ok if req.priority == SearchPriority::AvoidChip => {
-                fx.avoid_ready
-                    .push((req_id.to_owned(), facts_ref.map(str::to_owned)));
+                fx.avoid_ready.push(AvoidReady {
+                    req_id: req_id.to_owned(),
+                    facts_ref: facts_ref.map(str::to_owned),
+                    base_facts_ref: base_facts_ref.map(str::to_owned),
+                });
                 log(fx, at, "avoid_result_ready", Some(req_id), None)
             }
             SearchOutcome::Ok => log(fx, at, "search_result_unused", Some(req_id), None),

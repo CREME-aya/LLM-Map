@@ -78,7 +78,7 @@ fn finished(at: u64, req_id: &str, key: &RouteKey, outcome: &str) -> Value {
     json!({
         "at_mono_ms": at, "kind": "search_finished", "req_id": req_id,
         "route_key": key, "graph_version": key.graph_version, "outcome": outcome,
-        "facts_ref": "facts-1", "engine_ms": 300
+        "facts_ref": "facts-1", "base_facts_ref": "base-1", "engine_ms": 300
     })
 }
 
@@ -98,6 +98,15 @@ fn facts(graph_version: &str, eta_ms: u64) -> CandidateFacts {
         "junctions": [], "through_anchors": []
     }))
     .unwrap()
+}
+
+/// `base_facts`: the current route from the search start, with the one target right turn
+/// (`facts` = the alternative, none). Same yardstick as the alternative (04 §4.3 (b)).
+fn base_facts(graph_version: &str, eta_ms: u64) -> CandidateFacts {
+    let mut f = facts(graph_version, eta_ms);
+    f.candidate_id = "c-base".into();
+    f.counts.right_unprotected = 1;
+    f
 }
 
 fn starts(o: &TickOutput, p: SearchPriority) -> Vec<String> {
@@ -140,9 +149,16 @@ fn deadline(s: &Session) -> u64 {
 }
 
 fn eval(s: &mut Session, now: u64, f: CandidateFacts) -> AvoidOfferEvalResult {
+    let req_id = match s.avoid_state() {
+        AvoidState::Ready { req_id, .. } => req_id.clone(),
+        _ => "r1".into(),
+    };
+    let base = base_facts(&f.graph_version, 0);
     s.avoid_offer_eval(&AvoidOfferEvalRequest {
+        req_id,
         now_mono_ms: now,
         alt_facts: f,
+        base_facts: base,
     })
 }
 
@@ -305,7 +321,37 @@ fn ok_is_not_committed_and_the_offer_rides_on_its_entry() {
     assert!(commits(&o).is_empty(), "no commit before consent");
     assert!(logged(&o, "avoid_result_ready"));
     assert!(matches!(s.avoid_state(), AvoidState::Ready { .. }));
+    // Kotlin is told to evaluate it with both CandidateFacts (03 §3.1, docs 2a8a727)
+    assert_eq!(
+        o.planner_cmds,
+        vec![PlannerCmd::EvaluateOffer {
+            req_id: "r1".into(),
+            facts_ref: "facts-1".into(),
+            base_facts_ref: "base-1".into(),
+        }]
+    );
+    let v = serde_json::to_value(&o.planner_cmds[0]).unwrap();
+    assert_eq!(
+        v,
+        json!({"cmd": "evaluate_offer", "req_id": "r1", "facts_ref": "facts-1",
+               "base_facts_ref": "base-1"})
+    );
     let d = deadline(&s);
+    // another req_id is not the waiting result: declined, the result keeps waiting
+    let base = s.avoid_state().target().unwrap().base_eta_ms;
+    let r = s.avoid_offer_eval(&AvoidOfferEvalRequest {
+        req_id: "r9".into(),
+        now_mono_ms: 1_550,
+        alt_facts: facts(&k.graph_version, base),
+        base_facts: base_facts(&k.graph_version, base),
+    });
+    assert_eq!(
+        r,
+        AvoidOfferEvalResult::Declined {
+            reason: AvoidDeclineReason::NoPendingResult
+        }
+    );
+    assert!(matches!(s.avoid_state(), AvoidState::Ready { .. }));
     let base = s.avoid_state().target().unwrap().base_eta_ms;
     let r = eval(&mut s, 1_600, facts(&k.graph_version, base + 60_000));
     let AvoidOfferEvalResult::Offered { avoid_offer: offer } = r.clone() else {
@@ -338,6 +384,37 @@ fn ok_is_not_committed_and_the_offer_rides_on_its_entry() {
         }
     );
     assert!(s.avoid_state().offer().is_some());
+}
+
+/// An `ok` without `facts_ref` or without `base_facts_ref` emits no `evaluate_offer` and
+/// makes no offer (04 §4.3 (b) cannot be checked without `base_facts`); logged.
+#[test]
+fn ok_without_both_refs_makes_no_offer() {
+    for (drop, why) in [
+        ("base_facts_ref", "no_base_facts_ref"),
+        ("facts_ref", "no_facts_ref"),
+    ] {
+        let (mut s, _, _) = started(config());
+        let k = key(&s);
+        let mut fin = finished(1_400, "r1", &k, "ok");
+        fin.as_object_mut().unwrap().remove(drop);
+        let o = tick(&mut s, 1_500, None, vec![fin]);
+        assert!(o.planner_cmds.is_empty(), "{drop}: {:?}", o.planner_cmds);
+        assert!(
+            o.log
+                .iter()
+                .any(|l| l.what == "avoid_attempt_ended" && l.detail.as_deref() == Some(why)),
+            "{drop}"
+        );
+        assert_eq!(*s.avoid_state(), AvoidState::Idle);
+        let r = eval(&mut s, 1_600, facts(&k.graph_version, 0));
+        assert_eq!(
+            r,
+            AvoidOfferEvalResult::Declined {
+                reason: AvoidDeclineReason::NoPendingResult
+            }
+        );
+    }
 }
 
 /// Declines (03 §3.2 / 03 §3.1): detour cap (base = remaining ETA at the start, short:

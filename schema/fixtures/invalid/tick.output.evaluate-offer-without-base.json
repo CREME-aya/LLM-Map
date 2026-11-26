@@ -1,0 +1,1 @@
+{"voice_cmds": [], "ui_cmds": [], "planner_cmds": [{"cmd": "evaluate_offer", "req_id": "r4", "facts_ref": "facts-r4"}], "next_wake_mono_ms": null, "log": []}

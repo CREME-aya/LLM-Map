@@ -765,6 +765,7 @@ impl Session {
                     route_key,
                     outcome,
                     facts_ref,
+                    base_facts_ref,
                     ..
                 } => {
                     self.planner.on_search_finished(
@@ -773,11 +774,12 @@ impl Session {
                         &route_key,
                         outcome,
                         facts_ref.as_deref(),
+                        base_facts_ref.as_deref(),
                         self.current_route_key.as_ref(),
                         gate,
                         &mut fx,
                     );
-                    self.on_avoid_finished(now, at, &req_id, &fx, &mut extra_log);
+                    self.on_avoid_finished(now, at, &req_id, &mut fx, &mut extra_log);
                 }
                 EventBody::UserTap { target_id, action } => {
                     self.on_user_tap(now, at, &target_id, action, &mut fx, &mut extra_log);
@@ -809,14 +811,16 @@ impl Session {
         self.finish(now, fx, extra_log)
     }
 
-    /// The avoid-chip search `req_id` ended: a usable `ok` waits for `dc_avoid_offer_eval`
-    /// (only while tracking, 03 §3.1); anything else ends the attempt.
+    /// The avoid-chip search `req_id` ended: a usable `ok` with both `facts_ref` and
+    /// `base_facts_ref` (only while tracking, 03 §3.1) emits `evaluate_offer` and waits for
+    /// `dc_avoid_offer_eval`; a missing ref (no `base_facts` → (b) cannot be checked, 04 §4.3)
+    /// or anything else ends the attempt, logged.
     fn on_avoid_finished(
         &mut self,
         now: u64,
         at: u64,
         req_id: &str,
-        fx: &Effects,
+        fx: &mut Effects,
         log: &mut Vec<LogEvent>,
     ) {
         let AvoidState::Searching { req_id: r, target } = &self.avoid else {
@@ -825,18 +829,25 @@ impl Session {
         if r != req_id {
             return;
         }
-        let ready = fx.avoid_ready.iter().any(|(id, _)| id == req_id);
+        let ready = fx.avoid_ready.iter().find(|a| a.req_id == req_id);
         let tracking = self.horizon_status(now) == Some(HorizonStatus::Tracking);
-        self.avoid = if ready && tracking {
+        let refs = ready.and_then(|a| Some((a.facts_ref.clone()?, a.base_facts_ref.clone()?)));
+        self.avoid = if let (Some((facts_ref, base_facts_ref)), true) = (refs, tracking) {
+            fx.planner_cmds.push(PlannerCmd::EvaluateOffer {
+                req_id: r.clone(),
+                facts_ref,
+                base_facts_ref,
+            });
             AvoidState::Ready {
                 req_id: r.clone(),
                 target: target.clone(),
             }
         } else {
-            let why = if ready {
-                "not_tracking"
-            } else {
-                "search_unused"
+            let why = match ready {
+                None => "search_unused",
+                Some(_) if !tracking => "not_tracking",
+                Some(a) if a.facts_ref.is_none() => "no_facts_ref",
+                Some(_) => "no_base_facts_ref",
             };
             log.push(log_req(at, "avoid_attempt_ended", req_id, why));
             AvoidState::Idle
@@ -1001,7 +1012,8 @@ impl Session {
         }
     }
 
-    /// `dc_avoid_offer_eval(s, {now_mono_ms, alt_facts})` (02 §2.1 #11): turns the waiting
+    /// `dc_avoid_offer_eval(s, {req_id, now_mono_ms, alt_facts, base_facts})` (02 §2.1 #11):
+    /// for the `req_id` of `evaluate_offer`, turns the waiting
     /// avoid-chip result into an `AvoidOffer` on its `HorizonEntry` when it is still
     /// before the deadline, the session is tracking and the alternative is within the
     /// detour cap (`DetourPolicy`, base_eta = remaining ETA when the search started).
@@ -1011,8 +1023,9 @@ impl Session {
             .last_now_mono_ms
             .map_or(req.now_mono_ms, |p| p.max(req.now_mono_ms));
         let declined = |reason| AvoidOfferEvalResult::Declined { reason };
-        // A search still running or an offer already shown is left as it is.
-        if !matches!(self.avoid, AvoidState::Ready { .. }) {
+        // A search still running, an offer already shown, or another search's req_id is
+        // left as it is.
+        if !matches!(&self.avoid, AvoidState::Ready { req_id, .. } if *req_id == req.req_id) {
             return declined(AvoidDeclineReason::NoPendingResult);
         }
         let AvoidState::Ready { req_id, target } =

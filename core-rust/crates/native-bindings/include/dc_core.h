@@ -90,7 +90,9 @@ typedef struct dc_session dc_session;
           *       | low_memory | inference_down{reason} | inference_up{tier}
           *       | audio_focus_lost | call_state{active}
           *       | search_finished{req_id, route_key, graph_version, outcome: ok|cancelled|error,
-          *                         facts_ref?, engine_ms}     // exactly one per search
+          *                         facts_ref?, base_facts_ref?, engine_ms}  // exactly one per search
+          *             // base_facts_ref: avoid_chip only, CandidateFacts of the current route from
+          *             // the search-start position (built with the alternative; no new search)
           *             // no timeout outcome: Rust detects the watchdog deadline from now_mono_ms
           *             // (-> engine_stuck); an ok returned after cancel is discarded_late,
           *             // after engine_stuck discarded_after_stuck
@@ -103,7 +105,10 @@ typedef struct dc_session dc_session;
           *       planner_cmds[start{req_id, priority, distance_class: short|long, route_key,
           *                    graph_version, candidate_id?, fix?} | cancel{req_id}
           *                  | rank{plan_request_id, facts_refs[], reason: all_done|budget_expired}
-          *                  | commit{req_id, route_key, undo_req_id?} | cancel_commit{req_id}],
+          *                  | commit{req_id, route_key, undo_req_id?} | cancel_commit{req_id}
+          *                  | evaluate_offer{req_id, facts_ref, base_facts_ref}],
+          *   evaluate_offer: an avoid_chip ok (valid, tracking) with both refs -> call
+          *   dc_avoid_offer_eval with the CandidateFacts behind them. Without both: no offer.
           *   "経路を確認中" is horizon.status off_route / rerouting (show_checking_route is abolished).
           *   start.fix: for a reroute, the fix that confirmed off-route (Rust aligns the vehicle on
           *   the committed route only; Valhalla searches the road network from that position).
@@ -127,8 +132,11 @@ typedef struct dc_session dc_session;
           *       next_wake_mono_ms: u64|null, log[]}
           *   next_wake_mono_ms: earliest time the output may change without new input (includes the
           *   search watchdog deadline). Kotlin calls dc_tick by then; null = tick on each Fix only. */
-/* 11 */ dc_out   dc_avoid_offer_eval(dc_session* s, dc_in req_json);         /* {now_mono_ms, alt_facts: CandidateFacts}
-          *   Call after the dc_tick that carried search_finished{ok} of an avoid_chip search.
+/* 11 */ dc_out   dc_avoid_offer_eval(dc_session* s, dc_in req_json);
+          /* {req_id, now_mono_ms, alt_facts: CandidateFacts, base_facts: CandidateFacts}
+          *   Call for planner_cmds evaluate_offer{req_id, facts_ref, base_facts_ref}: alt_facts
+          *   behind facts_ref, base_facts behind base_facts_ref (docs 2a8a727). Another req_id
+          *   than the waiting avoid search -> declined{no_pending_result}.
           * → {result: "offered", avoid_offer: AvoidOffer} (shown on its HorizonEntry from the
           *   next dc_tick; dismiss{expired} at the deadline) | {result: "declined", reason:
           *   no_pending_result|not_tracking|deadline_passed|graph_mismatch|not_legal_or_complete

@@ -76,16 +76,18 @@ pub struct ThroughAnchor {
     pub edge: U64Str,
 }
 
-/// `dc_avoid_offer_eval(s, {now_mono_ms, alt_facts})` (core-rust/README.md, dc_core.h).
-/// `alt_facts` is the `CandidateFacts` behind the `facts_ref` of the avoid-chip search that
-/// just returned `ok` (Kotlin calls this right after the `dc_tick` that carried that
-/// `search_finished`). TODO(abi-v1): docs do not name how the request points at the
-/// search; Rust has at most one avoid-chip result waiting, so no `req_id` is carried.
+/// `dc_avoid_offer_eval(s, {req_id, now_mono_ms, alt_facts, base_facts})` (02 §2.1 #11,
+/// docs 2a8a727). Kotlin calls it for `planner_cmds: evaluate_offer{req_id, facts_ref,
+/// base_facts_ref}`: `alt_facts` is the `CandidateFacts` behind `facts_ref` (the
+/// alternative), `base_facts` the one behind `base_facts_ref` (the current route from the
+/// search-start position to the destination). `req_id` must be the waiting avoid search.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AvoidOfferEvalRequest {
+    pub req_id: String,
     pub now_mono_ms: MonoMs,
     pub alt_facts: CandidateFacts,
+    pub base_facts: CandidateFacts,
 }
 
 /// Result of `dc_avoid_offer_eval`, tagged by `"result"` like `dc_validate_override`.
@@ -102,7 +104,7 @@ pub enum AvoidOfferEvalResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AvoidDeclineReason {
-    /// No avoid-chip search result is waiting for evaluation.
+    /// No avoid-chip search result is waiting for evaluation (or `req_id` is not it).
     NoPendingResult,
     /// The session is not `tracking` (03 §3.1: results are used only while tracking).
     NotTracking,

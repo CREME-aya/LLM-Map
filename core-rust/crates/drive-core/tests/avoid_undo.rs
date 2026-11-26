@@ -191,14 +191,20 @@ fn offered_on(orig: RouteBundle) -> (Session, RouteBundle, AvoidOffer, RouteKey)
     );
     let fin = json!({
         "at_mono_ms": 1_400, "kind": "search_finished", "req_id": "r1", "route_key": k,
-        "graph_version": k.graph_version, "outcome": "ok", "facts_ref": "f1", "engine_ms": 300
+        "graph_version": k.graph_version, "outcome": "ok", "facts_ref": "f1", "base_facts_ref": "b1", "engine_ms": 300
     });
     tick(&mut s, 1_500, Some(fix_x(&orig, 1_500, 85_000)), vec![fin]);
     let base = s.avoid_state().target().unwrap().base_eta_ms;
     let AvoidOfferEvalResult::Offered { avoid_offer } =
         s.avoid_offer_eval(&AvoidOfferEvalRequest {
+            req_id: "r1".into(),
             now_mono_ms: 1_600,
             alt_facts: facts(&k.graph_version, base + 30_000),
+            base_facts: {
+                let mut b = facts(&k.graph_version, base);
+                b.counts.right_unprotected = 1;
+                b
+            },
         })
     else {
         panic!("not offered");
