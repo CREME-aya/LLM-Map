@@ -205,9 +205,7 @@ fn run_with_wakes(name: &str) -> (Session, Vec<TickOutput>, usize, Vec<Option<u6
                 } => Some(serde_json::json!({
                     "req_id": req_id, "priority": priority, "distance_class": distance_class
                 })),
-                PlannerCmd::Cancel { .. } | PlannerCmd::Rank { .. } | PlannerCmd::Commit { .. } => {
-                    None
-                }
+                _ => None,
             })
             .collect();
         let want = step["expect_starts"]

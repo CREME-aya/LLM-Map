@@ -57,8 +57,10 @@ divergence point is computed once, in the `dc_route_commit` that loads the avoid
 say at `AvoidOffer` creation; same result since an undo needs that commit first), from the
 position when the avoid search started (`avoid::divergence_cm`; not found / ambiguous →
 unknown). `user_tap{offer_id, undo}` or `CXL` (`dc_validate_override` → `{result: undone,
-req_id}`, commit with the next tick): > 5 s after consent → `NO_PENDING_TARGET`; unknown
-divergence, avoid route not loaded yet, not `tracking` (`uncertain`), or at / past the
+req_id}`, commit with the next tick): > 5 s after consent → `NO_PENDING_TARGET`; avoid
+route not loaded yet → `cancel_commit{req_id}` (docs 836a370: the consent commit is withdrawn
+and its late `dc_route_commit` is `E_STALE`; a success, no phrase; CXL → `undone{req_id}`); unknown
+divergence, not `tracking` (`uncertain`), or at / past the
 divergence point → `NO_EFFECT`; else `commit{req_id: undo_req_id, route_key: current}` and the
 held result is dropped. Kotlin passes the held body with `route_revision` "0" (Rust: current
 + 1; the revision it carried is `E_SCHEMA`). A refusal speaks `undo_unavailable` (P2, no params;

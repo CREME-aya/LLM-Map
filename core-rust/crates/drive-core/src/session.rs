@@ -557,7 +557,10 @@ impl Session {
 
     /// "戻して" (`user_tap{offer_id, undo}` at `at`, or `CXL` spoken at `at`), 03 §3.1.
     /// Ok: `commit{req_id: undo_req_id, route_key: current}` pushed to `cmds` and the held
-    /// result dropped. Err: the reject code; the caller speaks the refusal.
+    /// result dropped. Before the avoid route is loaded (consent `commit` not settled yet):
+    /// `cancel_commit{req_id}` instead (docs 836a370) — Rust stops waiting for that commit at
+    /// once, so a `dc_route_commit` for it arriving later is `E_STALE`; also a success.
+    /// Err: the reject code; the caller speaks the refusal.
     fn try_undo(
         &mut self,
         now: u64,
@@ -578,9 +581,23 @@ impl Session {
             self.undo = UndoState::None;
             return Err(RejectCode::NoPendingTarget);
         }
-        // Consent given but the avoid route is not loaded yet: nothing to go back from.
+        // Consent given but the avoid route is not loaded yet: withdraw the commit.
+        if let UndoState::Consented(c) = &self.undo {
+            let req_id = c.req_id.clone();
+            let offer_id = c.offer_id.clone();
+            self.issued_commits.retain(|(r, _)| *r != req_id);
+            let mut fx = Effects::default();
+            self.planner.discard_held(at, "undo", &mut fx);
+            log.append(&mut fx.log);
+            cmds.push(PlannerCmd::CancelCommit {
+                req_id: req_id.clone(),
+            });
+            log.push(log_req(at, "avoid_commit_cancelled", &req_id, &offer_id));
+            self.undo = UndoState::None;
+            return Ok(req_id);
+        }
         let UndoState::Window(w) = &self.undo else {
-            return Err(RejectCode::NoEffect);
+            return Err(RejectCode::NoPendingTarget);
         };
         if self.current_route_key.as_ref() != Some(&w.route_key) {
             return Err(RejectCode::NoPendingTarget);
@@ -1131,13 +1148,18 @@ impl Session {
         let voice_cmds = std::mem::take(&mut self.pending_voice);
         let mut planner_cmds = std::mem::take(&mut self.pending_planner);
         planner_cmds.extend(fx.planner_cmds);
+        // In order: a consent and its cancel in the same output leave nothing waiting.
         for c in &planner_cmds {
-            if let PlannerCmd::Commit {
-                req_id, route_key, ..
-            } = c
-            {
-                self.issued_commits
-                    .push((req_id.clone(), route_key.clone()));
+            match c {
+                PlannerCmd::Commit {
+                    req_id, route_key, ..
+                } => self
+                    .issued_commits
+                    .push((req_id.clone(), route_key.clone())),
+                PlannerCmd::CancelCommit { req_id } => {
+                    self.issued_commits.retain(|(r, _)| r != req_id)
+                }
+                _ => {}
             }
         }
         let next_wake_mono_ms = [

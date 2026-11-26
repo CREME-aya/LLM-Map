@@ -652,6 +652,23 @@
               "description": "Only on the avoid-chip consent commit (provisional id undo-<avoid search req_id>). When Kotlin commits that avoid route it keeps the route body that was current until then for 5 s under this id. An undo (user_tap{offer_id, undo} / CXL) within 5 s of consent emits commit{req_id: undo_req_id, route_key: the current avoid route's key} without undo_req_id; Kotlin sets the held body's route_revision back to \"0\" before dc_route_commit (Rust assigns current + 1). 03 §3.1, team decision 2026-11-26."
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cmd",
+            "req_id"
+          ],
+          "description": "Withdraw the consent commit{req_id} before its route was loaded (docs 836a370, 03 §3.1 draft): an undo (user_tap{offer_id, undo} / CXL) within 5 s of consent that arrives before the dc_route_commit of the avoid route. Kotlin drops the avoid route body it holds for req_id and does not call dc_route_commit for it; Rust has stopped waiting for it, so a dc_route_commit with that req_id is E_STALE. Counts as a successful undo (no undo_unavailable phrase; CXL returns undone{req_id}).",
+          "properties": {
+            "cmd": {
+              "const": "cancel_commit"
+            },
+            "req_id": {
+              "type": "string"
+            }
+          }
         }
       ]
     },

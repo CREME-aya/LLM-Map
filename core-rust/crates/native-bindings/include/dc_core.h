@@ -103,7 +103,7 @@ typedef struct dc_session dc_session;
           *       planner_cmds[start{req_id, priority, distance_class: short|long, route_key,
           *                    graph_version, candidate_id?, fix?} | cancel{req_id}
           *                  | rank{plan_request_id, facts_refs[], reason: all_done|budget_expired}
-          *                  | commit{req_id, route_key, undo_req_id?}],
+          *                  | commit{req_id, route_key, undo_req_id?} | cancel_commit{req_id}],
           *   "経路を確認中" is horizon.status off_route / rerouting (show_checking_route is abolished).
           *   start.fix: for a reroute, the fix that confirmed off-route (Rust aligns the vehicle on
           *   the committed route only; Valhalla searches the road network from that position).
@@ -116,7 +116,10 @@ typedef struct dc_session dc_session;
           *   route body current until then for 5 s under it. "戻して" (user_tap{offer_id, undo}
           *   or CXL via dc_validate_override → {result: undone, req_id}) within 5 s and before
           *   the divergence point → commit{req_id: undo_req_id, route_key: current}: pass the
-          *   held body with route_revision set back to "0". Refused (NO_EFFECT /
+          *   held body with route_revision set back to "0". An undo within 5 s that arrives
+          *   before the avoid route's dc_route_commit → cancel_commit{req_id} instead (CXL:
+          *   undone{req_id}): drop the avoid route body held for req_id; its dc_route_commit is
+          *   E_STALE from then on (docs 836a370). Whichever reaches the actor first decides. Refused (NO_EFFECT /
           *   NO_PENDING_TARGET) → one speak{template_id: undo_unavailable}.
           *   rank: once per plan; Kotlin calls dc_rank with the CandidateFacts behind facts_refs
           *   (may be empty). The plan is over: no more start for it, a late search_finished

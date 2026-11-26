@@ -38,7 +38,11 @@ import java.io.Closeable
 //   validateOverride -> {result: "undone", req_id}, the commit then comes with the next tick)
 //   yields commit{req_id: undo_req_id, route_key: the current avoid route's key}: pass
 //   req_id = undo_req_id and set the held body's route_revision back to "0" before routeCommit (Rust assigns current + 1; passing the
-//   old revision is E_SCHEMA). Drop the held body after 5 s. A refused undo comes back as one
+//   old revision is E_SCHEMA). Drop the held body after 5 s.
+// - planner_cmds cancel_commit{req_id}: "戻して" reached Rust before you called routeCommit for
+//   the consent commit req_id (docs 836a370). Drop the avoid route body held for req_id and do
+//   not commit it (Rust answers E_STALE if you do). Not a refusal: no phrase is spoken; CXL
+//   returns {result: "undone", req_id}. The actor is serial, so the order decides. A refused undo comes back as one
 //   voice_cmds speak{template_id: "undo_unavailable"} (template provisional).
 // - planner_cmds start{priority: reroute, fix}: Rust decided the vehicle left the route
 //   (on-route alignment is in Rust, docs 04 §3.1); search from that fix.

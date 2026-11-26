@@ -172,8 +172,8 @@ struct Consented {
 }
 
 /// On `orig`: tracking at 500 m starts r1; while it runs the car moves to 850 m (past
-/// edge 1001); ok → offer → consent at 3 s.
-fn consented_on(orig: RouteBundle) -> Consented {
+/// edge 1001); ok → offer (`consented_on`: consent at 3 s).
+fn offered_on(orig: RouteBundle) -> (Session, RouteBundle, AvoidOffer, RouteKey) {
     let mut s = Session::new(config());
     s.route_commit(&RouteCommitRequest {
         req_id: None,
@@ -203,6 +203,11 @@ fn consented_on(orig: RouteBundle) -> Consented {
     else {
         panic!("not offered");
     };
+    (s, orig, avoid_offer, k)
+}
+
+fn consented_on(orig: RouteBundle) -> Consented {
+    let (mut s, orig, avoid_offer, k) = offered_on(orig);
     let consent = tick(
         &mut s,
         CONSENT_AT,
@@ -496,11 +501,36 @@ fn divergence_ambiguous_is_no_effect_but_behind_the_start_is_ignored() {
     assert_eq!(divergence(&c), Some(DIVERGENCE_CM));
 }
 
-/// Consent given but the avoid route not loaded yet: NO_EFFECT. No consent at all:
-/// NO_PENDING_TARGET.
+fn cancels(o: &TickOutput) -> Vec<String> {
+    o.planner_cmds
+        .iter()
+        .filter_map(|c| match c {
+            PlannerCmd::CancelCommit { req_id } => Some(req_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Kotlin's `dc_route_commit` of the avoid route (`req_id` r1), as a raw result.
+fn load_raw(c: &mut Consented) -> Result<RouteKey, ErrorCode> {
+    let avoid = avoid_line(&c.orig);
+    c.s.route_commit(&RouteCommitRequest {
+        req_id: Some("r1".into()),
+        expected_route_key: Some(c.orig_key.clone()),
+        bundle: avoid,
+    })
+    .map(|r| r.route_key)
+    .map_err(|e| e.code)
+}
+
+/// Undo first (docs 836a370): consent given, the avoid route not loaded yet → the consent
+/// commit is withdrawn with `cancel_commit{r1}` (a success: no refusal phrase); the
+/// `dc_route_commit` for r1 arriving afterwards is `E_STALE` and nothing is replaced.
+/// No consent at all: NO_PENDING_TARGET.
 #[test]
-fn undo_before_the_avoid_route_is_loaded_or_without_consent() {
+fn undo_before_the_avoid_route_is_loaded_cancels_the_commit() {
     let mut c = consented_on(main_line());
+    assert_eq!(c.s.issued_commits().collect::<Vec<_>>(), vec!["r1"]);
     let o = tick(
         &mut c.s,
         3_500,
@@ -508,7 +538,23 @@ fn undo_before_the_avoid_route_is_loaded_or_without_consent() {
         vec![tap(3_500, &c.offer.offer_id, "undo")],
     );
     assert!(commits(&o).is_empty());
-    assert!(refused(&o, "NO_EFFECT"));
+    assert_eq!(cancels(&o), vec!["r1".to_owned()]);
+    assert_eq!(undo_speaks(&o), 0);
+    assert!(!o.log.iter().any(|l| l.what == "avoid_undo_refused"));
+    assert!(o.log.iter().any(|l| l.what == "avoid_commit_cancelled"));
+    assert_eq!(*c.s.undo_state(), UndoState::None);
+    assert_eq!(c.s.issued_commits().count(), 0);
+    assert_eq!(load_raw(&mut c), Err(ErrorCode::Stale));
+    assert_eq!(key(&c.s), c.orig_key, "nothing replaced");
+    // a second undo: nothing pending any more
+    let o = tick(
+        &mut c.s,
+        3_600,
+        None,
+        vec![tap(3_600, &c.offer.offer_id, "undo")],
+    );
+    assert!(cancels(&o).is_empty());
+    assert!(refused(&o, "NO_PENDING_TARGET"));
 
     let mut s = Session::new(config());
     s.route_commit(&RouteCommitRequest {
@@ -520,6 +566,54 @@ fn undo_before_the_avoid_route_is_loaded_or_without_consent() {
     let o = tick(&mut s, 1_000, None, vec![tap(1_000, "avoid-r1", "undo")]);
     assert!(refused(&o, "NO_PENDING_TARGET"));
     assert_eq!(undo_speaks(&o), 1);
+}
+
+/// The other order (the actor is serial, so the order decides deterministically): the
+/// avoid route's `dc_route_commit` first → the undo is the normal one (`commit{undo-r1}`),
+/// never `cancel_commit`.
+#[test]
+fn route_commit_first_then_undo_is_the_normal_undo() {
+    let mut c = consented_on(main_line());
+    let ak = load_raw(&mut c).unwrap();
+    tick(&mut c.s, 3_400, Some(fix_x(&c.orig, 3_400, 90_000)), vec![]);
+    let o = tick(
+        &mut c.s,
+        3_500,
+        None,
+        vec![tap(3_500, &c.offer.offer_id, "undo")],
+    );
+    assert!(cancels(&o).is_empty());
+    assert_eq!(commits(&o), vec![("undo-r1".to_owned(), ak, None)]);
+}
+
+/// Consent and undo in the same tick: the output carries `commit{r1}` then
+/// `cancel_commit{r1}`, and nothing is left waiting.
+#[test]
+fn consent_and_undo_in_one_tick_leave_nothing_waiting() {
+    let (mut s, _, offer, k) = offered_on(main_line());
+    let o = tick(
+        &mut s,
+        CONSENT_AT,
+        None,
+        vec![
+            tap(CONSENT_AT, &offer.offer_id, "avoid"),
+            tap(CONSENT_AT, &offer.offer_id, "undo"),
+        ],
+    );
+    assert_eq!(
+        o.planner_cmds,
+        vec![
+            PlannerCmd::Commit {
+                req_id: "r1".into(),
+                route_key: k,
+                undo_req_id: Some("undo-r1".into()),
+            },
+            PlannerCmd::CancelCommit {
+                req_id: "r1".into()
+            },
+        ]
+    );
+    assert_eq!(s.issued_commits().count(), 0);
 }
 
 // ---- CXL ---------------------------------------------------------------------------------
@@ -549,6 +643,26 @@ fn cxl_undoes_through_the_next_tick() {
     let o = tick(&mut c.s, 4_600, None, vec![]);
     assert_eq!(commits(&o), vec![("undo-r1".to_owned(), ak, None)]);
     assert_eq!(undo_speaks(&o), 0);
+}
+
+/// `CXL` before the avoid route is loaded: `undone{r1}` (the consent commit's req_id);
+/// `cancel_commit{r1}` with the next tick, no refusal phrase; the late route is `E_STALE`
+/// even before that tick.
+#[test]
+fn cxl_before_the_avoid_route_is_loaded_cancels_the_commit() {
+    let mut c = consented_on(main_line());
+    assert_eq!(
+        cxl(&mut c.s, 3_500),
+        ValidateOverrideResult::Undone {
+            req_id: "r1".into()
+        }
+    );
+    assert_eq!(load_raw(&mut c), Err(ErrorCode::Stale));
+    let o = tick(&mut c.s, 3_600, None, vec![]);
+    assert_eq!(cancels(&o), vec!["r1".to_owned()]);
+    assert!(commits(&o).is_empty());
+    assert_eq!(undo_speaks(&o), 0);
+    assert_eq!(key(&c.s), c.orig_key);
 }
 
 /// `CXL` refused: the reject code comes back and the phrase goes out with the next tick.

@@ -348,6 +348,15 @@ pub enum PlannerCmd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         undo_req_id: Option<String>,
     },
+    /// Withdraw the consent `commit{req_id}` before its route was loaded (docs 836a370,
+    /// 03 §3.1 draft): "戻して" within 5 s of consent that arrives before the avoid route's
+    /// `dc_route_commit`. Kotlin drops the avoid route body it holds for `req_id`; Rust no
+    /// longer waits for it (`dc_route_commit` with that `req_id` → `E_STALE`). The actor
+    /// is serial, so whichever comes first decides: the route commit first → a normal undo
+    /// later; the undo first → this cancel.
+    CancelCommit {
+        req_id: String,
+    },
 }
 
 /// Why `rank` was emitted.

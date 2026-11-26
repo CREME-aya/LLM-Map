@@ -52,7 +52,9 @@ pub enum ValidateOverrideResult {
         code: RejectCode,
     },
     /// `CXL` taken as "戻して" of an avoid switch confirmed within 5 s (03 §3.1):
-    /// `commit{req_id, route_key: current}` comes with the next `dc_tick`.
+    /// `commit{req_id, route_key: current}` comes with the next `dc_tick` (`req_id` =
+    /// `undo-<req_id>`). Before the avoid route was loaded: `cancel_commit{req_id}` instead,
+    /// `req_id` = the consent commit's (docs 836a370).
     /// TODO(abi-v1): shape provisional (team decision 2026-11-26 did not name it).
     Undone {
         req_id: String,

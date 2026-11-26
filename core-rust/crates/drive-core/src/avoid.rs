@@ -24,7 +24,9 @@
 //!    old route and the new bundle), from the position when the search started
 //!    ([`divergence_cm`]); it is kept in the [`UndoWindow`]. `user_tap{offer_id, undo}` or
 //!    `CXL` (`dc_validate_override`): more than 5 s after consent → `NO_PENDING_TARGET`;
-//!    divergence unknown, avoid route not loaded yet, position not `tracking` (e.g.
+//!    avoid route not loaded yet → `cancel_commit{req_id}` (docs 836a370: the consent commit
+//!    is withdrawn, its late `dc_route_commit` is `E_STALE`; a success, CXL → `undone{req_id}`);
+//!    divergence unknown, position not `tracking` (e.g.
 //!    `uncertain`), or at / past the divergence point → `NO_EFFECT`; otherwise
 //!    `commit{req_id: undo_req_id, route_key: current}` and any held result is dropped.
 //!    A refusal also speaks [`UNDO_UNAVAILABLE_TEMPLATE_ID`] once.
