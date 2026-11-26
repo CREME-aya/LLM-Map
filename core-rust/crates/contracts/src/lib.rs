@@ -10,6 +10,7 @@
 
 pub mod common;
 pub mod envelope;
+pub mod facts;
 pub mod horizon;
 pub mod override_types;
 pub mod plan;

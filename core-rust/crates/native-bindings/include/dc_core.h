@@ -53,7 +53,13 @@ typedef struct dc_session dc_session;
           * (skeleton: SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF only, else E_UNIMPLEMENTED) */
 /* 8  */ dc_out   dc_trip_score(dc_in trip_summary_json);                      /* TODO: E_UNIMPLEMENTED */
 /* 9  */ dc_out   dc_route_commit(dc_session* s, dc_in route_bundle_json);     /* route body only here */
-         /* in : {expected_route_key: RouteKey|null, bundle: RouteBundle}   (schema/route-bundle.schema.json)
+         /* in : {req_id: string|null, expected_route_key: RouteKey|null, bundle: RouteBundle}
+          *      (schema/route-bundle.schema.json)
+          *      req_id (provisional, proposed to the team) = the req_id of the planner_cmds
+          *      commit this route answers (undo-<req_id> for an undo). While a route is current
+          *      it must name a commit Rust issued with route_key = expected_route_key and not
+          *      settled yet (loading any route settles them all; cancel_commit withdraws one)
+          *      -> otherwise E_STALE, nothing replaced. null / any value for the first route.
           *      expected_route_key = guard: from planner_cmds commit (the current route's key when the
           *      search started), or null for the first route. Must equal the current route
           *      (null = none) -> otherwise E_STALE, nothing replaced (checked first).
@@ -84,7 +90,9 @@ typedef struct dc_session dc_session;
           *       | low_memory | inference_down{reason} | inference_up{tier}
           *       | audio_focus_lost | call_state{active}
           *       | search_finished{req_id, route_key, graph_version, outcome: ok|cancelled|error,
-          *                         facts_ref?, engine_ms}     // exactly one per search
+          *                         facts_ref?, base_facts_ref?, engine_ms}  // exactly one per search
+          *             // base_facts_ref: avoid_chip only, CandidateFacts of the current route from
+          *             // the search-start position (built with the alternative; no new search)
           *             // no timeout outcome: Rust detects the watchdog deadline from now_mono_ms
           *             // (-> engine_stuck); an ok returned after cancel is discarded_late,
           *             // after engine_stuck discarded_after_stuck
@@ -97,20 +105,49 @@ typedef struct dc_session dc_session;
           *       planner_cmds[start{req_id, priority, distance_class: short|long, route_key,
           *                    graph_version, candidate_id?, fix?} | cancel{req_id}
           *                  | rank{plan_request_id, facts_refs[], reason: all_done|budget_expired}
-          *                  | commit{req_id, route_key}],
+          *                  | commit{req_id, route_key, undo_req_id?} | cancel_commit{req_id}
+          *                  | evaluate_offer{req_id, facts_ref, base_facts_ref}],
+          *   cancel{req_id} also comes for an avoid_chip search still running 1.5 s after its
+          *   start (04 §4.3; the slot stays occupied until its search_finished).
+          *   evaluate_offer: an avoid_chip ok (valid, tracking) with both refs -> call
+          *   dc_avoid_offer_eval with the CandidateFacts behind them. Without both: no offer.
           *   "経路を確認中" is horizon.status off_route / rerouting (show_checking_route is abolished).
           *   start.fix: for a reroute, the fix that confirmed off-route (Rust aligns the vehicle on
           *   the committed route only; Valhalla searches the road network from that position).
           *   commit: only for a reroute / ad-hoc explicit_plan ok with a valid state (not
           *   cancelled / stuck, route_key current, horizon.status not uncertain / finished); Kotlin calls
-          *   dc_route_commit with that search's route body (never for avoid_chip / plan candidates).
+          *   dc_route_commit with that search's route body (never for plan candidates). For an
+          *   avoid_chip search only after consent: user_tap{target_id: offer_id, action: avoid}
+          *   or asr_result{text_class: dict, dict_norm: "はい"} (Rust's dictionary, provisional
+          *   values; only while an offer is shown) before the offer's deadline, while tracking, route_key unchanged (04 §4.3, 03 §3.1).
+          *   That consent commit carries undo_req_id ("undo-<req_id>", provisional): keep the
+          *   route body current until then for 5 s under it. "戻して" (user_tap{offer_id, undo}
+          *   or CXL via dc_validate_override → {result: undone, req_id}) within 5 s and before
+          *   the divergence point → commit{req_id: undo_req_id, route_key: current}: pass the
+          *   held body with route_revision set back to "0". An undo within 5 s that arrives
+          *   before the avoid route's dc_route_commit → cancel_commit{req_id} instead (CXL:
+          *   undone{req_id}): drop the avoid route body held for req_id; its dc_route_commit is
+          *   E_STALE from then on (docs 836a370). Whichever reaches the actor first decides. Refused (NO_EFFECT /
+          *   NO_PENDING_TARGET) → one speak{template_id: undo_unavailable}.
           *   rank: once per plan; Kotlin calls dc_rank with the CandidateFacts behind facts_refs
           *   (may be empty). The plan is over: no more start for it, a late search_finished
           *   only frees the slot (discarded_late).
           *       next_wake_mono_ms: u64|null, log[]}
           *   next_wake_mono_ms: earliest time the output may change without new input (includes the
           *   search watchdog deadline). Kotlin calls dc_tick by then; null = tick on each Fix only. */
-/* 11 */ dc_out   dc_avoid_offer_eval(dc_session* s, dc_in req_json);         /* {now_mono_ms, alt_facts} (TODO: E_UNIMPLEMENTED) */
+/* 11 */ dc_out   dc_avoid_offer_eval(dc_session* s, dc_in req_json);
+          /* {req_id, now_mono_ms, alt_facts: CandidateFacts, base_facts: CandidateFacts}
+          *   Call for planner_cmds evaluate_offer{req_id, facts_ref, base_facts_ref}: alt_facts
+          *   behind facts_ref, base_facts behind base_facts_ref (docs 2a8a727). Another req_id
+          *   than the waiting avoid search -> declined{no_pending_result}.
+          * → {result: "offered", avoid_offer: AvoidOffer} (shown on its HorizonEntry from the
+          *   next dc_tick; dismiss{expired} at the deadline) | {result: "declined", reason:
+          *   no_pending_result|not_tracking|deadline_passed|graph_mismatch|not_legal_or_complete
+          *   |target_edges_unknown|target_not_avoided|not_fewer_hazards|over_detour_cap}.
+          *   04 §4.3 item 2: (a) the target's (edge_in, edge_out) must not be in
+          *   alt_facts.junctions; (b) against base_facts, fewer avoid targets (right_unprotected
+          *   + right_signal_unknown_protection + right_signal_unknown) and narrow_m
+          *   (confirmed + inferred) not longer. Result shape provisional (not in docs). */
 /* 12 */ dc_out   dc_exchange_validate(dc_in req_json);                        /* {kind, payload} (TODO: E_UNIMPLEMENTED) */
 
 #ifdef __cplusplus

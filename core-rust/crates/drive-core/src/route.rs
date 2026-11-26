@@ -75,6 +75,8 @@ pub struct Seg {
 /// Edge timing on the route-wide axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EdgeSpan {
+    /// Directed edge id (`legs[].edges[].edge_id`).
+    edge_id: u64,
     along_start: u32,
     along_end: u32,
     flags: u32,
@@ -248,6 +250,7 @@ impl LoadedRoute {
                     return Err(at("cum_time_ms decreases"));
                 }
                 edges.push(EdgeSpan {
+                    edge_id: e.edge_id.0,
                     along_start: (route_along + u64::from(a0)) as u32,
                     along_end: (route_along + u64::from(a1)) as u32,
                     flags: e.flags,
@@ -334,6 +337,27 @@ impl LoadedRoute {
             m.id.route_key = key.clone();
         }
         self.route_key = key;
+    }
+
+    /// `(edge_id, along_start_cm, along_end_cm)` of every edge in route order.
+    pub fn edge_spans(&self) -> Vec<(u64, u32, u32)> {
+        self.edges
+            .iter()
+            .map(|e| (e.edge_id, e.along_start, e.along_end))
+            .collect()
+    }
+
+    /// The `(edge_in, edge_out)` pair of a maneuver at `along` (04 §4.3 (a), the pair
+    /// `CandidateFacts.junctions` lists): `edge_in` is the edge the anchor lies on, ending at
+    /// or after it (`along_start < along <= along_end`; the edge arriving at a boundary),
+    /// `edge_out` the next one. `None` at the route start or on the last edge.
+    pub fn edge_pair_at(&self, along: u32) -> Option<(u64, u64)> {
+        let i = self
+            .edges
+            .iter()
+            .position(|e| e.along_start < along && along <= e.along_end)?;
+        let next = self.edges.get(i + 1)?;
+        Some((self.edges[i].edge_id, next.edge_id))
     }
 
     pub(crate) fn motorway_approach(&self, along: u32) -> bool {

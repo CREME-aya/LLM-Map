@@ -314,6 +314,7 @@
       "description": "Avoid chip (04 §2). Display/voice text is generated in Kotlin from summary.template_id; the SLM is not involved."
     },
     "EtaRange": {
+      "description": "04 §2.2 (provisional): durations (ms) from the current position. typical = remaining time to the maneuver (edges.cum_time_ms difference); earliest = typical x 0.85 (rounded down), latest = typical x 1.25 (rounded up), integer per-mille set through the session config. earliest: deadlines and window starts; latest: window end; typical: emphasis times and distances.",
       "type": "object",
       "additionalProperties": false,
       "required": [

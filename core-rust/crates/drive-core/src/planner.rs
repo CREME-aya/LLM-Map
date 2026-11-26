@@ -25,7 +25,8 @@
 //!   off-route, `invalidate_route_eta`) → long. The latest plan's class is never inherited.
 //!   Only the watchdog limit (5 s / 10 s) applies to these searches; the comparison budget
 //!   (3 s / 8 s) is for plans only. The avoid chip's own compute budget (1.5 s) and the
-//!   20 s-before-branch deadline are separate and not handled here.
+//!   20 s-before-branch deadline are separate (`crate::avoid`, decided by the session; the
+//!   budget passing sends `cancel` through `cancel_search`, the slot stays occupied).
 //! - Plan queue (team decision 2026-11-25): `begin_plan_with` queues the plan's candidate
 //!   searches (baseline `explicit_plan`, the rest `comparison`); they share the single slot
 //!   with ad-hoc requests and start one at a time. The plan ends with exactly one
@@ -201,6 +202,17 @@ pub struct Effects {
     pub planner_cmds: Vec<PlannerCmd>,
     pub ui_cmds: Vec<UiCmd>,
     pub log: Vec<LogEvent>,
+    /// Avoid-chip searches that returned a usable `ok` (not committed: the session waits
+    /// for `dc_avoid_offer_eval`, 04 §4.3).
+    pub avoid_ready: Vec<AvoidReady>,
+}
+
+/// A usable avoid-chip `ok` and the refs it came with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvoidReady {
+    pub req_id: String,
+    pub facts_ref: Option<String>,
+    pub base_facts_ref: Option<String>,
 }
 
 #[derive(Debug)]
@@ -245,6 +257,20 @@ impl SearchPlanner {
         self.held = new;
     }
 
+    /// Drops a held result (`discarded_hold_<why>`): "戻して" discards pending results
+    /// before going back (03 §3.1).
+    pub fn discard_held(&mut self, at: u64, why: &str, fx: &mut Effects) {
+        if let Some(h) = self.held.take() {
+            log(
+                fx,
+                at,
+                &format!("discarded_hold_{why}"),
+                Some(&h.req_id),
+                None,
+            );
+        }
+    }
+
     /// Called at the end of every tick: drops an expired hold, or issues the held
     /// `commit` once the session may commit again and the route has not changed.
     pub fn release_held(
@@ -282,6 +308,7 @@ impl SearchPlanner {
             fx.planner_cmds.push(PlannerCmd::Commit {
                 req_id: h.req_id.clone(),
                 route_key: h.route_key,
+                undo_req_id: None,
             });
             log(
                 fx,
@@ -514,11 +541,47 @@ impl SearchPlanner {
         }
     }
 
+    /// Cancels search `req_id` if it occupies the slot and no cancel was sent yet (the slot
+    /// stays occupied until its `search_finished`). Returns whether a cancel went out.
+    pub fn cancel_search(&mut self, now: u64, req_id: &str, fx: &mut Effects) -> bool {
+        match &self.slot {
+            Slot::Running { req } if req.req_id == req_id => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::CancelRequested { req };
+                true
+            }
+            Slot::EngineStuck {
+                req,
+                cancel_sent: false,
+            } if req.req_id == req_id => {
+                let req = req.clone();
+                Self::send_cancel(now, &req, fx);
+                self.slot = Slot::EngineStuck {
+                    req,
+                    cancel_sent: true,
+                };
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn send_cancel(now: u64, req: &SearchReq, fx: &mut Effects) {
         fx.planner_cmds.push(PlannerCmd::Cancel {
             req_id: req.req_id.clone(),
         });
         log(fx, now, "search_cancel_requested", Some(&req.req_id), None);
+    }
+
+    /// Nothing runs or waits: a search requested now starts at once.
+    pub fn is_idle(&self) -> bool {
+        self.slot == Slot::Idle
+            && self.pending.is_none()
+            && !self
+                .plan
+                .as_ref()
+                .is_some_and(|p| !p.ended && !p.queue.is_empty())
     }
 
     /// A reroute is waiting or occupies the slot (no second one is requested).
@@ -654,6 +717,7 @@ impl SearchPlanner {
         route_key: &RouteKey,
         outcome: SearchOutcome,
         facts_ref: Option<&str>,
+        base_facts_ref: Option<&str>,
         current_route_key: Option<&RouteKey>,
         gate: CommitGate,
         fx: &mut Effects,
@@ -733,11 +797,17 @@ impl SearchPlanner {
                 fx.planner_cmds.push(PlannerCmd::Commit {
                     req_id: req_id.to_owned(),
                     route_key: req.route_key.clone(),
+                    undo_req_id: None,
                 });
                 log(fx, at, "commit_issued", Some(req_id), None);
             }
-            // TODO(drive-core): avoid chip → dc_avoid_offer_eval / AvoidOffer (not wired).
+            // Never committed here: dc_avoid_offer_eval and consent first (04 §4.3).
             SearchOutcome::Ok if req.priority == SearchPriority::AvoidChip => {
+                fx.avoid_ready.push(AvoidReady {
+                    req_id: req_id.to_owned(),
+                    facts_ref: facts_ref.map(str::to_owned),
+                    base_facts_ref: base_facts_ref.map(str::to_owned),
+                });
                 log(fx, at, "avoid_result_ready", Some(req_id), None)
             }
             SearchOutcome::Ok => log(fx, at, "search_result_unused", Some(req_id), None),
@@ -843,4 +913,62 @@ fn log(fx: &mut Effects, at: u64, what: &str, req_id: Option<&str>, detail: Opti
         req_id: req_id.map(str::to_owned),
         detail,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contracts::U64Str;
+
+    fn rk() -> RouteKey {
+        RouteKey {
+            trip_id: "t1".into(),
+            trip_revision: U64Str(3),
+            route_revision: U64Str(1),
+            graph_version: "g".into(),
+        }
+    }
+
+    /// A reroute ok returned while uncertain is held (04 §3).
+    fn planner_with_hold() -> SearchPlanner {
+        let mut p = SearchPlanner::new(SearchLimits::default());
+        let mut fx = Effects::default();
+        p.request(1_000, SearchPriority::Reroute, rk(), None, &mut fx);
+        p.on_search_finished(
+            2_000,
+            "r1",
+            &rk(),
+            SearchOutcome::Ok,
+            None,
+            None,
+            Some(&rk()),
+            CommitGate::Hold,
+            &mut fx,
+        );
+        assert_eq!(p.held().map(|h| h.req_id.as_str()), Some("r1"));
+        p
+    }
+
+    /// "戻して" drops a held result before going back (03 §3.1): `discarded_hold_<why>`,
+    /// once; it is never committed afterwards, and its expiry no longer wakes Kotlin.
+    #[test]
+    fn discard_held_drops_the_hold_once() {
+        let mut p = planner_with_hold();
+        assert_eq!(p.next_wake(), Some(2_000 + 10_000 + 1));
+        let mut fx = Effects::default();
+        p.discard_held(2_500, "undo", &mut fx);
+        assert!(p.held().is_none());
+        assert_eq!(fx.log.len(), 1);
+        assert_eq!(fx.log[0].what, "discarded_hold_undo");
+        assert_eq!(fx.log[0].req_id.as_deref(), Some("r1"));
+        assert_eq!(fx.log[0].at_mono_ms, 2_500);
+        assert_eq!(p.next_wake(), None);
+        // nothing held: no log
+        let mut fx = Effects::default();
+        p.discard_held(2_600, "undo", &mut fx);
+        assert!(fx.log.is_empty());
+        // tracking again: nothing is committed
+        p.release_held(3_000, CommitGate::Allowed, Some(&rk()), &mut fx);
+        assert!(fx.planner_cmds.is_empty());
+    }
 }

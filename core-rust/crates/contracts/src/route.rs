@@ -15,7 +15,14 @@ use crate::common::{RouteKey, U64Str};
 use crate::horizon::Maneuver;
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// `dc_route_commit` input: `{ expected_route_key, bundle }`.
+/// `dc_route_commit` input: `{ req_id, expected_route_key, bundle }`.
+///
+/// `req_id` (provisional, proposed to the team) is the `req_id` of the `commit{req_id,
+/// route_key}` Rust emitted (`undo-<req_id>` for an undo). While a route is current it must
+/// name a commit Rust issued and has not settled, with the same `route_key` as
+/// `expected_route_key`; otherwise `E_STALE` and nothing is replaced. This tells two
+/// commits with the same guard apart (a reroute vs. the consented avoid route). For the
+/// first route of the session (no route current) it may be `null` (the key is required).
 ///
 /// `expected_route_key` is the guard: the current route's key from `commit{req_id, route_key}` (the
 /// current route when the search started), or `null` when no route is committed yet (the
@@ -28,6 +35,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteCommitRequest {
+    #[serde(deserialize_with = "crate::common::required_nullable")]
+    pub req_id: Option<String>,
     #[serde(deserialize_with = "crate::common::required_nullable")]
     pub expected_route_key: Option<RouteKey>,
     pub bundle: RouteBundle,

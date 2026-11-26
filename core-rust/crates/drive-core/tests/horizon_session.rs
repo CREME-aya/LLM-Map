@@ -59,6 +59,7 @@ fn committed() -> (Session, RouteBundle) {
     let mut s = Session::new(SessionConfig::default());
     let b = main_line();
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -187,7 +188,8 @@ fn reroute_from_fix_then_commit() {
         o.planner_cmds,
         vec![PlannerCmd::Commit {
             req_id: "r1".into(),
-            route_key: b.route_key.clone()
+            route_key: b.route_key.clone(),
+            undo_req_id: None,
         }]
     );
     // slot free, still off: status off_route until the new route is committed
@@ -201,17 +203,46 @@ fn reroute_from_fix_then_commit() {
         o.planner_cmds,
         vec![PlannerCmd::Commit {
             req_id: "r2".into(),
+            undo_req_id: None,
             route_key: b.route_key.clone()
         }]
     );
-    // Kotlin commits the new route: horizon of the new route, uncertain until a fix
+    // req_id must name a commit Rust issued with that guard: none / unknown / another
+    // guard → E_STALE, nothing replaced
     let b2 = main_line();
+    for (req_id, guard) in [
+        (None, b.route_key.clone()),
+        (Some("r3"), b.route_key.clone()),
+        (Some("undo-r2"), b.route_key.clone()),
+    ] {
+        let e = s
+            .route_commit(&RouteCommitRequest {
+                req_id: req_id.map(str::to_owned),
+                expected_route_key: Some(guard),
+                bundle: b2.clone(),
+            })
+            .unwrap_err();
+        assert_eq!(e.code, contracts::ErrorCode::Stale, "{req_id:?}");
+        assert_eq!(s.route().unwrap().route_key, b.route_key);
+    }
+    // Kotlin commits the new route (r2): horizon of the new route, uncertain until a fix
     let r = s
         .route_commit(&RouteCommitRequest {
+            req_id: Some("r2".into()),
             expected_route_key: Some(b.route_key.clone()),
             bundle: b2.clone(),
         })
         .unwrap();
+    // r1 had the same guard; it is settled by the route change (E_STALE on both halves)
+    let e = s
+        .route_commit(&RouteCommitRequest {
+            req_id: Some("r1".into()),
+            expected_route_key: Some(r.route_key.clone()),
+            bundle: main_line(),
+        })
+        .unwrap_err();
+    assert_eq!(e.code, contracts::ErrorCode::Stale);
+    assert_eq!(s.issued_commits().count(), 0);
     let b2 = as_committed(&s, b2);
     assert_eq!(r.route_key, b2.route_key);
     assert_eq!(b2.route_key.route_revision.0, 2, "current + 1");
@@ -232,7 +263,9 @@ fn commit_of(o: &TickOutput) -> Vec<(&str, &RouteKey)> {
     o.planner_cmds
         .iter()
         .filter_map(|c| match c {
-            PlannerCmd::Commit { req_id, route_key } => Some((req_id.as_str(), route_key)),
+            PlannerCmd::Commit {
+                req_id, route_key, ..
+            } => Some((req_id.as_str(), route_key)),
             _ => None,
         })
         .collect()
@@ -317,6 +350,7 @@ fn hold_limit_is_configurable() {
     let mut s = Session::from_json(br#"{"commit_hold_ms": 2000}"#).unwrap();
     let b = main_line();
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -354,7 +388,10 @@ fn held_result_for_a_replaced_route_is_not_committed() {
     let (mut s, b) = uncertain_with_search();
     s.tick(finished("r1", &b.route_key, 3_000));
     let b2 = main_line();
+    // another commit against the same route (stands in for an explicit plan)
+    s.issue_commit_for_test("r9", b.route_key.clone());
     s.route_commit(&RouteCommitRequest {
+        req_id: Some("r9".into()),
         expected_route_key: Some(b.route_key.clone()),
         bundle: b2.clone(),
     })
@@ -485,6 +522,7 @@ fn group_limits_and_voice_lead_use_the_approach_edge() {
         }
         let mut s = Session::new(SessionConfig::default());
         s.route_commit(&RouteCommitRequest {
+            req_id: None,
             expected_route_key: None,
             bundle: b.clone(),
         })
@@ -532,6 +570,7 @@ fn last_junction_expires_after_either_inclusive_limit() {
             ..Default::default()
         });
         s.route_commit(&RouteCommitRequest {
+            req_id: None,
             expected_route_key: None,
             bundle: b.clone(),
         })
@@ -596,6 +635,7 @@ fn roundabout_exit_still_has_a_p1_deadline_after_entrance_passage() {
     m.roundabout_leave_anchor = Some(exit);
     let mut s = Session::new(SessionConfig::default());
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -668,6 +708,7 @@ fn ordinary_junctions_create_no_refs_but_keep_p1_deadlines() {
             ..Default::default()
         });
         s.route_commit(&RouteCommitRequest {
+            req_id: None,
             expected_route_key: None,
             bundle: b.clone(),
         })

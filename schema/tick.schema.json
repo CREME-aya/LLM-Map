@@ -421,6 +421,10 @@
             "facts_ref": {
               "type": "string"
             },
+            "base_facts_ref": {
+              "type": "string",
+              "description": "Avoid-chip search only, optional (docs 2a8a727, 03 §3.1 / 04 §4.3): CandidateFacts C++ builds with the alternative for the current route from the search-start position to the destination (no new search; attributes of the current route's edges). Rust compares both with the same yardstick; without it no offer is made."
+            },
             "engine_ms": {
               "type": "integer",
               "minimum": 0,
@@ -636,7 +640,7 @@
             "req_id",
             "route_key"
           ],
-          "description": "Kotlin calls dc_route_commit with the route body of search req_id. Only for a reroute / explicit_plan search outside a plan that returned ok with a valid state (not cancelled / engine_stuck, route_key equal to the current route); never for avoid_chip (dc_avoid_offer_eval + consent) nor for a plan candidate (rank). route_key is the current route's key when the search started (not the new route's); dc_route_commit re-checks it and returns E_STALE without replacing anything if the route changed meanwhile. Team decision 2026-11-25, not in docs yet.",
+          "description": "Kotlin calls dc_route_commit with the route body of search req_id. Only for a reroute / explicit_plan search outside a plan that returned ok with a valid state (not cancelled / engine_stuck, route_key equal to the current route); for an avoid_chip search only after consent (dc_avoid_offer_eval put its AvoidOffer on the horizon, then user_tap{target_id: offer_id, action: avoid} arrived before the deadline with the offer's route_key still current; 03 §3.1 / 04 §4.3); never for a plan candidate (rank). route_key is the current route's key when the search started (not the new route's); dc_route_commit re-checks it and returns E_STALE without replacing anything if the route changed meanwhile. Team decision 2026-11-25, not in docs yet.",
           "properties": {
             "cmd": {
               "const": "commit"
@@ -646,6 +650,52 @@
             },
             "route_key": {
               "$ref": "common.schema.json#/$defs/RouteKey"
+            },
+            "undo_req_id": {
+              "type": "string",
+              "description": "Only on the avoid-chip consent commit (provisional id undo-<avoid search req_id>). When Kotlin commits that avoid route it keeps the route body that was current until then for 5 s under this id. An undo (user_tap{offer_id, undo} / CXL) within 5 s of consent emits commit{req_id: undo_req_id, route_key: the current avoid route's key} without undo_req_id; Kotlin sets the held body's route_revision back to \"0\" before dc_route_commit (Rust assigns current + 1). 03 §3.1, team decision 2026-11-26."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cmd",
+            "req_id"
+          ],
+          "description": "Withdraw the consent commit{req_id} before its route was loaded (docs 836a370, 03 §3.1 draft): an undo (user_tap{offer_id, undo} / CXL) within 5 s of consent that arrives before the dc_route_commit of the avoid route. Kotlin drops the avoid route body it holds for req_id and does not call dc_route_commit for it; Rust has stopped waiting for it, so a dc_route_commit with that req_id is E_STALE. Counts as a successful undo (no undo_unavailable phrase; CXL returns undone{req_id}).",
+          "properties": {
+            "cmd": {
+              "const": "cancel_commit"
+            },
+            "req_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cmd",
+            "req_id",
+            "facts_ref",
+            "base_facts_ref"
+          ],
+          "description": "An avoid_chip search returned ok while valid (not cancelled / stuck, route_key current, tracking) with both facts_ref and base_facts_ref: Kotlin calls dc_avoid_offer_eval {req_id, now_mono_ms, alt_facts, base_facts} with the CandidateFacts behind them (03 §3.1, docs 2a8a727). Without base_facts_ref no evaluate_offer is emitted and no offer is made (logged).",
+          "properties": {
+            "cmd": {
+              "const": "evaluate_offer"
+            },
+            "req_id": {
+              "type": "string"
+            },
+            "facts_ref": {
+              "type": "string"
+            },
+            "base_facts_ref": {
+              "type": "string"
             }
           }
         }

@@ -70,6 +70,7 @@ fn session(b: &RouteBundle) -> Session {
         ..Default::default()
     });
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: b.clone(),
     })
@@ -105,11 +106,11 @@ fn expected(h: &ManeuverHorizon, first: usize, last: usize, prep: u64) -> Comple
 
 // ---- classification ----------------------------------------------------------------------
 
-/// Oracle for the crossing class, written as the decision table (only confirmed signal /
-/// protection values decide).
+/// Oracle for the crossing class, written as the decision table (asymmetric Evidence rule:
+/// inferred `absent` / `unprotected` are used, inferred `present` / `protected` are unknown).
 fn expected_crossing(signal: (&str, &str), protection: (&str, &str)) -> JunctionClass {
     match (signal, protection) {
-        (("confirmed", "absent"), _) | (_, ("confirmed", "unprotected")) => RightUnprotected,
+        ((_, "absent"), _) | (_, (_, "unprotected")) => RightUnprotected,
         (("confirmed", "present"), ("confirmed", "protected")) => RightProtected,
         (("confirmed", "present"), _) => RightSignalUnknownProtection,
         _ => RightSignalUnknown,
@@ -127,13 +128,15 @@ fn evidence(kv: (&str, &str)) -> Evidence {
 #[test]
 fn classification_covers_every_evidence_combination() {
     let base = main_line().legs[0].maneuvers[0].clone();
-    let crossings: [((&str, &str), Option<bool>); 6] = [
+    // None: unknown by the asymmetric rule → crossing only on a right-hand arrow.
+    let crossings: [((&str, &str), Option<bool>); 7] = [
         (("confirmed", "across_oncoming"), Some(true)),
         (("inferred", "across_oncoming"), Some(true)),
         (("confirmed", "no_crossing"), Some(false)),
-        (("inferred", "no_crossing"), Some(false)),
         (("confirmed", "not_applicable"), Some(false)),
-        // unknown: crossing only on a right-hand arrow (safe side)
+        // inferred "no crossing" is the safe side: treated as unknown
+        (("inferred", "no_crossing"), None),
+        (("inferred", "not_applicable"), None),
         (("unknown", ""), None),
     ];
     let signals = [
@@ -164,10 +167,13 @@ fn classification_covers_every_evidence_combination() {
         (Arrow::MergeRight, false),
         (Arrow::Arrive, false),
     ];
-    let widths: [((&str, u64), bool); 6] = [
+    let widths: [((&str, u64), bool); 8] = [
         (("confirmed", 3_999), true),
         (("confirmed", 4_000), false),
         (("inferred", 2_500), true),
+        (("inferred", 3_999), true),
+        // inferred >= 4.0 m is the safe side: width unknown, not narrow
+        (("inferred", 4_000), false),
         (("inferred", 4_001), false),
         (("unknown", 0), false),
         // approach narrow only: not entering a narrow road
@@ -227,7 +233,7 @@ fn classification_covers_every_evidence_combination() {
             }
         }
     }
-    assert_eq!(n, 6 * 5 * 5 * 12 * 6);
+    assert_eq!(n, 7 * 5 * 5 * 12 * 8);
 }
 
 /// The two predicates per class (team decision 2026-11-26): every class starts a complex
@@ -323,6 +329,83 @@ fn predicates_and_names_per_class() {
     assert_eq!(classify(&m), vec![RightUnprotected, Narrow]);
 }
 
+/// The asymmetric Evidence rule, one field at a time (team decision 2026-11-26, 04 §2.2):
+/// an inferred value on the dangerous side is used, on the safe side it equals unknown.
+#[test]
+fn inferred_is_used_only_on_the_dangerous_side() {
+    let base = main_line().legs[0].maneuvers[0].clone();
+    let inf = |v: &str| ev("inferred", json!(v));
+    let right = |f: &dyn Fn(&mut Maneuver)| {
+        let mut m = base.clone();
+        plain(&mut m, Arrow::Right);
+        f(&mut m);
+        classify(&m)
+    };
+    // crossing: inferred across_oncoming crosses (even on a left arrow) ...
+    let mut m = base.clone();
+    plain(&mut m, Arrow::Left);
+    m.crossing = inf("across_oncoming");
+    assert_eq!(classify(&m), vec![RightSignalUnknown]);
+    // ... inferred no_crossing / not_applicable is unknown: a right arrow still crosses,
+    // a left arrow does not; only a confirmed value rules the crossing out.
+    for v in ["no_crossing", "not_applicable"] {
+        assert_eq!(
+            right(&|m| m.crossing = inf(v)),
+            right(&|m| m.crossing = unknown())
+        );
+        assert_eq!(
+            right(&|m| m.crossing = inf(v)),
+            vec![RightSignalUnknown],
+            "{v}"
+        );
+        assert!(right(&|m| m.crossing = c(v)).is_empty(), "{v}");
+        let mut m = base.clone();
+        plain(&mut m, Arrow::Left);
+        m.crossing = inf(v);
+        assert!(classify(&m).is_empty(), "{v}");
+    }
+    // approach_signal: inferred absent → no signal → right_unprotected;
+    // inferred present = unknown → right_signal_unknown (not ..._protection).
+    assert_eq!(
+        right(&|m| m.approach_signal = inf("absent")),
+        vec![RightUnprotected]
+    );
+    assert_eq!(
+        right(&|m| m.approach_signal = inf("present")),
+        right(&|m| m.approach_signal = unknown())
+    );
+    assert_eq!(
+        right(&|m| m.approach_signal = inf("present")),
+        vec![RightSignalUnknown]
+    );
+    // right_turn_protection: inferred unprotected is used (with any signal evidence) ...
+    for sig in [c("present"), inf("present"), unknown()] {
+        let got = right(&|m| {
+            m.approach_signal = sig.clone();
+            m.right_turn_protection = inf("unprotected");
+        });
+        assert_eq!(got, vec![RightUnprotected]);
+    }
+    // ... inferred protected = unknown: a confirmed signal stays "protection unknown".
+    let got = right(&|m| {
+        m.approach_signal = c("present");
+        m.right_turn_protection = inf("protected");
+    });
+    assert_eq!(got, vec![RightSignalUnknownProtection]);
+    let got = right(&|m| {
+        m.approach_signal = c("present");
+        m.right_turn_protection = c("protected");
+    });
+    assert_eq!(got, vec![RightProtected]);
+    // width: inferred < 4.0 m is narrow, inferred >= 4.0 m is unknown (not narrow).
+    let mut m = base.clone();
+    plain(&mut m, Arrow::Left);
+    m.departure_width_mm = ev("inferred", json!(3_999));
+    assert_eq!(classify(&m), vec![Narrow]);
+    m.departure_width_mm = ev("inferred", json!(4_000));
+    assert!(classify(&m).is_empty());
+}
+
 // ---- next_complex_window ---------------------------------------------------------------
 
 /// Ordinary road: start = earliest of the first trigger − 30 s, end = latest + 5 s. The
@@ -347,11 +430,105 @@ fn window_on_an_ordinary_road() {
         .unwrap();
     let w = expected(&h, 0, 0, 30_000);
     assert_eq!(h.next_complex_window, Some(w));
-    // numbers: 1.5 km - 0.1 km at 15 m/s = 93.3 s
-    let eta = u64::from(h.upcoming[0].eta_range_ms.unwrap().earliest);
-    assert!((93_000..93_700).contains(&eta), "{eta}");
-    assert_eq!(w.start_monotonic_ms, 1_000 + eta - 30_000);
-    assert_eq!(w.end_monotonic_ms, Some(1_000 + eta + 5_000));
+    // numbers: 1.5 km - 0.1 km at 15 m/s = 93.3 s typical; start from earliest (× 0.85),
+    // end from latest (× 1.25)
+    let r = h.upcoming[0].eta_range_ms.unwrap();
+    let typical = u64::from(r.typical);
+    assert!((93_000..93_700).contains(&typical), "{typical}");
+    assert_eq!(u64::from(r.earliest), typical * 850 / 1_000);
+    assert_eq!(u64::from(r.latest), (typical * 1_250).div_ceil(1_000));
+    assert_eq!(w.start_monotonic_ms, 1_000 + typical * 850 / 1_000 - 30_000);
+    assert_eq!(
+        w.end_monotonic_ms,
+        Some(1_000 + (typical * 1_250).div_ceil(1_000) + 5_000)
+    );
+}
+
+/// `eta_range_ms` is a band around the remaining time (04 §2.2, provisional 0.85 / 1.25 in
+/// per-mille, set through SessionConfig); the factors apply to the remaining time from the
+/// current position, not to `cum_time_ms` from the route start. The window follows the band.
+#[test]
+fn eta_range_is_a_band_on_the_remaining_time() {
+    let b = grouped_line(12_000); // 2 ms per cm
+    let mut s = session(&b);
+    // at ~500 m: 1000 m (200 s) and 1120 m (224 s) from the route start, ~100 s / ~124 s
+    // left; the factors multiply what is left
+    let h = tick(&mut s, 50_000, Some(fix_x(&b, 50_000, 50_000)))
+        .horizon
+        .unwrap();
+    let band = |t: u32| {
+        let t = u64::from(t);
+        ((t * 850 / 1_000) as u32, (t * 1_250).div_ceil(1_000) as u32)
+    };
+    let r0 = h.upcoming[0].eta_range_ms.unwrap();
+    let r1 = h.upcoming[1].eta_range_ms.unwrap();
+    assert!((99_990..100_010).contains(&r0.typical), "{r0:?}");
+    assert_eq!(r1.typical - r0.typical, 24_000);
+    assert_eq!((r0.earliest, r0.latest), band(r0.typical));
+    assert_eq!((r1.earliest, r1.latest), band(r1.typical));
+    assert!(r0.earliest < r0.typical && r0.typical < r0.latest);
+    let w = h.next_complex_window.unwrap();
+    assert_eq!(
+        w.start_monotonic_ms,
+        50_000 + u64::from(r0.earliest) - 30_000
+    );
+    assert_eq!(
+        w.end_monotonic_ms,
+        Some(50_000 + u64::from(r1.latest) + 5_000)
+    );
+    // other factors from the config; rounding: earliest down, latest up
+    let mut s = Session::new(SessionConfig {
+        fix_stale_ms: 1_000_000,
+        eta_earliest_permille: 901,
+        eta_latest_permille: 1_001,
+        ..Default::default()
+    });
+    s.route_commit(&RouteCommitRequest {
+        req_id: None,
+        expected_route_key: None,
+        bundle: b.clone(),
+    })
+    .unwrap();
+    let h = tick(&mut s, 50_000, Some(fix_x(&b, 50_000, 50_000)))
+        .horizon
+        .unwrap();
+    let r = h.upcoming[0].eta_range_ms.unwrap();
+    let t = u64::from(r.typical);
+    assert_eq!(u64::from(r.earliest), t * 901 / 1_000);
+    assert_eq!(u64::from(r.latest), (t * 1_001).div_ceil(1_000));
+    if t % 1_000 != 0 {
+        assert!(u64::from(r.latest) * 1_000 > t * 1_001, "rounded up");
+    }
+    let w = h.next_complex_window.unwrap();
+    assert_eq!(
+        w.start_monotonic_ms,
+        50_000 + u64::from(r.earliest) - 30_000
+    );
+    // factors 1000 / 1000: one value
+    let mut s = Session::new(SessionConfig {
+        fix_stale_ms: 1_000_000,
+        eta_earliest_permille: 1_000,
+        eta_latest_permille: 1_000,
+        ..Default::default()
+    });
+    s.route_commit(&RouteCommitRequest {
+        req_id: None,
+        expected_route_key: None,
+        bundle: b.clone(),
+    })
+    .unwrap();
+    let h = tick(&mut s, 50_000, Some(fix_x(&b, 50_000, 50_000)))
+        .horizon
+        .unwrap();
+    let r0 = h.upcoming[0].eta_range_ms.unwrap();
+    assert_eq!((r0.earliest, r0.latest), (r0.typical, r0.typical));
+    // factors on the wrong side of 1000 are rejected
+    for cfg in [
+        r#"{"eta_earliest_permille": 1001}"#,
+        r#"{"eta_latest_permille": 999}"#,
+    ] {
+        assert!(Session::from_json(cfg.as_bytes()).is_err(), "{cfg}");
+    }
 }
 
 /// Motorway (approach edge with the motorway flag): the lead is 60 s. Only the edge that
@@ -455,7 +632,9 @@ fn window_stays_until_its_end_after_passage() {
         .horizon
         .unwrap();
     let w0 = h.next_complex_window.unwrap();
-    assert_eq!(w0.end_monotonic_ms, Some(50_000 + 224_000 + 5_000));
+    // typical 224 s to the second anchor; the end uses latest = 224 s × 1.25 = 280 s
+    assert_eq!(h.upcoming[1].eta_range_ms.unwrap().typical, 224_000);
+    assert_eq!(w0.end_monotonic_ms, Some(50_000 + 280_000 + 5_000));
     // beyond the second anchor (1120 m) once: not passed yet, the window follows the ETA
     let h = tick(&mut s, 100_000, Some(fix_x(&b, 100_000, 113_000)))
         .horizon
@@ -485,6 +664,7 @@ fn window_only_while_tracking() {
     make_right_unprotected(&mut b.legs[0].maneuvers[0]);
     let mut s = Session::new(SessionConfig::default());
     s.route_commit(&RouteCommitRequest {
+        req_id: None,
         expected_route_key: None,
         bundle: b.clone(),
     })

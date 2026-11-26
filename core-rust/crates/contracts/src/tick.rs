@@ -209,6 +209,11 @@ pub enum EventBody {
         /// Renamed from `comparison_ref` (team decision 2026-11-25; docs still say comparison_ref).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         facts_ref: Option<String>,
+        /// Avoid-chip search only, optional (docs 2a8a727, 04 §4.3): the `CandidateFacts` C++
+        /// builds with the alternative for the current route from the search-start position
+        /// to the destination (no new search). Without it no offer is made.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_facts_ref: Option<String>,
         /// Wall time of the Valhalla call (measurement only, never used for decisions).
         engine_ms: u64,
     },
@@ -325,15 +330,46 @@ pub enum PlannerCmd {
     /// Commit the route found by search `req_id`: Kotlin calls `dc_route_commit` with the
     /// route body of that search. Emitted only for a `reroute` / ad-hoc `explicit_plan`
     /// search that returned `ok` with a still valid state (not cancelled / stuck, its
-    /// `route_key` equal to the current route). Never for an avoid chip (it needs
-    /// `dc_avoid_offer_eval` and consent) nor for a plan's candidate (→ `rank`).
+    /// `route_key` equal to the current route). For an avoid-chip search only after
+    /// consent (`dc_avoid_offer_eval` put its `AvoidOffer` on the horizon, then
+    /// `user_tap{target_id: offer_id, action: avoid}` arrived before the deadline with the
+    /// offer's `route_key` still current; 03 §3.1 / 04 §4.3). Never for a plan's candidate
+    /// (→ `rank`).
     /// `route_key` is the current route's key *when the search started* (not the new
     /// route's); `dc_route_commit` re-checks it against the current route and returns
     /// `E_STALE` without replacing anything when the route changed meanwhile.
     /// Team decision 2026-11-25 (not in docs yet).
+    ///
+    /// Avoid chip "戻して" (03 §3.1; team decision 2026-11-26): the consent `commit` carries
+    /// `undo_req_id` (provisional `undo-<avoid search req_id>`). Kotlin, when it commits
+    /// that avoid route, keeps the route body that was current until then for 5 s under
+    /// `undo_req_id`. An undo within 5 s of consent is `commit{req_id: undo_req_id,
+    /// route_key: <the current (avoid) route's key>}` without `undo_req_id`; Kotlin sets
+    /// the held body's `route_revision` back to "0" and passes it to `dc_route_commit`
+    /// (Rust assigns current + 1; docs 0aaeee6).
     Commit {
         req_id: String,
         route_key: RouteKey,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        undo_req_id: Option<String>,
+    },
+    /// Withdraw the consent `commit{req_id}` before its route was loaded (docs 836a370,
+    /// 03 §3.1 draft): "戻して" within 5 s of consent that arrives before the avoid route's
+    /// `dc_route_commit`. Kotlin drops the avoid route body it holds for `req_id`; Rust no
+    /// longer waits for it (`dc_route_commit` with that `req_id` → `E_STALE`). The actor
+    /// is serial, so whichever comes first decides: the route commit first → a normal undo
+    /// later; the undo first → this cancel.
+    CancelCommit {
+        req_id: String,
+    },
+    /// An avoid-chip search returned a usable `ok` with both refs (03 §3.1, docs 2a8a727):
+    /// Kotlin calls `dc_avoid_offer_eval {req_id, now_mono_ms, alt_facts, base_facts}` with
+    /// the `CandidateFacts` behind `facts_ref` (the alternative) and `base_facts_ref` (the
+    /// current route from the search-start position). Not emitted without both refs.
+    EvaluateOffer {
+        req_id: String,
+        facts_ref: String,
+        base_facts_ref: String,
     },
 }
 

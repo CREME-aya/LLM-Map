@@ -241,10 +241,10 @@ fn tick_input_fixtures_agree_with_dc_tick() {
     }
 }
 
-/// dc_route_commit `{expected_route_key, bundle}`: the first route with `expected_route_key: null`, then the
+/// dc_route_commit `{req_id, expected_route_key, bundle}`: the first route with `req_id` / `expected_route_key` null, then the
 /// next dc_tick returns its horizon; a fix aligns it (tracking). The bundle carries
 /// route_revision "0" and Rust assigns current + 1 (first route: 1), returned in
-/// `data.route_key` and used by the horizon and every ManeuverId. A replacement needs the
+/// `data.route_key` and used by the horizon and every ManeuverId. A replacement needs a commit Rust issued (`req_id`) and the
 /// current key (`E_STALE` otherwise, nothing replaced); a non-"0" revision or a broken
 /// bundle is `E_SCHEMA`; a bundle trip_revision / graph_version differing from the current
 /// route is `E_STALE`.
@@ -260,7 +260,7 @@ fn route_commit_loads_the_bundle() {
         rk["route_revision"] = "1".into();
         let mut s = ptr::null_mut();
         take(dc_session_new(din(b"{}"), &mut s));
-        let req = serde_json::json!({"expected_route_key": null, "bundle": bundle});
+        let req = serde_json::json!({"req_id": null, "expected_route_key": null, "bundle": bundle});
         let v = take(dc_route_commit(s, din(&serde_json::to_vec(&req).unwrap())));
         assert_eq!(v["ok"], true, "{v}");
         assert_eq!(v["data"]["route_key"], rk, "Rust assigns rev 1");
@@ -279,9 +279,41 @@ fn route_commit_loads_the_bundle() {
         // again with null: a route is current now → E_STALE
         let v = take(dc_route_commit(s, din(&serde_json::to_vec(&req).unwrap())));
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
+        // a replacement needs a commit Rust issued: right guard without one → E_STALE
+        let mut unissued = req.clone();
+        unissued["expected_route_key"] = rk.clone();
+        unissued["req_id"] = "r1".into();
+        let v = take(dc_route_commit(
+            s,
+            din(&serde_json::to_vec(&unissued).unwrap()),
+        ));
+        assert_eq!(v["error"]["code"], "E_STALE", "{v}");
+        // three fixes 1.1 km north confirm off-route → reroute r1; its ok → commit{r1, rk}
+        for t in [20, 21, 22] {
+            let tick = serde_json::json!({"now_mono_ms": t, "fix": {"at_mono_ms": t,
+                "lat_e7": 350100000, "lon_e7": 1390005483, "acc_cm": 300}});
+            take(dc_tick(s, din(&serde_json::to_vec(&tick).unwrap())));
+        }
+        let tick = serde_json::json!({"now_mono_ms": 30, "events": [{"at_mono_ms": 30,
+            "kind": "search_finished", "req_id": "r1", "route_key": rk, "graph_version":
+            rk["graph_version"], "outcome": "ok", "engine_ms": 5}]});
+        let v = take(dc_tick(s, din(&serde_json::to_vec(&tick).unwrap())));
+        assert_eq!(
+            v["data"]["planner_cmds"],
+            serde_json::json!([{"cmd": "commit", "req_id": "r1", "route_key": rk}]),
+            "{v}"
+        );
+        // req_id: a number → E_SCHEMA (before the guard)
+        unissued["req_id"] = 1.into();
+        let v = take(dc_route_commit(
+            s,
+            din(&serde_json::to_vec(&unissued).unwrap()),
+        ));
+        assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");
         // right guard, broken body → E_SCHEMA; wrong guard with a broken body → E_STALE
         let mut broken = req.clone();
         broken["expected_route_key"] = rk.clone();
+        broken["req_id"] = "r1".into();
         broken["bundle"]["length_cm"] = 1.into();
         let v = take(dc_route_commit(
             s,
@@ -298,6 +330,7 @@ fn route_commit_loads_the_bundle() {
         for rev in ["1", "2"] {
             let mut nonzero = req.clone();
             nonzero["expected_route_key"] = rk.clone();
+            nonzero["req_id"] = "r1".into();
             nonzero["bundle"]["route_key"]["route_revision"] = rev.into();
             for m in nonzero["bundle"]["legs"][0]["maneuvers"]
                 .as_array_mut()
@@ -320,6 +353,7 @@ fn route_commit_loads_the_bundle() {
         ] {
             let mut other = req.clone();
             other["expected_route_key"] = rk.clone();
+            other["req_id"] = "r1".into();
             other["bundle"]["route_key"][field] = value.into();
             for m in other["bundle"]["legs"][0]["maneuvers"]
                 .as_array_mut()
@@ -336,6 +370,7 @@ fn route_commit_loads_the_bundle() {
         // unknown field in the request
         let mut extra = req.clone();
         extra["expected_route_key"] = rk.clone();
+        extra["req_id"] = "r1".into();
         extra["x"] = 1.into();
         let v = take(dc_route_commit(
             s,
@@ -345,8 +380,13 @@ fn route_commit_loads_the_bundle() {
         // the valid replacement: rev 2
         let mut next = req.clone();
         next["expected_route_key"] = rk.clone();
+        next["req_id"] = "r1".into();
         let v = take(dc_route_commit(s, din(&serde_json::to_vec(&next).unwrap())));
         assert_eq!(v["data"]["route_key"]["route_revision"], "2", "{v}");
+        // r1 is settled: the same req_id with the new key → E_STALE
+        next["expected_route_key"] = v["data"]["route_key"].clone();
+        let v = take(dc_route_commit(s, din(&serde_json::to_vec(&next).unwrap())));
+        assert_eq!(v["error"]["code"], "E_STALE", "{v}");
         dc_session_free(s);
     }
 }
@@ -361,14 +401,15 @@ fn route_commit_rechecks_route_key() {
         take(dc_session_new(din(b"{}"), &mut s));
         let v = take(dc_route_commit(
             s,
-            din(br#"{"expected_route_key":{"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"}}"#),
+            din(br#"{"req_id":"r1","expected_route_key":{"trip_id":"t","trip_revision":"1","route_revision":"1","graph_version":"g"}}"#),
         ));
         assert_eq!(v["error"]["code"], "E_STALE", "{v}");
         for bad in [
             &br#"{"route_key":null,"bundle":{}}"#[..],
             &b"{}"[..],
             b"{",
-            br#"{"expected_route_key":{"trip_id":"t"}}"#,
+            br#"{"req_id":"r1","expected_route_key":{"trip_id":"t"}}"#,
+            br#"{"expected_route_key":null,"bundle":{}}"#,
         ] {
             let v = take(dc_route_commit(s, din(bad)));
             assert_eq!(v["error"]["code"], "E_SCHEMA", "{v}");

@@ -445,13 +445,15 @@ def gen_adhoc_distance_class():
         return {"at_mono_ms": t, "kind": "search_finished", "req_id": req, "route_key": rk,
                 "graph_version": GRAPH, "outcome": "error", "engine_ms": 1000}
     steps = [
-        {"step": "route_commit", "expected_route_key": None, "bundle": a},
+        {"step": "route_commit", "req_id": None, "expected_route_key": None, "bundle": a},
         {"step": "tick", "input": {"now_mono_ms": 900, "fix": start}},
         {"step": "request", "now_mono_ms": 1000, "priority": "reroute",
          "expect_starts": [{"req_id": "r1", "priority": "reroute", "distance_class": "short"}],
          "expect_watchdog": 6000},
         {"step": "tick", "input": {"now_mono_ms": 2000, "events": [fin(2000, "r1", rk_a)]}},
-        {"step": "route_commit", "expected_route_key": rk_a, "bundle": b2},
+        # r1 ended with an error: the replacement stands in for another commit
+        {"step": "issue_commit", "req_id": "x1", "route_key": rk_a},
+        {"step": "route_commit", "req_id": "x1", "expected_route_key": rk_a, "bundle": b2},
         {"step": "tick", "input": {"now_mono_ms": 2900, "fix": dict(start, at_mono_ms=2900)}},
         {"step": "request", "now_mono_ms": 3000, "priority": "avoid_chip",
          "expect_starts": [{"req_id": "r2", "priority": "avoid_chip", "distance_class": "long"}],
@@ -487,7 +489,7 @@ def _held_reroute_steps():
     a = _parallel_bundle(0)
     rk_a = committed(a["route_key"], 1)
     steps = [
-        {"step": "route_commit", "expected_route_key": None, "bundle": a},
+        {"step": "route_commit", "req_id": None, "expected_route_key": None, "bundle": a},
         {"step": "tick", "input": {"now_mono_ms": 1000, "fix": fix(1000, 100.0, 0.0, 5.0, 90.0, 10.0)}},
     ]
     for i, t in enumerate((2000, 3000, 4000)):
@@ -511,7 +513,7 @@ def gen_reroute_held_uncertain():
         # moving east at 10 m/s: the bearing decides -> tracking -> the held commit
         {"step": "tick", "input": {"now_mono_ms": 7000, "fix": fix(7000, 1010.0, 9.0, 5.0, 90.0, 10.0)},
          "expect_cmds": [{"cmd": "commit", "req_id": "r1", "route_key": rk_a}]},
-        {"step": "route_commit", "expected_route_key": rk_a, "bundle": b},
+        {"step": "route_commit", "req_id": "r1", "expected_route_key": rk_a, "bundle": b},
         {"step": "tick", "input": {"now_mono_ms": 8000, "fix": fix(8000, 1020.0, 9.0, 5.0, 90.0, 10.0)},
          "expect_cmds": []},
     ]
@@ -552,23 +554,31 @@ def gen_commit_route_revision():
     rk_other_graph = dict(rk_a, graph_version="jp-2026.12.0")
     steps = [
         # the first route: rev "0" in, rev 1 assigned
-        {"step": "route_commit", "expected_route_key": None, "bundle": a, "expect_route_key": rk_a},
+        {"step": "route_commit", "req_id": None, "expected_route_key": None, "bundle": a, "expect_route_key": rk_a},
+        # stands in for a commit{c1, rk_a} the fixture does not drive (test hook)
+        {"step": "issue_commit", "req_id": "c1", "route_key": rk_a},
+        # the req_id must name a commit Rust issued (provisional): unknown / null -> E_STALE
+        {"step": "route_commit", "req_id": "c2", "expected_route_key": rk_a, "bundle": bundle(), "expect_error": "E_STALE"},
+        {"step": "route_commit", "req_id": None, "expected_route_key": rk_a, "bundle": bundle(), "expect_error": "E_STALE"},
         # a bundle must carry "0": any other revision is E_SCHEMA (nothing replaced)
-        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(2), "expect_error": "E_SCHEMA"},
-        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(1), "expect_error": "E_SCHEMA"},
+        {"step": "route_commit", "req_id": "c1", "expected_route_key": rk_a, "bundle": bundle(2), "expect_error": "E_SCHEMA"},
+        {"step": "route_commit", "req_id": "c1", "expected_route_key": rk_a, "bundle": bundle(1), "expect_error": "E_SCHEMA"},
         # bundle trip_revision / graph_version must equal the current route's
-        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(trip_rev="4"), "expect_error": "E_STALE"},
-        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(graph="jp-2026.12.0"), "expect_error": "E_STALE"},
+        {"step": "route_commit", "req_id": "c1", "expected_route_key": rk_a, "bundle": bundle(trip_rev="4"), "expect_error": "E_STALE"},
+        {"step": "route_commit", "req_id": "c1", "expected_route_key": rk_a, "bundle": bundle(graph="jp-2026.12.0"), "expect_error": "E_STALE"},
         # the guard compares the whole RouteKey
-        {"step": "route_commit", "expected_route_key": rk_other_trip, "bundle": bundle(), "expect_error": "E_STALE"},
-        {"step": "route_commit", "expected_route_key": rk_other_graph, "bundle": bundle(), "expect_error": "E_STALE"},
+        {"step": "route_commit", "req_id": "c1", "expected_route_key": rk_other_trip, "bundle": bundle(), "expect_error": "E_STALE"},
+        {"step": "route_commit", "req_id": "c1", "expected_route_key": rk_other_graph, "bundle": bundle(), "expect_error": "E_STALE"},
         {"step": "tick", "input": {"now_mono_ms": 1000, "fix": fix(1000, 100.0, 0.0, 5.0, 90.0, 10.0)}},
-        {"step": "route_commit", "expected_route_key": rk_a, "bundle": bundle(),
+        {"step": "route_commit", "req_id": "c1", "expected_route_key": rk_a, "bundle": bundle(),
          "expect_route_key": committed(a["route_key"], 2)},
+        # c1 is settled: the same req_id again is E_STALE
+        {"step": "route_commit", "req_id": "c1", "expected_route_key": committed(a["route_key"], 2),
+         "bundle": bundle(), "expect_error": "E_STALE"},
         {"step": "tick", "input": {"now_mono_ms": 2000, "fix": fix(2000, 110.0, 0.0, 5.0, 90.0, 10.0)}},
     ]
     write("gate7-commit-route-revision.json", {
-        "description": "Gate 7 (commit versioning, team decision 2026-11-26): every bundle carries route_revision \"0\" and Rust assigns current + 1 (the first route: 1), rewriting the bundle's route_key and every ManeuverId.route_key. A bundle with another revision (2, 1) is E_SCHEMA. While a route is current, a bundle whose trip_revision or graph_version differs from it is E_STALE. The guard expected_route_key compares the whole RouteKey (04 §3): a guard differing only in trip_revision or graph_version is E_STALE. Nothing is replaced on any error. The valid replacement becomes rev 2; the next horizon carries rev 2.",
+        "description": "Gate 7 (commit versioning, team decision 2026-11-26): every bundle carries route_revision \"0\" and Rust assigns current + 1 (the first route: 1), rewriting the bundle's route_key and every ManeuverId.route_key. A bundle with another revision (2, 1) is E_SCHEMA. While a route is current, a bundle whose trip_revision or graph_version differs from it is E_STALE. The guard expected_route_key compares the whole RouteKey (04 §3): a guard differing only in trip_revision or graph_version is E_STALE. The req_id must name a commit Rust issued for that guard (provisional; issue_commit stands in for one): an unknown or null req_id is E_STALE, and once a route is loaded the same req_id is E_STALE. Nothing is replaced on any error. The valid replacement becomes rev 2; the next horizon carries rev 2.",
         "route_key": rk_a,
         "steps": steps,
     }, directory=TICK_DIR)
