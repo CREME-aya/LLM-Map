@@ -113,7 +113,7 @@ typedef struct dc_session dc_session;
           *             // target_id = AvoidOffer.offer_id | override_id | confirm_screen_id
           *       | thermal{status: none|light|moderate|severe|critical|emergency|shutdown}
           *       | low_memory | inference_down{reason} | inference_up{tier}
-          *       | audio_focus_lost | call_state{active}
+          *       | audio_focus_lost | audio_focus_gained | call_state{active}
           *       | search_finished{req_id, route_key, graph_version, outcome: ok|cancelled|error,
           *                         facts_ref?, base_facts_ref?, engine_ms}  // exactly one per search
           *             // base_facts_ref: avoid_chip only, CandidateFacts of the current route from

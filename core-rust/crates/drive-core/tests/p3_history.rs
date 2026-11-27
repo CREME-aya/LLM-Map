@@ -3,17 +3,19 @@
 //! Straight eastbound route at 20 m/s (72 km/h) unless customized per test:
 //! 10 km = 1,000,000 cm, 500 s = 500,000 ms (1 ms = 2 cm), `k_lon_q16 = 65536` so
 //! `lon_e7 = origin_lon + x_cm` is exact with zero fixed-point rounding error.
+use contracts::facts::{AvoidOfferEvalRequest, AvoidOfferEvalResult, CandidateFacts};
 use contracts::horizon::{Arrow, Evidence, HorizonStatus, Maneuver, ManeuverId, RouteAnchor};
 use contracts::override_types::{RejectCode, ValidateOverrideRequest, ValidateOverrideResult};
 use contracts::route::{
     HistoryPoi, HistoryVersion, HistoryVersionKind, RouteBundle, RouteCommitRequest,
 };
 use contracts::tick::{
-    Event, EventBody, Fix, SaveForLaterReason, TextClass, ThermalStatus, TickInput, TickOutput,
-    UiCmd, VoiceCmd,
+    DismissReason, Event, EventBody, Fix, PlannerCmd, SaveForLaterReason, SearchOutcome, TextClass,
+    ThermalStatus, TickInput, TickOutput, UiCmd, VoiceCmd,
 };
 use contracts::{ErrorCode, RouteKey};
-use drive_core::history::PoiState;
+use drive_core::avoid;
+use drive_core::history::{self, PoiState};
 use drive_core::{Session, SessionConfig};
 use serde_json::{json, Value};
 
@@ -1163,5 +1165,510 @@ fn consent_off_expired_speaking_is_not_bmk_target() {
         ValidateOverrideResult::Rejected {
             code: RejectCode::NoPendingTarget
         }
+    );
+}
+
+// ---- helpers for P3 stop vs CXL and audio_focus_gained tests ----------------------------
+
+fn dict_ev(at: u64, norm: &str) -> Event {
+    Event {
+        at_mono_ms: at,
+        body: EventBody::AsrResult {
+            utterance_id: format!("u-{at}"),
+            text_class: TextClass::Dict,
+            dict_norm: Some(norm.to_owned()),
+        },
+    }
+}
+
+fn avoid_facts(
+    id: &str,
+    eta_ms: u64,
+    right_unprotected: u64,
+    graph_version: &str,
+) -> CandidateFacts {
+    serde_json::from_value(json!({
+        "candidate_id": id,
+        "label": "through_anchor",
+        "plan_request_id": "p-avoid",
+        "graph_version": graph_version,
+        "fingerprint": format!("fp-{id}"),
+        "legal": true,
+        "complete": true,
+        "eta_ms": eta_ms,
+        "length_m": 4_000,
+        "counts": {
+            "right_unprotected": right_unprotected,
+            "right_signal_unknown_protection": 0,
+            "right_signal_unknown": 0,
+            "right_protected": 0,
+            "right_entry": 0,
+            "merges": 0
+        },
+        "narrow_m": { "confirmed": 0, "inferred": 0 },
+        "unknown_width_residential_m": 0,
+        "unknown_length_m": 0,
+        "junctions": [],
+        "through_anchors": []
+    }))
+    .unwrap()
+}
+
+/// Build a 10 km route with a POI at 2 km (200_000 cm) and an avoid-target unprotected right
+/// turn at 3 km (300_000 cm; ETA 100 s from 1 km -> triggers avoid_chip lookahead <= 120 s,
+/// while complex window starts at 300_000 cm = 100 s - 30 s = 70 s ahead, leaving > 50 s for P3).
+fn route_with_poi_and_avoid_target(pois: Vec<HistoryPoi>) -> RouteBundle {
+    let mut b = straight_route(10, pois);
+    let rk = b.route_key.clone();
+    b.legs[0].maneuvers = vec![
+        complex_right_maneuver(&rk, 0, 3, 300_000),
+        plain_maneuver(&rk, 1, 10, 1_000_000, Arrow::Arrive),
+    ];
+    b
+}
+
+/// Open a session with avoid_chip_lookahead enabled, trigger an avoid offer at x=1 km (t=10_000),
+/// and return `(session, route_key, avoid_req_id, offer_id)`.
+fn session_with_active_avoid_offer(
+    pois: Vec<HistoryPoi>,
+    consent_on: bool,
+    extra_events: Vec<Event>,
+) -> (Session, RouteKey, String, String, TickOutput) {
+    let b = route_with_poi_and_avoid_target(pois);
+    let cfg = SessionConfig {
+        avoid_chip_lookahead: true,
+        ..SessionConfig::default()
+    };
+    let (mut s, rk) = session_with(cfg, &b);
+    let mut evs = Vec::new();
+    if consent_on {
+        evs.push(consent_ev(10_000, true));
+    }
+    evs.extend(extra_events);
+    // At x = 100_000 cm (1 km): 1 km before POI at 200_000 cm (inside [50_000, 200_000] corridor)
+    // and 2 km (100 s) before avoid target at 300_000 cm (<= 120 s trigger).
+    let out1 = tick(&mut s, 10_000, Some(fix_at(10_000, 100_000)), evs);
+    let req_id = out1
+        .planner_cmds
+        .iter()
+        .find_map(|c| match c {
+            PlannerCmd::Start { req_id, .. } => Some(req_id.clone()),
+            _ => None,
+        })
+        .expect("avoid_chip search should start");
+    let out2 = tick(
+        &mut s,
+        10_500,
+        Some(fix_at(10_500, 101_000)),
+        vec![Event {
+            at_mono_ms: 10_500,
+            body: EventBody::SearchFinished {
+                req_id: req_id.clone(),
+                route_key: rk.clone(),
+                graph_version: rk.graph_version.clone(),
+                outcome: SearchOutcome::Ok,
+                facts_ref: Some("alt-f".into()),
+                base_facts_ref: Some("base-f".into()),
+                engine_ms: 200,
+            },
+        }],
+    );
+    assert!(out2
+        .planner_cmds
+        .iter()
+        .any(|c| matches!(c, PlannerCmd::EvaluateOffer { .. })));
+    let eval = s.avoid_offer_eval(&AvoidOfferEvalRequest {
+        req_id: req_id.clone(),
+        now_mono_ms: 10_600,
+        alt_facts: avoid_facts("alt", 460_000, 0, &rk.graph_version),
+        base_facts: avoid_facts("base", 450_000, 1, &rk.graph_version),
+    });
+    let offer_id = match eval {
+        AvoidOfferEvalResult::Offered { avoid_offer } => avoid_offer.offer_id,
+        other => panic!("expected Offered, got {other:?}"),
+    };
+    (s, rk, req_id, offer_id, out1)
+}
+
+// 21. P3 話し中（Speaking）の「やめて」は P3 停止のみ（同時に回避チップ提示中・undo 窓内でも CXL しない）
+#[test]
+fn p3_speaking_yamete_stops_p3_only_without_triggering_cxl() {
+    // Case A: P3 Speaking + active AvoidOffer on screen -> "やめて" stops P3 only; offer stays!
+    let (mut s, _rk, _req_id, offer_id, out1) =
+        session_with_active_avoid_offer(vec![poi("castle", 200_000, 12_000, 5_000)], true, vec![]);
+    let tok = speaks_content(&out1)[0].0.to_owned();
+    assert!(matches!(
+        s.history_poi_state("castle"),
+        Some(PoiState::Speaking { .. })
+    ));
+
+    let out_stop = tick(
+        &mut s,
+        11_000,
+        Some(fix_at(11_000, 102_000)),
+        vec![dict_ev(11_000, "やめて")],
+    );
+    assert_eq!(stops(&out_stop), vec![tok.as_str()]);
+    assert!(saves(&out_stop).is_empty());
+    assert_eq!(s.history_poi_state("castle"), Some(&PoiState::Expired));
+    // Must NOT dismiss the avoid offer
+    assert!(
+        !out_stop
+            .ui_cmds
+            .iter()
+            .any(|u| matches!(u, UiCmd::Dismiss { target_id, .. } if target_id == &offer_id)),
+        "yamete while P3 Speaking must not trigger CXL: {:?}",
+        out_stop.ui_cmds
+    );
+    // Avoid offer is still on horizon!
+    let still_offered = out_stop
+        .horizon
+        .as_ref()
+        .is_some_and(|h| h.upcoming.iter().any(|u| u.avoid_offer.is_some()));
+    assert!(still_offered, "avoid offer should remain active");
+
+    // Case B: P3 Speaking + inside 5 s avoid undo window (Consented) -> "やめて" stops P3 only;
+    // must NOT cancel_commit!
+    let (mut s2, _rk2, req_id2, _offer_id2, out_speak) =
+        session_with_active_avoid_offer(vec![poi("castle", 200_000, 12_000, 5_000)], true, vec![]);
+    let tok2 = speaks_content(&out_speak)[0].0.to_owned();
+    // Consent to avoid offer via dict "はい" -> enters UndoState::Consented (5 s window)
+    let out_yes = tick(
+        &mut s2,
+        11_000,
+        Some(fix_at(11_000, 102_000)),
+        vec![dict_ev(11_000, "はい")],
+    );
+    assert!(out_yes
+        .planner_cmds
+        .iter()
+        .any(|c| matches!(c, PlannerCmd::Commit { req_id, .. } if req_id == &req_id2)));
+    assert!(matches!(
+        s2.history_poi_state("castle"),
+        Some(PoiState::Speaking { .. })
+    ));
+
+    let out_stop2 = tick(
+        &mut s2,
+        12_000,
+        Some(fix_at(12_000, 104_000)),
+        vec![dict_ev(12_000, "やめて")],
+    );
+    assert_eq!(stops(&out_stop2), vec![tok2.as_str()]);
+    assert!(saves(&out_stop2).is_empty());
+    assert_eq!(s2.history_poi_state("castle"), Some(&PoiState::Expired));
+    assert!(
+        !out_stop2
+            .planner_cmds
+            .iter()
+            .any(|c| matches!(c, PlannerCmd::CancelCommit { .. })),
+        "yamete while P3 Speaking must not trigger undo CXL"
+    );
+}
+
+// 22. P3 話し中（Speaking）の「キャンセル」は常に CXL（P3 は止めない）
+#[test]
+fn p3_speaking_cancel_runs_cxl_without_stopping_p3() {
+    // Case A: P3 Speaking + active AvoidOffer -> "キャンセル" dismisses offer, P3 keeps Speaking!
+    let (mut s, _rk, _req_id, offer_id, out1) =
+        session_with_active_avoid_offer(vec![poi("castle", 200_000, 12_000, 5_000)], true, vec![]);
+    assert_eq!(speaks_content(&out1).len(), 1);
+    assert!(matches!(
+        s.history_poi_state("castle"),
+        Some(PoiState::Speaking { .. })
+    ));
+
+    let out_cxl = tick(
+        &mut s,
+        11_000,
+        Some(fix_at(11_000, 102_000)),
+        vec![dict_ev(11_000, "キャンセル")],
+    );
+    assert!(stops(&out_cxl).is_empty(), "キャンセル must not stop P3");
+    assert!(matches!(
+        s.history_poi_state("castle"),
+        Some(PoiState::Speaking { .. })
+    ));
+    assert!(out_cxl.ui_cmds.iter().any(|u| matches!(
+        u,
+        UiCmd::Dismiss { target_id, reason: DismissReason::Cancelled } if target_id == &offer_id
+    )));
+
+    // Case B: P3 Speaking + inside 5 s undo window -> "キャンセル" triggers cancel_commit, P3 stays Speaking!
+    let (mut s2, _rk2, req_id2, _offer_id2, _out_speak) =
+        session_with_active_avoid_offer(vec![poi("castle", 200_000, 12_000, 5_000)], true, vec![]);
+    let _ = tick(
+        &mut s2,
+        11_000,
+        Some(fix_at(11_000, 102_000)),
+        vec![dict_ev(11_000, "はい")],
+    );
+    let out_undo = tick(
+        &mut s2,
+        12_000,
+        Some(fix_at(12_000, 104_000)),
+        vec![dict_ev(12_000, "キャンセル")],
+    );
+    assert!(stops(&out_undo).is_empty(), "キャンセル must not stop P3");
+    assert!(matches!(
+        s2.history_poi_state("castle"),
+        Some(PoiState::Speaking { .. })
+    ));
+    assert!(out_undo
+        .planner_cmds
+        .iter()
+        .any(|c| matches!(c, PlannerCmd::CancelCommit { req_id } if req_id == &req_id2)));
+}
+
+// 23. P3 なし（Pending / Idle）の「やめて」は CXL（回避チップ取り下げ・undo が動き、Pending は消さない）
+#[test]
+fn p3_not_speaking_yamete_runs_cxl_and_preserves_pending_poi() {
+    // Case A: P3 is Pending (blocked by audio_focus_lost) + active AvoidOffer
+    let (mut s, _rk, _req_id, offer_id, out1) = session_with_active_avoid_offer(
+        vec![poi("castle", 200_000, 12_000, 5_000)],
+        true,
+        vec![Event {
+            at_mono_ms: 10_000,
+            body: EventBody::AudioFocusLost {},
+        }],
+    );
+    assert!(speaks_content(&out1).is_empty());
+    assert!(matches!(
+        s.history_poi_state("castle"),
+        Some(PoiState::Pending { .. })
+    ));
+
+    let out_cxl = tick(
+        &mut s,
+        11_000,
+        Some(fix_at(11_000, 102_000)),
+        vec![dict_ev(11_000, "やめて")],
+    );
+    assert!(stops(&out_cxl).is_empty());
+    // Pending POI must NOT be expired by "やめて" when not Speaking!
+    assert!(matches!(
+        s.history_poi_state("castle"),
+        Some(PoiState::Pending { .. })
+    ));
+    // And CXL dismissed the avoid offer
+    assert!(out_cxl.ui_cmds.iter().any(|u| matches!(
+        u,
+        UiCmd::Dismiss { target_id, reason: DismissReason::Cancelled } if target_id == &offer_id
+    )));
+
+    // Case B: P3 Idle (consent OFF) + inside 5 s undo window -> "やめて" triggers undo cancel_commit!
+    let (mut s2, _rk2, req_id2, _offer_id2, _) =
+        session_with_active_avoid_offer(vec![], false, vec![]);
+    let _ = tick(
+        &mut s2,
+        11_000,
+        Some(fix_at(11_000, 102_000)),
+        vec![dict_ev(11_000, "はい")],
+    );
+    let out_undo = tick(
+        &mut s2,
+        12_000,
+        Some(fix_at(12_000, 104_000)),
+        vec![dict_ev(12_000, "やめて")],
+    );
+    assert!(out_undo
+        .planner_cmds
+        .iter()
+        .any(|c| matches!(c, PlannerCmd::CancelCommit { req_id } if req_id == &req_id2)));
+}
+
+// 24. P3 話し中の「ストップ」「止めて」「とめて」で P3 停止（非話し中では CXL を起こさない）
+#[test]
+fn p3_speaking_stop_words_stop_p3_and_do_not_trigger_cxl_when_idle() {
+    for phrase in ["ストップ", "止めて", "とめて"] {
+        let b = straight_route(10, vec![poi("castle", 300_000, 12_000, 5_000)]);
+        let (mut s, _) = session_with(SessionConfig::default(), &b);
+        let out0 = tick(
+            &mut s,
+            10_000,
+            Some(fix_at(10_000, 150_000)),
+            vec![consent_ev(10_000, true)],
+        );
+        let tok = speaks_content(&out0)[0].0.to_owned();
+
+        let out_stop = tick(
+            &mut s,
+            11_000,
+            Some(fix_at(11_000, 152_000)),
+            vec![dict_ev(11_000, phrase)],
+        );
+        assert_eq!(stops(&out_stop), vec![tok.as_str()], "phrase={phrase}");
+        assert!(saves(&out_stop).is_empty(), "phrase={phrase}");
+        assert_eq!(
+            s.history_poi_state("castle"),
+            Some(&PoiState::Expired),
+            "phrase={phrase}"
+        );
+
+        // Outside P3 Speaking, "ストップ" / "止めて" / "とめて" must NOT trigger CXL
+        let (mut s_idle, _rk, _req_id, offer_id, _) =
+            session_with_active_avoid_offer(vec![], false, vec![]);
+        let out_idle = tick(
+            &mut s_idle,
+            11_000,
+            Some(fix_at(11_000, 102_000)),
+            vec![dict_ev(11_000, phrase)],
+        );
+        assert!(
+            !out_idle
+                .ui_cmds
+                .iter()
+                .any(|u| matches!(u, UiCmd::Dismiss { target_id, .. } if target_id == &offer_id)),
+            "phrase={phrase} must not trigger CXL when P3 is not Speaking"
+        );
+    }
+}
+
+// 25. audio_focus_lost 中は話さず、audio_focus_gained で Pending -> Speaking に進む（中断 POI は再開しない）
+#[test]
+fn audio_focus_gained_restores_p3_without_resuming_interrupted_poi() {
+    // Case A: Pending blocked by audio_focus_lost -> audio_focus_gained -> Speaking
+    let b = straight_route(10, vec![poi("castle", 300_000, 12_000, 5_000)]);
+    let (mut s, _) = session_with(SessionConfig::default(), &b);
+    let out_lost = tick(
+        &mut s,
+        10_000,
+        Some(fix_at(10_000, 150_000)),
+        vec![
+            consent_ev(10_000, true),
+            Event {
+                at_mono_ms: 10_000,
+                body: EventBody::AudioFocusLost {},
+            },
+        ],
+    );
+    assert!(speaks_content(&out_lost).is_empty());
+    assert!(matches!(
+        s.history_poi_state("castle"),
+        Some(PoiState::Pending { .. })
+    ));
+
+    // Focus regained -> Pending transitions to Speaking immediately
+    let out_gained = tick(
+        &mut s,
+        15_000,
+        Some(fix_at(15_000, 160_000)),
+        vec![Event {
+            at_mono_ms: 15_000,
+            body: EventBody::AudioFocusGained {},
+        }],
+    );
+    let spoken = speaks_content(&out_gained);
+    assert_eq!(spoken.len(), 1);
+    assert_eq!(spoken[0].1, "pack:castle:short");
+    assert!(matches!(
+        s.history_poi_state("castle"),
+        Some(PoiState::Speaking { .. })
+    ));
+
+    // Case B: Speaking interrupted by audio_focus_lost -> audio_focus_gained does NOT resume
+    // the interrupted POI, but a later POI can speak after the 5-minute interval.
+    let b2 = straight_route(
+        20,
+        vec![
+            poi("castle", 300_000, 12_000, 5_000),
+            poi("shrine", 1_100_000, 12_000, 5_000),
+        ],
+    );
+    let (mut s2, _) = session_with(SessionConfig::default(), &b2);
+    let out_s = tick(
+        &mut s2,
+        10_000,
+        Some(fix_at(10_000, 150_000)),
+        vec![consent_ev(10_000, true)],
+    );
+    let tok_castle = speaks_content(&out_s)[0].0.to_owned();
+
+    // Audio focus lost while speaking -> Stop + save_for_later{interrupted}
+    let out_int = tick(
+        &mut s2,
+        12_000,
+        Some(fix_at(12_000, 154_000)),
+        vec![Event {
+            at_mono_ms: 12_000,
+            body: EventBody::AudioFocusLost {},
+        }],
+    );
+    assert_eq!(stops(&out_int), vec![tok_castle.as_str()]);
+    assert_eq!(
+        saves(&out_int),
+        vec![("castle", SaveForLaterReason::Interrupted)]
+    );
+    assert_eq!(s2.history_poi_state("castle"), Some(&PoiState::Interrupted));
+
+    // Regain audio focus right after -> castle MUST NOT resume!
+    let out_regain = tick(
+        &mut s2,
+        15_000,
+        Some(fix_at(15_000, 160_000)),
+        vec![Event {
+            at_mono_ms: 15_000,
+            body: EventBody::AudioFocusGained {},
+        }],
+    );
+    assert!(speaks_content(&out_regain).is_empty());
+    assert_eq!(s2.history_poi_state("castle"), Some(&PoiState::Interrupted));
+
+    // After 5 min (t = 310_000) near shrine (950_000 cm -> 1.5 km before 1_100_000 cm) -> shrine speaks!
+    let out_next = tick(&mut s2, 310_000, Some(fix_at(310_000, 950_000)), vec![]);
+    let spoken2 = speaks_content(&out_next);
+    assert_eq!(spoken2.len(), 1);
+    assert_eq!(spoken2[0].1, "pack:shrine:short");
+}
+
+// 26. 辞書正本（schema/slm/expected_codes.json）と Rust の DICT_STOP / DICT_CXL の完全一致検証
+#[test]
+fn p3_stop_and_cxl_dictionaries_match_expected_codes_json() {
+    let expected: Value =
+        serde_json::from_str(include_str!("../../../../schema/slm/expected_codes.json")).unwrap();
+    let prefilter = &expected["deterministic_prefilter"];
+
+    // 1. exact_matches.CXL == avoid::DICT_CXL
+    let schema_cxl: Vec<&str> = prefilter["exact_matches"]["CXL"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        avoid::DICT_CXL,
+        schema_cxl.as_slice(),
+        "avoid::DICT_CXL must match schema/slm/expected_codes.json exact_matches.CXL"
+    );
+
+    // 2. context_scoped_matches.P3_STOP.phrases == history::DICT_STOP
+    let p3_stop = &prefilter["context_scoped_matches"]["P3_STOP"];
+    let schema_p3_stop: Vec<&str> = p3_stop["phrases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        history::DICT_STOP,
+        schema_p3_stop.as_slice(),
+        "history::DICT_STOP must match schema/slm/expected_codes.json P3_STOP.phrases"
+    );
+
+    // 3. always_cxl_phrases == DICT_CXL \ DICT_STOP
+    let schema_always_cxl: Vec<&str> = p3_stop["dispatch_rules"]["always_cxl_phrases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    let rust_always_cxl: Vec<&str> = avoid::DICT_CXL
+        .iter()
+        .copied()
+        .filter(|w| !history::DICT_STOP.contains(w))
+        .collect();
+    assert_eq!(
+        rust_always_cxl, schema_always_cxl,
+        "DICT_CXL minus DICT_STOP must match always_cxl_phrases"
     );
 }

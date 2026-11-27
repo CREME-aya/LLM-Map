@@ -836,7 +836,7 @@ mod tick {
         }
         fixture_kinds.sort();
         assert_eq!(schema_kinds, fixture_kinds);
-        assert_eq!(schema_kinds.len(), 17, "v2 has 17 event kinds");
+        assert_eq!(schema_kinds.len(), 18, "v2 has 18 event kinds");
     }
 
     /// Unknown fields: for every event kind (and TickInput / Fix / PlannerCmd / TickOutput /
@@ -861,7 +861,7 @@ mod tick {
             );
             kinds += 1;
         }
-        assert_eq!(kinds, 17);
+        assert_eq!(kinds, 18);
         let fix = serde_json::json!({"now_mono_ms":1,"fix":{"at_mono_ms":1,"lat_e7":0,"lon_e7":0,"acc_cm":100,"alt":2}});
         let top = serde_json::json!({"now_mono_ms":1,"extra":true});
         for bad in [fix, top] {

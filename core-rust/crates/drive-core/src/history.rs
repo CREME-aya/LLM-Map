@@ -23,10 +23,13 @@ use contracts::tick::{LogEvent, SaveForLaterReason, UiCmd, VoiceCmd};
 use contracts::RouteKey;
 use std::collections::BTreeSet;
 
-/// Provisional dictionary words for stopping P3 history commentary (05 §3.2 / §6.2).
-pub const DICT_STOP: &[&str] = &["やめて", "止めて", "とめて", "キャンセル", "ストップ"];
+/// Dictionary phrases for stopping P3 history commentary while `Speaking`
+/// (05 §6.2, `94ef3b6`; mirrors `schema/slm/expected_codes.json`
+/// `deterministic_prefilter.context_scoped_matches.P3_STOP.phrases`, `fffd429`).
+/// `"キャンセル"` is excluded here and reserved exclusively for `CXL`.
+pub const DICT_STOP: &[&str] = &["やめて", "止めて", "とめて", "ストップ"];
 
-/// True when `dict_norm` is a stop phrase for P3 history commentary.
+/// True when `dict_norm` is a P3 stop phrase (effective only while P3 is `Speaking`).
 pub fn is_dict_stop(norm: &str) -> bool {
     DICT_STOP.contains(&norm.trim())
 }
@@ -181,6 +184,13 @@ impl HistoryScheduler {
 
     pub fn spoken_count(&self) -> usize {
         self.spoken_pois.len()
+    }
+
+    /// True iff any POI is currently in `PoiState::Speaking` (05 §6.2, `94ef3b6`).
+    pub fn is_speaking(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|e| matches!(e.state, PoiState::Speaking { .. }))
     }
 
     /// Record a Rust-emitted P2 token so its `tts_started` is tracked as busy audio
@@ -342,8 +352,18 @@ impl HistoryScheduler {
         self.interrupt_speaking(at, "audio_focus_lost", voice_cmds, ui_cmds, log);
     }
 
-    /// User explicitly requested stop (e.g. dict `"やめて"` / `"キャンセル"`): expires
-    /// Speaking / Pending without `save_for_later` (05 §6.2).
+    /// `EventBody::AudioFocusGained {}` (05 §6.2, `94ef3b6`).
+    /// Restores eligibility for future / pending P3 narration; never resumes an interrupted POI.
+    pub fn on_audio_focus_gained(&mut self, at: u64, log: &mut Vec<LogEvent>) {
+        if self.audio_focus_lost {
+            self.audio_focus_lost = false;
+            log.push(log_at(at, "audio_focus_gained", None));
+        }
+    }
+
+    /// User explicitly requested stop while P3 is `Speaking` (e.g. dict `"やめて"` /
+    /// `"止めて"` / `"とめて"` / `"ストップ"`): expires ONLY `Speaking` without
+    /// `save_for_later` (05 §6.2, `94ef3b6`). Never touches `Pending` POIs.
     pub fn on_user_stop(
         &mut self,
         at: u64,
@@ -351,28 +371,16 @@ impl HistoryScheduler {
         log: &mut Vec<LogEvent>,
     ) {
         for e in &mut self.entries {
-            match &e.state {
-                PoiState::Speaking { token, .. } => {
-                    let tok = token.clone();
-                    e.state = PoiState::Expired;
-                    voice_cmds.push(VoiceCmd::Stop { token: tok });
-                    self.speaking_p1_wake_ms = None;
-                    log.push(log_at(
-                        at,
-                        "p3_expired",
-                        Some(format!("poi_id={} reason=user_stop", e.poi.poi_id)),
-                    ));
-                }
-                PoiState::Pending { .. } => {
-                    e.state = PoiState::Expired;
-                    self.blocked_window_wake_ms = None;
-                    log.push(log_at(
-                        at,
-                        "p3_expired",
-                        Some(format!("poi_id={} reason=user_stop", e.poi.poi_id)),
-                    ));
-                }
-                _ => {}
+            if let PoiState::Speaking { token, .. } = &e.state {
+                let tok = token.clone();
+                e.state = PoiState::Expired;
+                voice_cmds.push(VoiceCmd::Stop { token: tok });
+                self.speaking_p1_wake_ms = None;
+                log.push(log_at(
+                    at,
+                    "p3_expired",
+                    Some(format!("poi_id={} reason=user_stop", e.poi.poi_id)),
+                ));
             }
         }
     }

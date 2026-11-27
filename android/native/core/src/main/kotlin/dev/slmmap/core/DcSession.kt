@@ -63,6 +63,13 @@ import java.io.Closeable
 //   * voice_cmds speak carries either (template_id + params) OR content_ref (priority: p3 only).
 //     Echo tts_started / tts_done / tts_stopped with the same token; on stop{token} do NOT wait
 //     for onStop before starting P1.
+//   * Send audio_focus_lost / audio_focus_gained via dc_tick: audio_focus_lost interrupts
+//     Speaking P3 (save_for_later{interrupted}) and suppresses new P3; audio_focus_gained
+//     restores eligibility for future / pending POIs without resuming an interrupted POI.
+//   * Dict dispatch (05 §6.2, schema/slm/expected_codes.json): while P3 is Speaking,
+//     "やめて" / "止めて" / "とめて" / "ストップ" stop P3 only (Expired, no save_for_later,
+//     no CXL). Outside P3 Speaking, "やめて" resolves to CXL. "キャンセル" / "取り消し" /
+//     "取り消して" / "戻して" / "元に戻して" always resolve to CXL and never stop P3.
 //   * ui_cmds save_for_later{poi_id, reason: interrupted | bmk}: persist to the "save for later"
 //     list. L3 BMK via validateOverride targets the Speaking POI or the most recent Completed /
 //     Interrupted POI within 60 s (provisional), returning {result: "bookmarked", poi_id} and

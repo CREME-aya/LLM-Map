@@ -252,7 +252,7 @@ fn unknown_fields_are_e_schema() {
             bad["unexpected"] = Value::Bool(true);
             cases.push(serde_json::json!({"now_mono_ms": 1_000_000, "events": [bad]}));
         }
-        assert!(cases.len() >= 18);
+        assert!(cases.len() >= 20);
         for c in cases {
             let v = take(dc_tick(s, din(&serde_json::to_vec(&c).unwrap())));
             assert_eq!(v["error"]["code"], "E_SCHEMA", "{c} -> {v}");

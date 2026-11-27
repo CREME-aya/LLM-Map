@@ -346,6 +346,24 @@ pub fn is_dict_yes(dict_norm: &str) -> bool {
     DICT_YES.contains(&dict_norm)
 }
 
+/// Canonical dictionary phrases for `CXL` (mirrors `schema/slm/expected_codes.json`
+/// `deterministic_prefilter.exact_matches.CXL`; 05 §6.2, `94ef3b6`, `fffd429`).
+/// Note: while P3 history commentary is `Speaking`, `"やめて"` is intercepted by
+/// `history::DICT_STOP` to stop P3 only (without invoking `CXL`); outside P3 speaking,
+/// `"やめて"` resolves to `CXL`. The other phrases here always resolve to `CXL`.
+pub const DICT_CXL: &[&str] = &[
+    "キャンセル",
+    "やめて",
+    "取り消し",
+    "取り消して",
+    "戻して",
+    "元に戻して",
+];
+
+pub fn is_dict_cxl(dict_norm: &str) -> bool {
+    DICT_CXL.contains(&dict_norm.trim())
+}
+
 /// Provisional template id of the chip text (Kotlin renders it; TODO(04 §2): not named).
 pub const AVOID_TEMPLATE_ID: &str = "avoid_chip";
 

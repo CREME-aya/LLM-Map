@@ -1030,9 +1030,22 @@ impl Session {
                     text_class: TextClass::Dict,
                     dict_norm: Some(norm),
                     ..
-                } if history::is_dict_stop(&norm) => {
+                } if self.history.is_speaking() && history::is_dict_stop(&norm) => {
+                    // 05 §6.2 (94ef3b6 / fffd429): while P3 is Speaking, P3_STOP phrases
+                    // ("やめて" / "止めて" / "とめて" / "ストップ") stop P3 only and never
+                    // trigger CXL (no undo / no offer dismissal).
                     self.history
                         .on_user_stop(at, &mut tick_voice, &mut extra_log);
+                }
+                EventBody::AsrResult {
+                    text_class: TextClass::Dict,
+                    dict_norm: Some(norm),
+                    ..
+                } if avoid::is_dict_cxl(&norm) => {
+                    // 05 §6.2 (94ef3b6 / fffd429): "キャンセル" / "取り消し" / "取り消して" /
+                    // "戻して" / "元に戻して" are always CXL (never stop P3); "やめて" also
+                    // falls through here when P3 is not Speaking.
+                    self.on_dict_cxl(now, at, &mut fx, &mut extra_log);
                 }
                 EventBody::TtsStarted { token } => {
                     self.history.on_tts_started(
@@ -1065,6 +1078,9 @@ impl Session {
                         &mut fx.ui_cmds,
                         &mut extra_log,
                     );
+                }
+                EventBody::AudioFocusGained {} => {
+                    self.history.on_audio_focus_gained(at, &mut extra_log);
                 }
                 EventBody::HistoryConsent { on } => {
                     self.history
@@ -1180,6 +1196,34 @@ impl Session {
             log.push(log_req(at, "avoid_attempt_ended", req_id, why));
             AvoidState::Idle
         };
+    }
+
+    /// Dictionary `CXL` (`asr_result{text_class: dict}` matching `avoid::DICT_CXL`,
+    /// when not intercepted as `P3_STOP` during P3 Speaking): dismisses an active avoid offer
+    /// or triggers the 5 s avoid undo (`try_undo`). Never stops P3 history commentary.
+    fn on_dict_cxl(&mut self, now: u64, at: u64, fx: &mut Effects, log: &mut Vec<LogEvent>) {
+        if let AvoidState::Offered { req_id, offer, .. } = &self.avoid {
+            let offer_id = offer.offer_id.clone();
+            let req_id = req_id.clone();
+            fx.ui_cmds.push(UiCmd::Dismiss {
+                target_id: offer_id.clone(),
+                reason: DismissReason::Cancelled,
+            });
+            log.push(log_req(at, "avoid_offer_cancelled", &req_id, &offer_id));
+            self.avoid = AvoidState::Idle;
+            return;
+        }
+        if !matches!(self.undo, UndoState::None) {
+            if let Err(code) = self.try_undo(now, at, None, &mut fx.planner_cmds, log) {
+                self.undo_refused(at, code, log);
+            }
+            return;
+        }
+        log.push(log_at(
+            at,
+            "dict_cxl_no_target",
+            Some("NO_PENDING_TARGET".to_owned()),
+        ));
     }
 
     /// Consent to the chip: `user_tap{target_id: offer_id, action: avoid}` before the
