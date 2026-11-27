@@ -349,6 +349,17 @@ impl OverrideState {
     }
 }
 
+/// Validation and L3-state metadata for an issued override `commit{req_id}` that has not
+/// yet been settled by `dc_route_commit` or withdrawn by `cancel_commit` (03 §4.2).
+/// Retained independently of `Session::undo` so an expired undo attempt (> 5 s) never
+/// drops the divergence check or the new L3 weights/detour installation.
+#[derive(Debug, Clone, PartialEq)]
+struct PendingOverrideCommit {
+    offer_id: String,
+    start_progress_cm: u32,
+    meta: OverrideUndoMeta,
+}
+
 #[derive(Debug)]
 pub struct Session {
     planner: SearchPlanner,
@@ -392,6 +403,9 @@ pub struct Session {
     /// (provisional req_id check, proposed to the team). Cleared when a route is loaded:
     /// every one of them was issued against the route that was current until then.
     issued_commits: Vec<(String, RouteKey)>,
+    /// Override divergence-check and L3-weight metadata for unsettled override commits,
+    /// tracked independently of the 5 s `undo` window.
+    pending_override_commits: BTreeMap<String, PendingOverrideCommit>,
     /// The undo `commit` issued, its route not loaded yet (#22).
     undo_return: Option<UndoReturn>,
     /// Soft-mode / drive-start speed threshold (cm/s; 07 §1: 222 = 8 km/h, provisional).
@@ -458,6 +472,7 @@ impl Session {
             pending_planner: Vec::new(),
             pending_log: Vec::new(),
             issued_commits: Vec::new(),
+            pending_override_commits: BTreeMap::new(),
             undo_return: None,
             drive_start_speed_cm_s: config.drive_start_speed_cm_s,
             drive_start_hold_ms: config.drive_start_hold_ms,
@@ -626,6 +641,7 @@ impl Session {
         self.reset_override();
         self.undo = UndoState::None;
         self.issued_commits.clear();
+        self.pending_override_commits.clear();
         self.undo_return = None;
         let now = self.last_now_mono_ms.unwrap_or(0);
         self.history.on_route_changed(
@@ -915,21 +931,25 @@ impl Session {
         // (CandidateFacts carries no edge sequence). If the vehicle has already reached or
         // passed the divergence point on the current route, keep the current route unchanged
         // and notify with "この時間内では回避できる経路がありません".
-        let committed_override_meta = match (&self.undo, self.route.as_ref()) {
-            (UndoState::Consented(c), Some(old))
-                if c.req_id == req.req_id && c.override_meta.is_some() =>
-            {
+        let committed_override_meta = match (
+            self.pending_override_commits.get(&req.req_id),
+            self.route.as_ref(),
+        ) {
+            (Some(pending), Some(old)) => {
                 let div_orig = avoid::divergence_on_original_cm(
                     &old.edge_spans(),
                     &loaded.edge_spans(),
-                    c.start_progress_cm,
+                    pending.start_progress_cm,
                 );
                 let past_divergence =
                     div_orig.is_some_and(|d| self.aligner.progress_cm().is_some_and(|p| p >= d));
                 if past_divergence {
-                    let offer_id = c.offer_id.clone();
+                    let offer_id = pending.offer_id.clone();
                     self.issued_commits.retain(|(r, _)| r != &req.req_id);
-                    self.undo = UndoState::None;
+                    self.pending_override_commits.remove(&req.req_id);
+                    if matches!(&self.undo, UndoState::Consented(c) if c.req_id == req.req_id) {
+                        self.undo = UndoState::None;
+                    }
                     self.speak_override_no_route(now);
                     self.pending_log.push(log_req(
                         now,
@@ -942,9 +962,10 @@ impl Session {
                         "override divergence point already passed",
                     ));
                 }
-                c.override_meta.clone()
+                Some(pending.meta.clone())
             }
-            _ => None,
+            (Some(pending), None) => Some(pending.meta.clone()),
+            (None, _) => None,
         };
         loaded.assign_route_key(RouteKey {
             route_revision: contracts::U64Str(revision),
@@ -1010,6 +1031,7 @@ impl Session {
         }
         self.undo = undo;
         self.issued_commits.clear();
+        self.pending_override_commits.clear();
         Ok(result)
     }
 
@@ -1074,6 +1096,7 @@ impl Session {
             let req_id = c.req_id.clone();
             let offer_id = c.offer_id.clone();
             self.issued_commits.retain(|(r, _)| *r != req_id);
+            self.pending_override_commits.remove(&req_id);
             let mut fx = Effects::default();
             self.planner.discard_held(at, "undo", &mut fx);
             log.append(&mut fx.log);
@@ -1233,7 +1256,14 @@ impl Session {
         // Time never goes backwards inside the core: clamp to the previous value and
         // record clock_regression (02 §2.1 / team decision 2026-11-24).
         let now = self.clamp_now(input.now_mono_ms, &mut extra_log);
-        // Status and remaining ETA as of `now`, before this tick's events / fix.
+        // Apply this tick's fix to alignment first so consent, undo, and search-finish
+        // checks inside `input.events` see the current tracking state and progress (never
+        // accepting consent on a tick whose fix confirms off-route or finishes the route).
+        // Reroute requests stay after `input.events` so a finishing search can settle first.
+        let tick_fix = input.fix;
+        if let Some(fix) = tick_fix {
+            self.on_fix_align(now, fix, &mut extra_log);
+        }
         self.refresh_eta(now);
         let gate = self.commit_gate(now);
 
@@ -1408,8 +1438,8 @@ impl Session {
                 _ => {}
             }
         }
-        if let Some(fix) = input.fix {
-            self.on_fix(now, fix, &mut fx, &mut extra_log);
+        if let Some(fix) = tick_fix {
+            self.maybe_request_reroute(now, fix, &mut fx);
         }
         self.planner.on_now(now, &mut fx);
         self.avoid_budget(now, &mut fx, &mut extra_log);
@@ -1692,6 +1722,20 @@ impl Session {
             req_id,
             &format!("{} source={source}", target.override_id),
         ));
+        let override_meta = OverrideUndoMeta {
+            prev_l3_weights: target.prev_l3_weights.clone(),
+            new_l3_weights: target.new_l3_weights.clone(),
+            prev_detour: target.prev_detour,
+            new_detour: target.new_detour,
+        };
+        self.pending_override_commits.insert(
+            req_id.clone(),
+            PendingOverrideCommit {
+                offer_id: target.override_id.clone(),
+                start_progress_cm: target.start_progress_cm,
+                meta: override_meta.clone(),
+            },
+        );
         self.undo = UndoState::Consented(Consent {
             req_id: req_id.clone(),
             offer_id: target.override_id.clone(),
@@ -1699,12 +1743,7 @@ impl Session {
             from_route_key: target.route_key.clone(),
             start_progress_cm: target.start_progress_cm,
             consent_at_mono_ms: at,
-            override_meta: Some(OverrideUndoMeta {
-                prev_l3_weights: target.prev_l3_weights.clone(),
-                new_l3_weights: target.new_l3_weights.clone(),
-                prev_detour: target.prev_detour,
-                new_detour: target.new_detour,
-            }),
+            override_meta: Some(override_meta),
         });
         self.override_state = OverrideState::Idle;
     }
@@ -2209,9 +2248,9 @@ impl Session {
         }
     }
 
-    /// On-route alignment of one fix (04 §3.1); confirms off-route and requests the reroute
-    /// with this fix as the new origin.
-    fn on_fix(&mut self, now: u64, fix: Fix, fx: &mut Effects, log: &mut Vec<LogEvent>) {
+    /// On-route alignment of one fix (04 §3.1); updates tracking / off-route / drive-start
+    /// state before this tick's events are evaluated.
+    fn on_fix_align(&mut self, now: u64, fix: Fix, log: &mut Vec<LogEvent>) {
         // Tracked even before the first route is committed.
         self.observe_drive_start(&fix);
         if self
@@ -2298,6 +2337,15 @@ impl Session {
         }
         // Off-route invalidates the remaining ETA before the reroute starts (→ long).
         self.refresh_eta(now);
+    }
+
+    /// Requests a reroute with `fix` as the new origin once off-route is confirmed and no
+    /// reroute is already in flight (called after `input.events` so a finishing search can
+    /// settle before any new reroute starts).
+    fn maybe_request_reroute(&mut self, now: u64, fix: Fix, fx: &mut Effects) {
+        if self.route.is_none() || self.finished {
+            return;
+        }
         if self.aligner.off_confirmed() && !self.planner.has_reroute() {
             if let Some(key) = self.current_route_key.clone() {
                 self.planner
@@ -2357,7 +2405,8 @@ impl Session {
                     .issued_commits
                     .push((req_id.clone(), route_key.clone())),
                 PlannerCmd::CancelCommit { req_id } => {
-                    self.issued_commits.retain(|(r, _)| r != req_id)
+                    self.issued_commits.retain(|(r, _)| r != req_id);
+                    self.pending_override_commits.remove(req_id);
                 }
                 _ => {}
             }

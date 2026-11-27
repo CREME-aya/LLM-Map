@@ -1070,3 +1070,196 @@ fn jp_next_junction_deadline_expires_confirm_before_30s() {
     assert!(o_exp.planner_cmds.is_empty());
     assert_eq!(*s.override_state(), OverrideState::Idle);
 }
+
+#[test]
+fn consent_with_third_off_route_fix_in_same_tick_is_refused() {
+    // Both user_tap{confirm} and dict "はい" arriving in the same tick as the 3rd off-route
+    // fix must be refused ("not_tracking"), never emitting a Commit for the old override.
+    for use_dict_yes in [false, true] {
+        let (mut s, orig, rk, req_id, oid) = ready_override("OVR rc=H");
+        let base = make_facts(&rk.graph_version, 600_000, 1);
+        let alt = make_facts(&rk.graph_version, 600_000, 0);
+        assert!(matches!(
+            s.avoid_offer_eval(&AvoidOfferEvalRequest {
+                req_id,
+                now_mono_ms: 10_600,
+                alt_facts: alt,
+                base_facts: base,
+            }),
+            AvoidOfferEvalResult::OverrideOffered { .. }
+        ));
+        tick(&mut s, 10_700, None, vec![]);
+
+        // Two off-route fixes: still tracking (confirm_fixes == 3)
+        tick(
+            &mut s,
+            11_000,
+            Some(fix_xy(&orig, 11_000, START_X + 1_000, 10_000)),
+            vec![],
+        );
+        tick(
+            &mut s,
+            12_000,
+            Some(fix_xy(&orig, 12_000, START_X + 2_000, 10_000)),
+            vec![],
+        );
+        assert_eq!(s.horizon_status(12_000), Some(HorizonStatus::Tracking));
+
+        let evs = if use_dict_yes {
+            vec![
+                json!({"at_mono_ms": 12_900, "kind": "asr_started", "utterance_id": "u-off"}),
+                json!({
+                    "at_mono_ms": 13_000,
+                    "kind": "asr_result",
+                    "utterance_id": "u-off",
+                    "text_class": "dict",
+                    "dict_norm": "はい"
+                }),
+            ]
+        } else {
+            vec![json!({
+                "at_mono_ms": 13_000,
+                "kind": "user_tap",
+                "target_id": oid,
+                "action": "confirm"
+            })]
+        };
+        // 3rd off-route fix arrives in the SAME tick as consent
+        let o = tick(
+            &mut s,
+            13_000,
+            Some(fix_xy(&orig, 13_000, START_X + 3_000, 10_000)),
+            evs,
+        );
+        assert!(
+            !o.planner_cmds
+                .iter()
+                .any(|c| matches!(c, PlannerCmd::Commit { .. })),
+            "must not emit Commit on off-route tick: {:?}",
+            o.planner_cmds
+        );
+        assert!(o.planner_cmds.iter().any(|c| matches!(
+            c,
+            PlannerCmd::Start {
+                priority: SearchPriority::Reroute,
+                ..
+            }
+        )));
+        assert!(o
+            .log
+            .iter()
+            .any(|l| l.what == "override_consent_refused"
+                && l.detail.as_deref() == Some("not_tracking")));
+        assert!(o.ui_cmds.contains(&UiCmd::Dismiss {
+            target_id: oid,
+            reason: DismissReason::RouteChanged,
+        }));
+        assert_eq!(*s.override_state(), OverrideState::Idle);
+        assert_eq!(s.issued_commits().count(), 0);
+    }
+}
+
+#[test]
+fn override_commit_retains_divergence_and_weights_after_expired_undo() {
+    // Case A: expired undo (> 5 s) while override commit is unsettled still installs new
+    // L3 weights and detour when dc_route_commit arrives before divergence.
+    let (mut s, orig, rk, req_id, oid) = ready_override("OVR rc=H dt=T");
+    let base = make_facts(&rk.graph_version, 600_000, 1);
+    let alt = make_facts(&rk.graph_version, 600_000, 0);
+    assert!(matches!(
+        s.avoid_offer_eval(&AvoidOfferEvalRequest {
+            req_id: req_id.clone(),
+            now_mono_ms: 10_600,
+            alt_facts: alt.clone(),
+            base_facts: base.clone(),
+        }),
+        AvoidOfferEvalResult::OverrideOffered { .. }
+    ));
+    tick(&mut s, 10_700, None, vec![]);
+    tick(
+        &mut s,
+        12_000,
+        None,
+        vec![json!({
+            "at_mono_ms": 12_000,
+            "kind": "user_tap",
+            "target_id": oid,
+            "action": "confirm"
+        })],
+    );
+    // > 5 s later: undo attempt expires and clears self.undo, leaving commit unsettled
+    let expired_undo = s
+        .validate_override(ovr_req("CXL", 18_000, 0, json!({})))
+        .unwrap();
+    assert_eq!(
+        expired_undo,
+        ValidateOverrideResult::Rejected {
+            code: RejectCode::NoPendingTarget
+        }
+    );
+    let alt_bundle = alt_line(&orig);
+    let committed = s
+        .route_commit(&RouteCommitRequest {
+            req_id,
+            expected_route_key: Some(rk),
+            bundle: alt_bundle,
+        })
+        .expect("override commit before divergence must still succeed");
+    assert_eq!(committed.route_key.route_revision, U64Str(2));
+    assert_eq!(s.active_l3_weights().crossing_right, Some(Level::High));
+    assert_eq!(s.active_detour(), Detour::Tight);
+
+    // Case B: expired undo (> 5 s) while override commit is unsettled STILL enforces the
+    // divergence-point refusal when the vehicle has already passed divergence.
+    let (mut s2, orig2, rk2, req_id2, oid2) = ready_override("OVR rc=H");
+    assert!(matches!(
+        s2.avoid_offer_eval(&AvoidOfferEvalRequest {
+            req_id: req_id2.clone(),
+            now_mono_ms: 10_600,
+            alt_facts: alt,
+            base_facts: base,
+        }),
+        AvoidOfferEvalResult::OverrideOffered { .. }
+    ));
+    tick(&mut s2, 10_700, None, vec![]);
+    tick(
+        &mut s2,
+        12_000,
+        None,
+        vec![json!({
+            "at_mono_ms": 12_000,
+            "kind": "user_tap",
+            "target_id": oid2,
+            "action": "confirm"
+        })],
+    );
+    let expired_undo2 = s2
+        .validate_override(ovr_req("CXL", 18_000, 0, json!({})))
+        .unwrap();
+    assert_eq!(
+        expired_undo2,
+        ValidateOverrideResult::Rejected {
+            code: RejectCode::NoPendingTarget
+        }
+    );
+    // Vehicle advances past divergence (x = 130_000 > 120_000) before dc_route_commit
+    tick(
+        &mut s2,
+        18_500,
+        Some(fix_x(&orig2, 18_500, 130_000)),
+        vec![],
+    );
+    let alt_bundle2 = alt_line(&orig2);
+    let err = s2
+        .route_commit(&RouteCommitRequest {
+            req_id: req_id2,
+            expected_route_key: Some(rk2.clone()),
+            bundle: alt_bundle2,
+        })
+        .expect_err("must still refuse override commit past divergence after expired undo");
+    assert_eq!(err.code, ErrorCode::Stale);
+    assert_eq!(s2.route().unwrap().route_key, rk2);
+    assert_eq!(*s2.active_l3_weights(), Weights::default());
+    let o_voice = tick(&mut s2, 18_600, None, vec![]);
+    assert!(has_no_route_voice(&o_voice));
+}
