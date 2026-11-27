@@ -25,7 +25,7 @@ use contracts::rank::{
     DetourPolicyConfig, L3LevelScale, PenaltyPolicy, L2_PENALTY_PERMILLE_MAX,
     L2_PENALTY_PERMILLE_MIN, MAX_DETOUR_RATIO_PERMILLE_MAX, MAX_DETOUR_RATIO_PERMILLE_MIN,
 };
-use contracts::route::{RouteCommitRequest, RouteCommitResult};
+use contracts::route::{RouteCommitRequest, RouteCommitResult, SessionResume};
 use contracts::tick::{
     DismissReason, DistanceClass, EventBody, Fix, LogEvent, PlannerCmd, SaveForLaterReason,
     SearchPriority, TapAction, TextClass, ThermalStatus, TickInput, TickOutput, UiCmd, VoiceCmd,
@@ -102,6 +102,12 @@ pub struct SessionConfig {
     pub override_min_improvement_ms: u64,
     /// Lifetime of an L3 override utterance / confirmation screen (ms; 03 §4.2: 30 s = 30,000 ms).
     pub override_expiry_ms: u64,
+    /// Optional `E_PANIC` session recovery payload (04 §3.2, PR #23): loads `route_bundle`
+    /// directly under the given `route_key` without incrementing `route_revision` or checking
+    /// `req_id`. Alignment starts in `uncertain`; P3 spoken log, `avoid_tried`, held results
+    /// and plan state are not carried over.
+    #[serde(default)]
+    pub resume: Option<SessionResume>,
 }
 
 impl Default for SessionConfig {
@@ -141,6 +147,7 @@ impl Default for SessionConfig {
             p3_bmk_window_ms: h.bmk_window_ms,
             override_min_improvement_ms: 30_000,
             override_expiry_ms: 30_000,
+            resume: None,
         }
     }
 }
@@ -389,10 +396,19 @@ pub struct Session {
 
 impl Session {
     pub fn new(config: SessionConfig) -> Self {
+        Self::try_new(config).expect("invalid SessionConfig")
+    }
+
+    /// Builds a session, validating `config` and optionally loading `config.resume`
+    /// (`{route_bundle, route_key}`, 04 §3.2) without incrementing `route_revision`.
+    pub fn try_new(config: SessionConfig) -> Result<Self, CoreError> {
+        config
+            .validate()
+            .map_err(|e| CoreError::new(ErrorCode::Schema, format!("config: {e}")))?;
         let align_cfg = config.align();
         let history_cfg = config.history();
         let avoid_cfg = config.avoid();
-        Self {
+        let mut session = Self {
             planner: SearchPlanner::new(config.limits()),
             last_now_mono_ms: None,
             current_route_key: None,
@@ -429,15 +445,58 @@ impl Session {
             history: HistoryScheduler::new(history_cfg),
             last_fix_lateral_ok: false,
             last_fix_acc_and_bearing_ok: false,
+        };
+        if let Some(resume) = config.resume {
+            let mut loaded = Self::load_resume(&resume)?;
+            loaded.assign_route_key(resume.route_key.clone());
+            session.current_route_key = Some(loaded.route_key.clone());
+            // Load corridor POIs into fresh history scheduler (consent OFF, 0 spoken).
+            session.history.on_route_changed(
+                0,
+                &loaded.history_pois,
+                &mut session.pending_voice,
+                &mut session.pending_ui,
+                &mut session.pending_log,
+            );
+            session.route = Some(loaded);
         }
+        Ok(session)
+    }
+
+    fn load_resume(resume: &SessionResume) -> Result<LoadedRoute, CoreError> {
+        if resume.route_key.route_revision.0 == 0 {
+            return Err(CoreError::new(
+                ErrorCode::Schema,
+                "resume.route_key.route_revision must be >= 1",
+            ));
+        }
+        let b_rk = &resume.route_bundle.route_key;
+        if b_rk.trip_id != resume.route_key.trip_id
+            || b_rk.trip_revision != resume.route_key.trip_revision
+            || b_rk.graph_version != resume.route_key.graph_version
+        {
+            return Err(CoreError::new(
+                ErrorCode::Schema,
+                "resume.route_bundle.route_key does not match resume.route_key",
+            ));
+        }
+        if b_rk.route_revision.0 != 0 && b_rk.route_revision != resume.route_key.route_revision {
+            return Err(CoreError::new(
+                ErrorCode::Schema,
+                format!(
+                    "resume.route_bundle.route_key.route_revision must be \"0\" or \"{}\", got \"{}\"",
+                    resume.route_key.route_revision.0, b_rk.route_revision.0
+                ),
+            ));
+        }
+        LoadedRoute::load(&resume.route_bundle)
+            .map_err(|e| CoreError::new(ErrorCode::Schema, format!("resume.route_bundle: {e}")))
     }
 
     pub fn from_json(config_json: &[u8]) -> Result<Self, CoreError> {
         let cfg: SessionConfig = serde_json::from_slice(config_json)
             .map_err(|e| CoreError::new(ErrorCode::Schema, format!("config: {e}")))?;
-        cfg.validate()
-            .map_err(|e| CoreError::new(ErrorCode::Schema, format!("config: {e}")))?;
-        Ok(Self::new(cfg))
+        Self::try_new(cfg)
     }
 
     pub fn aligner(&self) -> &Aligner {

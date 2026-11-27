@@ -145,7 +145,13 @@ class DcSession private constructor(private var handle: Long) : Closeable {
         fun exchangeValidate(reqJson: ByteArray): ByteArray =
             DcNative.exchangeValidate(reqJson) ?: throw OutOfMemoryError("dc_core: exchangeValidate result ByteArray allocation failed")
 
-        /** Returns the session, or the error envelope bytes from dc_session_new. */
+        /**
+         * Returns the session, or the error envelope bytes from dc_session_new.
+         * On E_PANIC recovery (04 §3.2), stop all audio and pass optional
+         * `resume: {route_bundle, route_key}` in `configJson` to reload the current route
+         * preserving `route_revision` (and ManeuverId.route_key) while starting in `uncertain`;
+         * then re-send current `history_consent` / `call_state` / `audio_focus_*` / `thermal`.
+         */
         fun open(configJson: ByteArray): Result<DcSession> {
             check(DcNative.abiVersion() == DcNative.EXPECTED_ABI_VERSION) { "dc_core ABI mismatch" }
             val out = LongArray(1)

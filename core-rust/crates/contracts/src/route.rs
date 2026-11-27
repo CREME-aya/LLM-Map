@@ -196,6 +196,71 @@ fn lon_e7<'de, D: Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
     Ok(v)
 }
 
+/// `dc_session_new` optional `resume: { route_bundle, route_key }` (docs 04 §3.2, PR #23):
+/// rebuilds a session after `E_PANIC` without reassigning `route_revision` (so on-screen
+/// `ManeuverId.route_key` stays stable) and without `req_id` matching.
+///
+/// Accepts `route_bundle` carrying either `route_revision: "0"` (original C++ bundle) or the
+/// exact `resume.route_key.route_revision` (>= 1). `trip_id`, `trip_revision`, and
+/// `graph_version` must match `resume.route_key`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SessionResume {
+    pub route_bundle: RouteBundle,
+    pub route_key: RouteKey,
+}
+
+impl<'de> Deserialize<'de> for SessionResume {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ResumeBundleWire {
+            route_key: RouteKey,
+            eta_ms: u32,
+            length_cm: u32,
+            legs: Vec<Leg>,
+            #[serde(default)]
+            history_pois: Vec<HistoryPoi>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SessionResumeWire {
+            route_bundle: ResumeBundleWire,
+            route_key: RouteKey,
+        }
+        let w = SessionResumeWire::deserialize(d)?;
+        if w.route_key.route_revision.0 == 0 {
+            return Err(serde::de::Error::custom(
+                "resume.route_key.route_revision must be >= 1",
+            ));
+        }
+        let b_rk = &w.route_bundle.route_key;
+        if b_rk.trip_id != w.route_key.trip_id
+            || b_rk.trip_revision != w.route_key.trip_revision
+            || b_rk.graph_version != w.route_key.graph_version
+        {
+            return Err(serde::de::Error::custom(
+                "resume.route_bundle.route_key does not match resume.route_key",
+            ));
+        }
+        if b_rk.route_revision.0 != 0 && b_rk.route_revision != w.route_key.route_revision {
+            return Err(serde::de::Error::custom(format!(
+                "resume.route_bundle.route_key.route_revision must be \"0\" or \"{}\", got \"{}\"",
+                w.route_key.route_revision.0, b_rk.route_revision.0
+            )));
+        }
+        Ok(SessionResume {
+            route_bundle: RouteBundle {
+                route_key: w.route_bundle.route_key,
+                eta_ms: w.route_bundle.eta_ms,
+                length_cm: w.route_bundle.length_cm,
+                legs: w.route_bundle.legs,
+                history_pois: w.route_bundle.history_pois,
+            },
+            route_key: w.route_key,
+        })
+    }
+}
+
 /// `dc_route_commit` output data: the new current route (with the revision Rust assigned)
 /// and what was loaded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -32,7 +32,12 @@ typedef struct dc_session dc_session;
 
 /* 1  */ uint32_t dc_abi_version(void);                 /* upper 16 bit = ABI, lower 16 bit = schema */
 /* 2  */ void     dc_buf_free(dc_out buf);              /* {NULL,0} is a no-op */
-/* 3  */ dc_out   dc_session_new(dc_in config_json, dc_session** out_session); /* on failure *out = NULL */
+/* 3  */ dc_out   dc_session_new(dc_in config_json, dc_session** out_session); /* on failure *out = NULL.
+          * Optional config field `resume: {route_bundle, route_key}` (04 §3.2, E_PANIC recovery):
+          * loads `route_bundle` directly under `route_key` without incrementing `route_revision`
+          * (the only entry that preserves route_revision and skips req_id matching); alignment
+          * starts in `uncertain`; P3 spoken history / avoid_tried / held results / plan are not
+          * carried over. Invalid resume payload -> E_SCHEMA and *out = NULL. */
 /* 4  */ void     dc_session_free(dc_session* s);       /* NULL is safe. Double free is undefined.
                                                          * Called on explicit actor close, never from a GC finalizer. */
 
