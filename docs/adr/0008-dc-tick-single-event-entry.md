@@ -78,9 +78,9 @@ ADR-0002 の本文は書き換えない（Accepted）。本 ADR で次の点を�
 - **制約**: ログに発話の原文が残らないので、認識誤りを調べるにはハーネスで明示的に有効にする必要がある。
 
 ## 再評価条件
-- **Gate 0**: valhalla-mobile 0.6.2 の割り込みパッチ（割り込みコールバックと `cancel(req_id)`）で、cancel した後に同じ Actor で次の探索が成功するか、`engine_reset` ができるかを確認する。パッチできなければ素の 0.6.2 で先読みを無効にし、それもできなければ LAN 越しにホストの Valhalla を使う（正本の退路）。`engine_reset` ができない場合に `engine_stuck` からどう戻すかの **対応方針は未決**。
-- **Gate 0**: `THERMAL_STATUS_*` の段階数が記憶と違った場合は、`thermal.status` の列挙を見直す。どう直すかの **対応方針は未決**。
-- **Gate 7**: 共通テストデータ（`start{r1, avoid_chip}` → 逸脱で `cancel{r1}` → `search_finished{r1, ok}` を捨てて `start{r2, reroute}` → `search_finished{r2, ok}` を原子コミット。派生として、t2 が来ない → 監視期限超過を Rust が検出 → `engine_stuck` → 実際の戻りの後に `search_finished`（`discarded_after_stuck`）→ r2）で、同時 Running ≤ 1、r1 由来の表示・発話 0 を確かめ、(t2−t1)・(t3−t1) を記録する。満たせない場合の **対応方針は未決**。停止遅延を実測するまでは、走行中の回避チップ先読みを無効にして進める。
-- **Gate 4**: 共通テスト（発話中の提案差し替え、承認直前の逸脱、表示後の締切超過）で経路変更 0・古い案内発話 0 を確かめる。コールド結果を捨てる判定を含む。満たせない場合の **対応方針は未決**。
+- **Gate 0**: valhalla-mobile 0.6.2 の割り込みパッチ（割り込みコールバックと `cancel(req_id)`）で、cancel した後に同じ Actor で次の探索が成功するか、`engine_reset` ができるかを確認する。パッチできなければ素の 0.6.2 で先読みを無効にし、それもできなければ LAN 越しにホストの Valhalla を使う（正本の退路）。`engine_reset` ができない場合に `engine_stuck` からどう戻すかの対応は [07 §2.6](../specs/07-parameters-and-poc-gates.md) の表のとおり。
+- **Gate 0**: `THERMAL_STATUS_*` の段階数が記憶と違った場合は、`thermal.status` の列挙を見直す。どう直すかの対応は [07 §2.6](../specs/07-parameters-and-poc-gates.md) の表のとおり。
+- **Gate 7**: 共通テストデータ（`start{r1, avoid_chip}` → 逸脱で `cancel{r1}` → `search_finished{r1, ok}` を捨てて `start{r2, reroute}` → `search_finished{r2, ok}` を原子コミット。派生として、t2 が来ない → 監視期限超過を Rust が検出 → `engine_stuck` → 実際の戻りの後に `search_finished`（`discarded_after_stuck`）→ r2）で、同時 Running ≤ 1、r1 由来の表示・発話 0 を確かめ、(t2−t1)・(t3−t1) を記録する。満たせない場合の対応は [07 §2.6](../specs/07-parameters-and-poc-gates.md) の表のとおり。停止遅延を実測するまでは、走行中の回避チップ先読みを無効にして進める。
+- **Gate 4**: 共通テスト（発話中の提案差し替え、承認直前の逸脱、表示後の締切超過）で経路変更 0・古い案内発話 0 を確かめる。コールド結果を捨てる判定を含む。満たせない場合の対応は [07 §2.6](../specs/07-parameters-and-poc-gates.md) の表のとおり。
 - **受け渡し性能**: 短距離 7 候補で受け渡しと解析の p95 が 300 ms を超えたら内訳を調べ、コピーが主な原因なら `DirectByteBuffer` と比べる（計測点は JNI ラッパー側）。
 - 関数の数や非同期コールバックが増えた場合の `UniFFI` 移行は、[ADR-0002](0002-narrow-pure-rust-core.md) の再評価条件に従う。
