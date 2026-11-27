@@ -71,6 +71,7 @@ L3 の出力は **L2 本表（`profile_weights` / `avoidance_nodes_edges`）へ�
 | 1 | **逸脱再探索**（`reroute`） | 走行中の最優先。下位の探索は cancel して枠を空ける |
 | 2 | **明示計画**（`explicit_plan`） | — |
 | 3 | **回避チップ**（`avoid_chip`） | 計算予算・起動条件は [04 §4.3](04-maneuver-horizon-and-hmi.md) |
+| 3' | **L3 の経路変更**（`override`） | 逸脱再探索と明示計画の下、回避チップの上。§4.2「`Applied` の後」 |
 | 4 | **比較探索**（`comparison`） | 走行中の逸脱再探索には割り込まない |
 
 | 方向 | メッセージ | 内容 |
@@ -258,10 +259,10 @@ level ::= "L" | "N" | "H"
 |---|---|
 | `SYNTAX` | 文法・解析の失敗 |
 | `UNKNOWN_REF` | 参照先が見つからない（例: `jp=next` で該当難所なし） |
-| `STALE_REVISION` | `route_key` / `trip_revision` / `ref_frame_seq` の不一致 |
-| `EXPIRED` | 期限切れ、および `jp=next` の対象難所が締切済み |
+| `STALE_REVISION` | `route_key`（`trip_id` / `trip_revision` / `route_revision`）が今の経路と違う（いつでも）。`ref_frame_seq` で古さを判定するのは **`jp` を指定していて、指している `refs` の中身が `ref_frame_seq` の時点から変わったときだけ**（`frame_seq` は Horizon が少し変わるだけで進むため、重みだけの命令は `frame_seq` では却下しない） |
+| `EXPIRED` | `now_mono_ms > utterance_mono_ms + 30 s`（期限切れ）、および `jp=next` の対象難所が締切済み |
 | `FORBIDDEN_WHILE_DRIVING` | 走行中の `through_ref` 指定・目的地変更 |
-| `NO_EFFECT` | 現行と同じ重み（適用しても変化なし） |
+| `NO_EFFECT` | 3 軸とも展開後の重みが今の重み（L2 × 今の L3）と同じで、`jp` も `dt` も指定されていない |
 | `NO_PENDING_TARGET` | `YES` / `NO` / `CXL` の対象（確認待ちの提案など）がない |
 
 #### 経路を確定する入口（2 つだけ）
@@ -273,6 +274,12 @@ level ::= "L" | "N" | "H"
 - **SLM の `YES` では確定しない**（再確認を促すのみ）。
 - 承認時に `target_id`（提案 ID・経路版・対象難所・期限）を **再検証** する。発話中に提案が差し替わった場合、**承認を新しい提案へ引き継がない**。
 - イベントの型は [ADR-0008](../adr/0008-dc-tick-single-event-entry.md) の `dc_tick` v2 が正本。共通テスト（発話中の提案差し替え・承認直前の逸脱・表示後の締切超過で経路変更 0・古い案内発話 0）は [07 §2](07-parameters-and-poc-gates.md) の Gate 4 / 7。
+
+#### `Applied` の後（走行中も停車中も同じ道。回避チップの仕組みを使い回す）
+1. Rust は override を確認待ちとして持ち、`planner_cmds: start{req_id, priority: override, distance_class, route_key, graph_version, fix}` を **1 本** 出す（今の位置から探索するので、`reroute` と同じく `fix` を付ける。目的地・経由地は今の `route_bundle` から Rust が分かるので、Kotlin は `TripPlanSnapshot` を作り直さない。`dc_plan_candidates` は出発前の比較用なので使わない）。Kotlin は override の重みに対応する costing で Valhalla を呼ぶ（Phase 1 は既存の Auto パラメータの範囲、§3.1）。
+2. 結果は回避チップと同じく `evaluate_offer` で評価する（迂回上限、`base_facts` との比較）。判定は、**探索を始めた時点の位置から目的地まで** の区間で、`base_facts`（元の経路）と `alt_facts`（代わりの経路）を **同じ override の重みで** 採点し（§3.2 の `score_ms`）、代わりの経路の点数が **最小改善幅（30 秒相当、暫定。[07 §1](07-parameters-and-poc-gates.md)）以上** 小さく、迂回上限内であること（少しだけ良くなった提案で運転者を煩わせないため）（`jp` を指定していれば、回避チップの (a)「対象を通らない」も満たすこと。[04 §4.3](04-maneuver-horizon-and-hmi.md)）。満たさなければ「この時間内では回避できる経路がありません」。
+3. 通れば確認を出す。override は特定の 1 操作に結び付かないので、Horizon の `avoid_offer` ではなく **`ui_cmds: show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}`** で出す（`jp=next` のように対象の操作がある場合も同じ）。確認の締切は **30 秒**（§4.2）。分かれる地点は `evaluate_offer` の時点では分からない（`CandidateFacts` は edge 列を持たない）ので、同意した後の `dc_route_commit` で求め、その時点で分かれる地点をすでに過ぎていたら経路は変えず「この時間内では回避できる経路がありません」を返す。Gate 7 で締切切れが多ければ、C++ に「最初に分かれる位置」を事実データとして足してもらう。
+4. 辞書の「はい」か `user_tap{target_id: override_id}` で同意したら `commit`。`cancel_commit`、5 秒以内の「戻して」、締切切れの `dismiss` は回避チップと同じ（§3.1）。走行中の経路変更は「同意後の `commit`」でしか起きないので、02 §2.1 #9 の「走行中は計画の候補を選べない」に例外を作らない。
 
 #### `dc_validate_override` の入出力（Rust C ABI v1）
 ```text

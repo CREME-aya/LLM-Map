@@ -17,6 +17,7 @@
 | **候補探索・採点** | 迂回上限 `DetourPolicy` | `short_threshold_s: 1800` / `short_cap_s: 180` / `long_cap_s: 900` / `long_cap_ratio: 0.15` / `ratio_cap: 1.35` / `tight_factor: 0.5` | 採否は増加秒数で判定（式は [03 §3.2](03-routing-and-two-layer-control.md)）。L1/L2/L3 共通で `dc_rank` と `dc_avoid_offer_eval` が同じ関数を使う。走行中の回避チップは `base_eta` = 残り ETA。`profile_weights.max_detour_ratio_permille` 既定は NULL（= 方針値）、ユーザー値は厳しくする方向のみ有効で 1350（1.35 倍）で頭打ち |
 | **候補探索・採点** | 運転しやすさペナルティ（秒相当） | 対向無信号/不明右折 +45s / 信号有不明 +25s / 保護確認 +10s / 右折入口 +90s / 狭路 (<4.0m) +30s/100m / 幅不明生活道路 +15s/100m / 合流 +15s | ETA 表示には加算しない（Gate 3 でタグ率と監査により校正） |
 | **候補探索・採点** | C++ → Kotlin → Rust 受け渡し＋解析 | 短距離 7 候補で p95 `<= 300 ms` | 超過なら内訳を調査し、コピーが主因なら `DirectByteBuffer` を比較。計測点は JNI ラッパー側（[02 §2.1](02-architecture-and-stack.md)） |
+| **候補探索・採点** | L3 の経路変更の最小改善幅 | 30 秒相当（`score_ms` の差 30,000） | 暫定。これより小さい改善の提案は出さない（[03 §4.2](03-routing-and-two-layer-control.md)） |
 | **候補探索・採点** | L3 の重み `low / normal / high` の倍率 | 500 / 1000 / 2000（千分率） | 暫定。L2 の倍率と掛け合わせる（[03 §3.2](03-routing-and-two-layer-control.md)） |
 | **個人プロファイル** | 学習回避記録の自動減衰 (TTL) | 最終発火から 180 日 | L2 明示承認後のみ有効 |
 | **個人プロファイル** | `jp=last` の対象範囲 | 通過後 180 秒以内 かつ 1.5 km 以内の直近難所 | 経路は変えず `profile_proposals` へ。該当なしはエラーにせず提案を作らない（[03 §4.1](03-routing-and-two-layer-control.md)） |
