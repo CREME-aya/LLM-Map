@@ -33,6 +33,7 @@ use contracts::tick::{
 };
 use contracts::{ErrorCode, RouteKey};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 /// `dc_session_new` config. TODO(abi-v1): config contents are not specified anywhere;
 /// the provisional search limits (03 §3.1 / 07 §1) and the off-route thresholds (07 §1,
@@ -289,7 +290,24 @@ pub struct OverrideTarget {
     pub max_detour_ratio_permille: Option<u64>,
     pub has_jp_next: bool,
     pub jp_edge_pair: Option<(u64, u64)>,
+    /// Branch decision deadline (`next_ref.deadline_mono_ms`, 20 s before the branch) when
+    /// `jp=next` was specified; enforced through search, evaluation, withdrawal, and consent.
+    pub jp_deadline_mono_ms: Option<u64>,
     pub start_progress_cm: u32,
+}
+
+impl OverrideTarget {
+    /// True once either the 30 s override deadline (`>`) or the `jp=next` branch decision
+    /// deadline (`>=`) has passed.
+    pub fn is_expired(&self, t: u64) -> bool {
+        t > self.expires_at_mono_ms || self.jp_deadline_mono_ms.is_some_and(|d| t >= d)
+    }
+
+    /// Earliest monotonic instant at which this target becomes expired.
+    pub fn expiry_wake_mono_ms(&self) -> u64 {
+        let base = self.expires_at_mono_ms.saturating_add(1);
+        self.jp_deadline_mono_ms.map_or(base, |d| base.min(d))
+    }
 }
 
 /// Lifecycle of an L3 override that requires a route search (03 §4.2):
@@ -392,6 +410,10 @@ pub struct Session {
     last_fix_lateral_ok: bool,
     /// Latest on-route fix had `acc_cm <= max_acc_cm` and usable bearing (speed >= heading_min_speed_cm_s).
     last_fix_acc_and_bearing_ok: bool,
+    /// Active proposal id (`override_id` or `AvoidOffer.offer_id`) captured on `asr_started`
+    /// per `utterance_id`, so dict "はい" consent never transfers to a proposal that appeared
+    /// or replaced the original during speech (03 §4.2, ADR-0007).
+    asr_targets: BTreeMap<String, Option<String>>,
 }
 
 impl Session {
@@ -445,6 +467,7 @@ impl Session {
             history: HistoryScheduler::new(history_cfg),
             last_fix_lateral_ok: false,
             last_fix_acc_and_bearing_ok: false,
+            asr_targets: BTreeMap::new(),
         };
         if let Some(resume) = config.resume {
             let mut loaded = Self::load_resume(&resume)?;
@@ -1258,23 +1281,61 @@ impl Session {
                 EventBody::UserTap { target_id, action } => {
                     self.on_user_tap(now, at, &target_id, action, &mut fx, &mut extra_log);
                 }
+                EventBody::AsrStarted { utterance_id } => {
+                    let active_id = self.active_confirm_target_id();
+                    if self.asr_targets.len() >= 16 {
+                        if let Some(first) = self.asr_targets.keys().next().cloned() {
+                            self.asr_targets.remove(&first);
+                        }
+                    }
+                    self.asr_targets.insert(utterance_id, active_id);
+                }
+                EventBody::AsrFailed { utterance_id } => {
+                    self.asr_targets.remove(&utterance_id);
+                }
                 EventBody::AsrResult {
+                    utterance_id,
                     text_class: TextClass::Dict,
                     dict_norm: Some(norm),
-                    ..
                 } if avoid::is_dict_yes(&norm) => {
+                    let captured = self.asr_targets.remove(&utterance_id);
                     // Consent to the confirmation / offer on screen only (03 §4.2, 04 §4.3).
-                    if matches!(self.override_state, OverrideState::Confirming { .. }) {
+                    // If `asr_started` recorded the proposal active at speech start, consent
+                    // never transfers to a proposal that replaced it or appeared afterwards.
+                    if let OverrideState::Confirming { req_id, target } = &self.override_state {
+                        if let Some(expected) = &captured {
+                            if expected.as_deref() != Some(target.override_id.as_str()) {
+                                extra_log.push(log_req(
+                                    at,
+                                    "override_consent_refused",
+                                    req_id,
+                                    "proposal_changed",
+                                ));
+                                continue;
+                            }
+                        }
                         self.consent_override(now, at, "dict_yes", &mut fx, &mut extra_log);
-                    } else if matches!(self.avoid, AvoidState::Offered { .. }) {
+                    } else if let AvoidState::Offered { req_id, offer, .. } = &self.avoid {
+                        if let Some(expected) = &captured {
+                            if expected.as_deref() != Some(offer.offer_id.as_str()) {
+                                extra_log.push(log_req(
+                                    at,
+                                    "avoid_consent_refused",
+                                    req_id,
+                                    "proposal_changed",
+                                ));
+                                continue;
+                            }
+                        }
                         self.consent(now, at, "dict_yes", &mut fx, &mut extra_log);
                     }
                 }
                 EventBody::AsrResult {
+                    utterance_id,
                     text_class: TextClass::Dict,
                     dict_norm: Some(norm),
-                    ..
                 } if self.history.is_speaking() && history::is_dict_stop(&norm) => {
+                    self.asr_targets.remove(&utterance_id);
                     // 05 §6.2 (94ef3b6 / fffd429): while P3 is Speaking, P3_STOP phrases
                     // ("やめて" / "止めて" / "とめて" / "ストップ") stop P3 only and never
                     // trigger CXL (no undo / no offer dismissal).
@@ -1282,14 +1343,18 @@ impl Session {
                         .on_user_stop(at, &mut tick_voice, &mut extra_log);
                 }
                 EventBody::AsrResult {
+                    utterance_id,
                     text_class: TextClass::Dict,
                     dict_norm: Some(norm),
-                    ..
                 } if avoid::is_dict_cxl(&norm) => {
+                    self.asr_targets.remove(&utterance_id);
                     // 05 §6.2 (94ef3b6 / fffd429): "キャンセル" / "取り消し" / "取り消して" /
                     // "戻して" / "元に戻して" are always CXL (never stop P3); "やめて" also
                     // falls through here when P3 is not Speaking.
                     self.on_dict_cxl(now, at, &mut fx, &mut extra_log);
+                }
+                EventBody::AsrResult { utterance_id, .. } => {
+                    self.asr_targets.remove(&utterance_id);
                 }
                 EventBody::TtsStarted { token } => {
                     self.history.on_tts_started(
@@ -1443,6 +1508,18 @@ impl Session {
         };
     }
 
+    /// Active proposal id on screen (`override_id` or `AvoidOffer.offer_id`) for binding
+    /// `asr_started` -> `asr_result` dictionary confirmation (03 §4.2, ADR-0007).
+    fn active_confirm_target_id(&self) -> Option<String> {
+        if let OverrideState::Confirming { target, .. } = &self.override_state {
+            return Some(target.override_id.clone());
+        }
+        if let AvoidState::Offered { offer, .. } = &self.avoid {
+            return Some(offer.offer_id.clone());
+        }
+        None
+    }
+
     /// The L3 override search `req_id` ended (03 §4.2): a usable `ok` with both `facts_ref`
     /// and `base_facts_ref` while tracking and before expiry emits `evaluate_offer` and waits
     /// for `dc_avoid_offer_eval`. Otherwise ends the attempt cleanly.
@@ -1465,7 +1542,7 @@ impl Session {
         }
         let ready = fx.override_ready.iter().find(|a| a.req_id == req_id);
         let tracking = self.horizon_status(now) == Some(HorizonStatus::Tracking);
-        let expired = now > target.expires_at_mono_ms;
+        let expired = target.is_expired(now);
         let refs = ready.and_then(|a| Some((a.facts_ref.clone()?, a.base_facts_ref.clone()?)));
         self.override_state =
             if let (Some((facts_ref, base_facts_ref)), true, false) = (refs, tracking, expired) {
@@ -1590,7 +1667,7 @@ impl Session {
         let OverrideState::Confirming { req_id, target } = &self.override_state else {
             return;
         };
-        let refused = if at > target.expires_at_mono_ms || now > target.expires_at_mono_ms {
+        let refused = if target.is_expired(at) || target.is_expired(now) {
             Some("deadline_passed")
         } else if self.horizon_status(now) != Some(HorizonStatus::Tracking) {
             Some("not_tracking")
@@ -1651,7 +1728,7 @@ impl Session {
             self.planner.drop_pending_priority(SearchPriority::Override);
         }
         if let Some(target) = self.override_state.target() {
-            let expired = now > target.expires_at_mono_ms;
+            let expired = target.is_expired(now);
             let route_mismatch = self.current_route_key.as_ref() != Some(&target.route_key);
             if expired || off || route_mismatch {
                 if let OverrideState::Searching { req_id, .. } = &self.override_state {
@@ -2010,7 +2087,7 @@ impl Session {
                 reason: AvoidDeclineReason::NotTracking,
             };
         }
-        if now > target.expires_at_mono_ms {
+        if target.is_expired(now) {
             return AvoidOfferEvalResult::Declined {
                 reason: AvoidDeclineReason::DeadlinePassed,
             };
@@ -2297,7 +2374,7 @@ impl Session {
             },
             self.override_state
                 .target()
-                .map(|t| t.expires_at_mono_ms.saturating_add(1)),
+                .map(OverrideTarget::expiry_wake_mono_ms),
             stale_at,
             self.frames.last_ref_expires_at(),
             self.frames.window_expires_at(),
@@ -2559,6 +2636,7 @@ impl Session {
         // entry changed since `ref_frame_seq`. Weight/detour-only OVR never fails on frame_seq.
         let mut junction_preferences = Vec::new();
         let mut jp_edge_pair: Option<(u64, u64)> = None;
+        let mut jp_deadline_mono_ms: Option<u64> = None;
         let mut review_proposal: Option<serde_json::Value> = None;
         match args.jp {
             Some(JpRef::Next) => {
@@ -2581,6 +2659,7 @@ impl Session {
                 {
                     return rejected(RejectCode::Expired);
                 }
+                jp_deadline_mono_ms = Some(next_ref.deadline_mono_ms);
                 jp_edge_pair = self.route.as_ref().and_then(|r| {
                     r.maneuvers
                         .iter()
@@ -2711,6 +2790,7 @@ impl Session {
                     max_detour_ratio_permille: contract.max_detour_ratio_permille,
                     has_jp_next,
                     jp_edge_pair,
+                    jp_deadline_mono_ms,
                     start_progress_cm: self.aligner.progress_cm().unwrap_or(0),
                 },
             };

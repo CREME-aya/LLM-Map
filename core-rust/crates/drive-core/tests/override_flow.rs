@@ -886,3 +886,187 @@ fn override_priority_order_and_supersede_and_cancel_commit() {
     // Verify Arrow import used (suppress unused warning if needed)
     assert_eq!(orig3.legs[0].maneuvers[1].arrow, Arrow::Right);
 }
+
+// ---- 7. Codex review regressions: ASR-bound consent & jp=next junction deadline --------
+
+#[test]
+fn dict_yes_does_not_transfer_when_confirm_replaced_during_asr() {
+    let (mut s, _orig, rk, req_id1, _oid1) = ready_override("OVR rc=H");
+    let base = make_facts(&rk.graph_version, 600_000, 1);
+    let alt = make_facts(&rk.graph_version, 600_000, 0);
+    assert!(matches!(
+        s.avoid_offer_eval(&AvoidOfferEvalRequest {
+            req_id: req_id1,
+            now_mono_ms: 10_600,
+            alt_facts: alt.clone(),
+            base_facts: base.clone(),
+        }),
+        AvoidOfferEvalResult::OverrideOffered { .. }
+    ));
+    tick(&mut s, 10_700, None, vec![]);
+
+    // User starts saying "はい" while ovr-1 is on screen
+    tick(
+        &mut s,
+        11_000,
+        None,
+        vec![json!({"at_mono_ms": 11_000, "kind": "asr_started", "utterance_id": "u-yes-1"})],
+    );
+
+    // Before ASR finishes, ovr-1 is superseded by ovr-2
+    assert!(matches!(
+        s.validate_override(ovr_req("OVR nr=H", 11_100, 0, json!({"route_key": rk}))),
+        Ok(ValidateOverrideResult::Applied { .. })
+    ));
+    let o_start2 = tick(&mut s, 11_200, None, vec![]);
+    let req_id2 = o_start2
+        .planner_cmds
+        .iter()
+        .find_map(|c| match c {
+            PlannerCmd::Start {
+                req_id,
+                priority: SearchPriority::Override,
+                ..
+            } => Some(req_id.clone()),
+            _ => None,
+        })
+        .expect("override 2 start");
+    tick(
+        &mut s,
+        11_400,
+        None,
+        vec![search_finished_ev(11_400, &req_id2, &rk)],
+    );
+    assert!(matches!(
+        s.avoid_offer_eval(&AvoidOfferEvalRequest {
+            req_id: req_id2.clone(),
+            now_mono_ms: 11_500,
+            alt_facts: alt,
+            base_facts: base,
+        }),
+        AvoidOfferEvalResult::OverrideOffered { .. }
+    ));
+    tick(&mut s, 11_600, None, vec![]);
+
+    // Delayed "はい" from u-yes-1 must NOT commit ovr-2
+    let o_stale_yes = tick(
+        &mut s,
+        11_700,
+        None,
+        vec![json!({
+            "at_mono_ms": 11_700,
+            "kind": "asr_result",
+            "utterance_id": "u-yes-1",
+            "text_class": "dict",
+            "dict_norm": "はい"
+        })],
+    );
+    assert!(o_stale_yes.planner_cmds.is_empty());
+    assert!(o_stale_yes
+        .log
+        .iter()
+        .any(|l| l.what == "override_consent_refused"
+            && l.detail.as_deref() == Some("proposal_changed")));
+    assert!(matches!(
+        s.override_state(),
+        OverrideState::Confirming { .. }
+    ));
+
+    // A fresh utterance started while ovr-2 is shown DOES commit ovr-2
+    let o_fresh_yes = tick(
+        &mut s,
+        12_000,
+        None,
+        vec![
+            json!({"at_mono_ms": 11_900, "kind": "asr_started", "utterance_id": "u-yes-2"}),
+            json!({
+                "at_mono_ms": 12_000,
+                "kind": "asr_result",
+                "utterance_id": "u-yes-2",
+                "text_class": "dict",
+                "dict_norm": "はい"
+            }),
+        ],
+    );
+    assert!(o_fresh_yes
+        .planner_cmds
+        .iter()
+        .any(|c| matches!(c, PlannerCmd::Commit { req_id, .. } if *req_id == req_id2)));
+}
+
+#[test]
+fn jp_next_junction_deadline_expires_confirm_before_30s() {
+    let orig = main_line();
+    let (mut s, rk) = session_on(&orig);
+    // Position at 2.0 km (500 m = ~33.3 s before the 2.5 km right turn -> earliest ~28.3 s,
+    // so decision deadline is earliest - 20 s ≈ +8.3 s, well before the 30 s override expiry)
+    let o1 = tick(&mut s, 10_000, Some(fix_x(&orig, 10_000, 200_000)), vec![]);
+    let h1 = o1.horizon.unwrap();
+    let jp_deadline = h1.refs.next.as_ref().unwrap().deadline_mono_ms;
+    assert!(
+        jp_deadline > 10_000 && jp_deadline < 40_000,
+        "{jp_deadline}"
+    );
+
+    let ValidateOverrideResult::Applied { override_id, .. } = s
+        .validate_override(ovr_req(
+            "OVR jp=next",
+            10_000,
+            h1.frame_seq,
+            json!({"route_key": rk}),
+        ))
+        .unwrap()
+    else {
+        panic!("expected Applied");
+    };
+    let o2 = tick(&mut s, 10_100, None, vec![]);
+    let req_id = match &o2.planner_cmds[..] {
+        [PlannerCmd::Start {
+            req_id,
+            priority: SearchPriority::Override,
+            ..
+        }] => req_id.clone(),
+        other => panic!("unexpected cmds: {other:?}"),
+    };
+    tick(
+        &mut s,
+        10_500,
+        None,
+        vec![search_finished_ev(10_500, &req_id, &rk)],
+    );
+    let base = make_facts(&rk.graph_version, 600_000, 2);
+    let alt = make_facts(&rk.graph_version, 600_000, 0);
+    assert!(matches!(
+        s.avoid_offer_eval(&AvoidOfferEvalRequest {
+            req_id,
+            now_mono_ms: 10_600,
+            alt_facts: alt,
+            base_facts: base,
+        }),
+        AvoidOfferEvalResult::OverrideOffered { .. }
+    ));
+    let o_show = tick(&mut s, 10_700, None, vec![]);
+    assert_eq!(o_show.next_wake_mono_ms, Some(jp_deadline));
+
+    // At jp_deadline (well before 40_000): dismissed as expired and late tap is refused
+    let o_exp = tick(
+        &mut s,
+        jp_deadline,
+        None,
+        vec![json!({
+            "at_mono_ms": jp_deadline,
+            "kind": "user_tap",
+            "target_id": override_id,
+            "action": "confirm"
+        })],
+    );
+    assert_eq!(
+        o_exp.ui_cmds,
+        vec![UiCmd::Dismiss {
+            target_id: override_id,
+            reason: DismissReason::Expired,
+        }]
+    );
+    assert!(o_exp.planner_cmds.is_empty());
+    assert_eq!(*s.override_state(), OverrideState::Idle);
+}
