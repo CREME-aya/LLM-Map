@@ -136,13 +136,13 @@ pub unsafe extern "C" fn dc_plan_candidates(s: *mut DcSession, req_json: DcIn) -
 #[no_mangle]
 pub unsafe extern "C" fn dc_rank(rank_req_json: DcIn) -> DcOut {
     let inp = input(rank_req_json);
-    DcOut::from_vec(guard(|| ops::unimplemented("dc_rank", inp)))
+    DcOut::from_vec(guard(|| ops::rank(inp)))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn dc_trip_score(trip_summary_json: DcIn) -> DcOut {
     let inp = input(trip_summary_json);
-    DcOut::from_vec(guard(|| ops::unimplemented("dc_trip_score", inp)))
+    DcOut::from_vec(guard(|| ops::trip_score(inp)))
 }
 
 #[no_mangle]

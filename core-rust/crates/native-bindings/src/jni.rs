@@ -185,7 +185,7 @@ pub unsafe extern "system" fn Java_dev_slmmap_core_DcNative_rank(
     _c: jclass,
     input: jbyteArray,
 ) -> jbyteArray {
-    stateless(env, input, |b| ops::unimplemented("dc_rank", b))
+    stateless(env, input, ops::rank)
 }
 
 #[no_mangle]
@@ -194,7 +194,7 @@ pub unsafe extern "system" fn Java_dev_slmmap_core_DcNative_tripScore(
     _c: jclass,
     input: jbyteArray,
 ) -> jbyteArray {
-    stateless(env, input, |b| ops::unimplemented("dc_trip_score", b))
+    stateless(env, input, ops::trip_score)
 }
 
 #[no_mangle]

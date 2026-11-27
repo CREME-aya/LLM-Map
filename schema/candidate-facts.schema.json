@@ -28,6 +28,7 @@
         "right_signal_unknown": { "type": "integer", "minimum": 0 },
         "right_protected": { "type": "integer", "minimum": 0 },
         "right_entry": { "type": "integer", "minimum": 0 },
+        "right_entry_unknown": { "type": "integer", "minimum": 0, "description": "Optional (03 §3.2): destination entry with unknown approach side (+45 s). Omitted = 0." },
         "merges": { "type": "integer", "minimum": 0 }
       }
     },

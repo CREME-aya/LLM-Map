@@ -14,8 +14,10 @@ pub mod facts;
 pub mod horizon;
 pub mod override_types;
 pub mod plan;
+pub mod rank;
 pub mod route;
 pub mod tick;
+pub mod trip_score;
 
 pub use common::{MonoMs, RouteKey, U64Str};
 pub use envelope::{envelope_err, envelope_ok, ErrorCode};

@@ -10,7 +10,9 @@ pub mod history;
 pub mod horizon;
 pub mod junction;
 pub mod planner;
+pub mod rank;
 pub mod route;
 pub mod session;
+pub mod trip_score;
 
 pub use session::{CoreError, Session, SessionConfig};

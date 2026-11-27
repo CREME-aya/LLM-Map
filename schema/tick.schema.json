@@ -372,6 +372,22 @@
           "additionalProperties": false,
           "required": [
             "at_mono_ms",
+            "kind"
+          ],
+          "properties": {
+            "at_mono_ms": {
+              "$ref": "common.schema.json#/$defs/MonoMs"
+            },
+            "kind": {
+              "const": "audio_focus_gained"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "at_mono_ms",
             "kind",
             "active"
           ],

@@ -195,6 +195,7 @@ pub enum EventBody {
         tier: u8,
     },
     AudioFocusLost {},
+    AudioFocusGained {},
     CallState {
         active: bool,
     },

@@ -8,7 +8,7 @@ use std::path::Path;
 /// route index and ETA (route), alignment and bearing comparison (align), horizon (horizon),
 /// junction classes for the complex window (junction), the avoid chip's deadlines and detour
 /// cap (avoid), and the session glue that feeds them (session, planner).
-const FILES: [&str; 9] = [
+const FILES: [&str; 11] = [
     "geo.rs",
     "route.rs",
     "align.rs",
@@ -16,10 +16,12 @@ const FILES: [&str; 9] = [
     "junction.rs",
     "avoid.rs",
     "history.rs",
+    "rank.rs",
+    "trip_score.rs",
     "session.rs",
     "planner.rs",
 ];
-const LINT_GUARDED: [&str; 7] = [
+const LINT_GUARDED: [&str; 9] = [
     "geo.rs",
     "route.rs",
     "align.rs",
@@ -27,6 +29,8 @@ const LINT_GUARDED: [&str; 7] = [
     "junction.rs",
     "avoid.rs",
     "history.rs",
+    "rank.rs",
+    "trip_score.rs",
 ];
 
 /// Source without comments and string / char literals (good enough for this code base).

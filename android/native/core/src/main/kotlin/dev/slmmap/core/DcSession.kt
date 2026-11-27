@@ -63,6 +63,13 @@ import java.io.Closeable
 //   * voice_cmds speak carries either (template_id + params) OR content_ref (priority: p3 only).
 //     Echo tts_started / tts_done / tts_stopped with the same token; on stop{token} do NOT wait
 //     for onStop before starting P1.
+//   * Send audio_focus_lost / audio_focus_gained via dc_tick: audio_focus_lost interrupts
+//     Speaking P3 (save_for_later{interrupted}) and suppresses new P3; audio_focus_gained
+//     restores eligibility for future / pending POIs without resuming an interrupted POI.
+//   * Dict dispatch (05 §6.2, schema/slm/expected_codes.json): while P3 is Speaking,
+//     "やめて" / "止めて" / "とめて" / "ストップ" stop P3 only (Expired, no save_for_later,
+//     no CXL). Outside P3 Speaking, "やめて" resolves to CXL. "キャンセル" / "取り消し" /
+//     "取り消して" / "戻して" / "元に戻して" always resolve to CXL and never stop P3.
 //   * ui_cmds save_for_later{poi_id, reason: interrupted | bmk}: persist to the "save for later"
 //     list. L3 BMK via validateOverride targets the Speaking POI or the most recent Completed /
 //     Interrupted POI within 60 s (provisional), returning {result: "bookmarked", poi_id} and
@@ -114,6 +121,22 @@ class DcSession private constructor(private var handle: Long) : Closeable {
     }
 
     companion object {
+        /**
+         * Stateless dc_rank: {facts: CandidateFacts[], policy?, profile?} -> RouteComparison
+         * (schema/route-comparison.schema.json; 02 §2.1 #6, 03 §3.2). Integer-only 3-axis scoring
+         * with shared DetourPolicy (baseline always kept) and raw unweighted 3-axis display values.
+         */
+        fun rank(reqJson: ByteArray): ByteArray =
+            DcNative.rank(reqJson) ?: throw OutOfMemoryError("dc_core: rank result ByteArray allocation failed")
+
+        /**
+         * Stateless dc_trip_score: 05 §6.1 trip-mode card (C01) trigger scoring
+         * (schema/trip-score.schema.json; 02 §2.1 #8). Integer-only; threshold default 3
+         * (provisional); suppressed (show_card=false) on driving reroutes.
+         */
+        fun tripScore(reqJson: ByteArray): ByteArray =
+            DcNative.tripScore(reqJson) ?: throw OutOfMemoryError("dc_core: tripScore result ByteArray allocation failed")
+
         /** Returns the session, or the error envelope bytes from dc_session_new. */
         fun open(configJson: ByteArray): Result<DcSession> {
             check(DcNative.abiVersion() == DcNative.EXPECTED_ABI_VERSION) { "dc_core ABI mismatch" }

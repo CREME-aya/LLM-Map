@@ -40,6 +40,7 @@ fn all_v2_event_kinds_parse() {
         r#"{"kind":"inference_down","reason":"oom"}"#.into(),
         r#"{"kind":"inference_up","tier":1}"#.into(),
         r#"{"kind":"audio_focus_lost"}"#.into(),
+        r#"{"kind":"audio_focus_gained"}"#.into(),
         r#"{"kind":"call_state","active":true}"#.into(),
         format!(r#"{{"kind":"search_finished","req_id":"r1","route_key":{rk},"graph_version":"g","outcome":"cancelled","engine_ms":12}}"#),
         r#"{"kind":"engine_reset"}"#.into(),
@@ -117,7 +118,12 @@ fn enums_are_snake_case_on_the_wire() {
 #[test]
 fn fieldless_event_kinds_reject_extra_fields() {
     // unit-like kinds are `{}` variants so extra fields are not silently ignored
-    for k in ["low_memory", "audio_focus_lost", "engine_reset"] {
+    for k in [
+        "low_memory",
+        "audio_focus_lost",
+        "audio_focus_gained",
+        "engine_reset",
+    ] {
         let ok = format!(r#"{{"at_mono_ms":1,"kind":"{k}"}}"#);
         let bad = format!(r#"{{"at_mono_ms":1,"kind":"{k}","x":0}}"#);
         assert!(serde_json::from_str::<Event>(&ok).is_ok(), "{k}");

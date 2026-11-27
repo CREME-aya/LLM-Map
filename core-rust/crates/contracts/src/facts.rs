@@ -37,6 +37,10 @@ pub enum FactLabel {
     ThroughAnchor,
 }
 
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
 /// `counts` (names = the junction classes, 04 §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,6 +50,9 @@ pub struct FactCounts {
     pub right_signal_unknown: u64,
     pub right_protected: u64,
     pub right_entry: u64,
+    /// Optional (03 §3.2): destination entry with unknown approach side (+45 s).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub right_entry_unknown: u64,
     pub merges: u64,
 }
 

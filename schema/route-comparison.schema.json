@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slm-map.invalid/schema/route-comparison.schema.json",
+  "title": "dc_rank (RankRequest / RouteComparison)",
+  "description": "Input and output contract for dc_rank (02 §2.1 #6, 03 §3.2, 07 §1). Integer-only (no floating point). The root accepts either a RankRequest or a RouteComparison; validate against #/$defs/<Name> for a specific type. Provisional numeric defaults live in policy/profile.",
+  "anyOf": [
+    { "$ref": "#/$defs/RankRequest" },
+    { "$ref": "#/$defs/RouteComparison" }
+  ],
+  "$defs": {
+    "RankRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["facts"],
+      "properties": {
+        "facts": {
+          "type": "array",
+          "items": { "$ref": "candidate-facts.schema.json" }
+        },
+        "policy": { "$ref": "#/$defs/RankPolicy" },
+        "profile": { "$ref": "#/$defs/RankProfile" }
+      }
+    },
+    "RankPolicy": {
+      "description": "Provisional scoring and detour parameters (03 §3.2, 07 §1). Every field is optional and defaults to the 07 §1 initial value.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "detour": { "$ref": "#/$defs/DetourPolicyConfig" },
+        "penalties_ms": { "$ref": "#/$defs/PenaltyPolicy" },
+        "l3_level_permille": { "$ref": "#/$defs/L3LevelScale" },
+        "expected_graph_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "DetourPolicyConfig": {
+      "description": "Detour cap policy shared with dc_avoid_offer_eval (03 §3.2, 07 §1). Ratios in per-mille.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "short_threshold_s": { "type": "integer", "minimum": 0 },
+        "short_cap_s": { "type": "integer", "minimum": 0 },
+        "long_cap_s": { "type": "integer", "minimum": 0 },
+        "long_cap_ratio_permille": { "type": "integer", "minimum": 0 },
+        "ratio_cap_permille": { "type": "integer", "minimum": 1000 },
+        "tight_factor_permille": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "PenaltyPolicy": {
+      "description": "Provisional comfort penalties in ms (03 §3.2, 07 §1). right_entry_ms replaces the arrival maneuver's right-turn penalty (not additive).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "right_unprotected_ms": { "type": "integer", "minimum": 0 },
+        "right_signal_unknown_ms": { "type": "integer", "minimum": 0 },
+        "right_signal_unknown_protection_ms": { "type": "integer", "minimum": 0 },
+        "right_protected_ms": { "type": "integer", "minimum": 0 },
+        "right_entry_ms": { "type": "integer", "minimum": 0 },
+        "right_entry_unknown_ms": { "type": "integer", "minimum": 0 },
+        "narrow_ms_per_100m": { "type": "integer", "minimum": 0 },
+        "unknown_width_residential_ms_per_100m": { "type": "integer", "minimum": 0 },
+        "merge_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "L3LevelScale": {
+      "description": "Provisional L3 low / normal / high multipliers in per-mille (03 §3.2, 07 §1: 500 / 1000 / 2000). Zero and negative values are forbidden.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "low": { "type": "integer", "minimum": 1 },
+        "normal": { "type": "integer", "minimum": 1 },
+        "high": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "RankProfile": {
+      "description": "L2 profile_weights (*_penalty_permille in 250..=4000, default 1000; max_detour_ratio_permille in 1000..=1350 or null) and optional L3 override weights / detour (03 §3.2 / §4.1 / §5, commit eb6b2ce).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "right_turn_penalty_permille": { "type": "integer", "minimum": 250, "maximum": 4000 },
+        "narrow_road_penalty_permille": { "type": "integer", "minimum": 250, "maximum": 4000 },
+        "merge_penalty_permille": { "type": "integer", "minimum": 250, "maximum": 4000 },
+        "max_detour_ratio_permille": {
+          "type": ["integer", "null"],
+          "minimum": 1000,
+          "maximum": 1350,
+          "description": "User max_detour_ratio_permille (null or omitted = policy default). Range 1000..=1350; only tightens the policy cap."
+        },
+        "l3_weights": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "crossing_right": { "$ref": "personal-routing-override.schema.json#/$defs/Level" },
+            "narrow_road": { "$ref": "personal-routing-override.schema.json#/$defs/Level" },
+            "merge": { "$ref": "personal-routing-override.schema.json#/$defs/Level" }
+          }
+        },
+        "detour": { "enum": ["standard", "tight"] }
+      }
+    },
+    "RouteComparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline_id", "base_eta_ms", "ranked", "dropped"],
+      "properties": {
+        "baseline_id": { "type": ["string", "null"], "minLength": 1 },
+        "base_eta_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "ranked": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RankedCandidate" }
+        },
+        "dropped": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/DroppedCandidate" }
+        }
+      }
+    },
+    "RankedCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rank",
+        "candidate_id",
+        "label",
+        "fingerprint",
+        "is_baseline",
+        "score_ms",
+        "penalty_ms",
+        "display"
+      ],
+      "properties": {
+        "rank": { "type": "integer", "minimum": 1 },
+        "candidate_id": { "type": "string", "minLength": 1 },
+        "label": { "enum": ["baseline", "engine_alternate", "costing_variant", "through_anchor"] },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "is_baseline": { "type": "boolean" },
+        "score_ms": { "type": "integer", "minimum": 0 },
+        "penalty_ms": { "type": "integer", "minimum": 0 },
+        "display": { "$ref": "#/$defs/ComparisonDisplay" }
+      }
+    },
+    "ComparisonDisplay": {
+      "description": "Raw, unweighted 3-axis display figures (03 §3.2): ETA is never modified by comfort penalties.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eta_ms", "delta_eta_ms", "right_turns", "narrow"],
+      "properties": {
+        "eta_ms": { "type": "integer", "minimum": 0 },
+        "delta_eta_ms": { "type": "integer" },
+        "right_turns": { "$ref": "#/$defs/RightTurnDisplay" },
+        "narrow": { "$ref": "#/$defs/NarrowDisplay" }
+      }
+    },
+    "RightTurnDisplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unprotected",
+        "signal_unknown_protection",
+        "signal_unknown",
+        "protected",
+        "right_entry"
+      ],
+      "properties": {
+        "unprotected": { "type": "integer", "minimum": 0 },
+        "signal_unknown_protection": { "type": "integer", "minimum": 0 },
+        "signal_unknown": { "type": "integer", "minimum": 0 },
+        "protected": { "type": "integer", "minimum": 0 },
+        "right_entry": { "type": "integer", "minimum": 0 },
+        "right_entry_unknown": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "NarrowDisplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confirmed_m", "inferred_m", "unknown_width_residential_m"],
+      "properties": {
+        "confirmed_m": { "type": "integer", "minimum": 0 },
+        "inferred_m": { "type": "integer", "minimum": 0 },
+        "unknown_width_residential_m": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "DroppedCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id", "reason"],
+      "properties": {
+        "candidate_id": { "type": "string", "minLength": 1 },
+        "reason": { "$ref": "#/$defs/RankDropReason" }
+      }
+    },
+    "RankDropReason": {
+      "enum": [
+        "not_legal",
+        "not_complete",
+        "graph_version_mismatch",
+        "duplicate_fingerprint",
+        "over_detour_cap"
+      ]
+    }
+  }
+}

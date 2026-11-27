@@ -1,0 +1,68 @@
+{
+  "facts": [
+    {
+      "candidate_id": "c1",
+      "label": "baseline",
+      "plan_request_id": "p1",
+      "graph_version": "jp-2026.11.0",
+      "fingerprint": "fp-0001",
+      "legal": true,
+      "complete": true,
+      "eta_ms": 600000,
+      "length_m": 6000,
+      "counts": {
+        "right_unprotected": 1,
+        "right_signal_unknown_protection": 0,
+        "right_signal_unknown": 0,
+        "right_protected": 0,
+        "right_entry": 1,
+        "right_entry_unknown": 1,
+        "merges": 1
+      },
+      "narrow_m": { "confirmed": 100, "inferred": 50 },
+      "unknown_width_residential_m": 200,
+      "unknown_length_m": 300,
+      "junctions": [],
+      "through_anchors": []
+    }
+  ],
+  "policy": {
+    "detour": {
+      "short_threshold_s": 1800,
+      "short_cap_s": 180,
+      "long_cap_s": 900,
+      "long_cap_ratio_permille": 150,
+      "ratio_cap_permille": 1350,
+      "tight_factor_permille": 500
+    },
+    "penalties_ms": {
+      "right_unprotected_ms": 45000,
+      "right_signal_unknown_ms": 45000,
+      "right_signal_unknown_protection_ms": 25000,
+      "right_protected_ms": 10000,
+      "right_entry_ms": 90000,
+      "right_entry_unknown_ms": 45000,
+      "narrow_ms_per_100m": 30000,
+      "unknown_width_residential_ms_per_100m": 15000,
+      "merge_ms": 15000
+    },
+    "l3_level_permille": {
+      "low": 500,
+      "normal": 1000,
+      "high": 2000
+    },
+    "expected_graph_version": "jp-2026.11.0"
+  },
+  "profile": {
+    "right_turn_penalty_permille": 1500,
+    "narrow_road_penalty_permille": 1000,
+    "merge_penalty_permille": 1000,
+    "max_detour_ratio_permille": 1200,
+    "l3_weights": {
+      "crossing_right": "high",
+      "narrow_road": "normal",
+      "merge": "low"
+    },
+    "detour": "tight"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "distance_m": 85000,
+  "eta_s": 4200,
+  "motorway_ratio_permille": 500,
+  "destination_kind": "other",
+  "outside_daily_area": false,
+  "corridor_history_density": "normal",
+  "recently_declined_similar": false,
+  "is_driving_reroute": false,
+  "extra": 1
+}
