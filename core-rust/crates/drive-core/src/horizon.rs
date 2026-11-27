@@ -49,6 +49,12 @@ use contracts::horizon::{
     Arrow, AvoidOffer, ComplexWindow, EtaRange, HorizonEntry, HorizonStatus, JunctionRef, Maneuver,
     ManeuverHorizon, ManeuverId, PassedRef, Refs, UPCOMING_MAX,
 };
+use std::collections::VecDeque;
+
+/// Max `frame_seq -> Refs` snapshots retained on the current route for `dc_validate_override`
+/// `STALE_REVISION` checks (03 §4.2: only when `jp` is specified and `refs` changed since
+/// `ref_frame_seq`).
+const REFS_HISTORY_CAP: usize = 128;
 
 /// Preparation lead before a complex window (04 §4.1 "準備" emphasis: 30 s on ordinary
 /// roads, 60 s on motorways).
@@ -234,15 +240,25 @@ fn ref_id(m: &Maneuver) -> String {
     format!("j{}-{}", m.id.leg_index, m.id.ordinal)
 }
 
-fn next_ref(upcoming: &[HorizonEntry]) -> Option<JunctionRef> {
+fn next_ref(
+    upcoming: &[HorizonEntry],
+    sampled_at_mono_ms: u64,
+    deadline_before_ms: u64,
+) -> Option<JunctionRef> {
     let (entry, kind) = upcoming
         .iter()
         .find_map(|e| junction_kind(&e.maneuver).map(|k| (e, k)))?;
+    let deadline_mono_ms = match &entry.avoid_offer {
+        Some(o) => o.decision_deadline_monotonic_ms,
+        None => sampled_at_mono_ms
+            .saturating_add(u64::from(entry.eta_range_ms?.earliest))
+            .saturating_sub(deadline_before_ms),
+    };
     Some(JunctionRef {
         ref_: ref_id(&entry.maneuver),
         maneuver_id: entry.maneuver.id.clone(),
         kind,
-        deadline_mono_ms: entry.avoid_offer.as_ref()?.decision_deadline_monotonic_ms,
+        deadline_mono_ms,
     })
 }
 
@@ -271,12 +287,18 @@ pub struct HorizonFrames {
     last: Option<ManeuverHorizon>,
     frozen: Option<Vec<HorizonEntry>>,
     eta: EtaFactors,
+    /// Lead before a branch used for `JunctionRef.deadline_mono_ms` when no `AvoidOffer` is
+    /// active (07 §1: 20 s).
+    deadline_before_ms: u64,
+    /// `(frame_seq, refs)` history for the current route (03 §4.2 `STALE_REVISION`).
+    refs_history: VecDeque<(u64, Refs)>,
 }
 
 impl HorizonFrames {
-    pub fn new(eta: EtaFactors) -> Self {
+    pub fn new(eta: EtaFactors, deadline_before_ms: u64) -> Self {
         Self {
             eta,
+            deadline_before_ms,
             ..Self::default()
         }
     }
@@ -291,6 +313,18 @@ impl HorizonFrames {
 
     pub fn refs(&self) -> Option<&Refs> {
         self.last.as_ref().map(|h| &h.refs)
+    }
+
+    /// The `Refs` emitted at `frame_seq` on the current route, if still known.
+    pub fn refs_at(&self, frame_seq: u64) -> Option<&Refs> {
+        if frame_seq == self.frame_seq {
+            return self.refs();
+        }
+        self.refs_history
+            .iter()
+            .rev()
+            .find(|(seq, _)| *seq == frame_seq)
+            .map(|(_, refs)| refs)
     }
 
     /// Last built horizon content (valid even on ticks where `frame_seq` did not change).
@@ -324,6 +358,7 @@ impl HorizonFrames {
         self.window_kept = false;
         self.last = None;
         self.frozen = None;
+        self.refs_history.clear();
     }
 
     pub fn observe_sample(
@@ -441,7 +476,11 @@ impl HorizonFrames {
             }
         };
         let refs = Refs {
-            next: if tracking { next_ref(&upcoming) } else { None },
+            next: if tracking {
+                next_ref(&upcoming, sampled_at_mono_ms, self.deadline_before_ms)
+            } else {
+                None
+            },
             last: self
                 .last_junction
                 .as_ref()
@@ -468,6 +507,11 @@ impl HorizonFrames {
             return None;
         }
         self.frame_seq += 1;
+        if self.refs_history.len() >= REFS_HISTORY_CAP {
+            self.refs_history.pop_front();
+        }
+        self.refs_history
+            .push_back((self.frame_seq, content.refs.clone()));
         self.last = Some(content.clone());
         Some(ManeuverHorizon {
             frame_seq: self.frame_seq,

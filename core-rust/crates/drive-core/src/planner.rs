@@ -235,6 +235,9 @@ pub struct Effects {
     /// Avoid-chip searches that returned a usable `ok` (not committed: the session waits
     /// for `dc_avoid_offer_eval`, 04 §4.3).
     pub avoid_ready: Vec<AvoidReady>,
+    /// L3 override searches that returned a usable `ok` (not committed: evaluated through
+    /// `evaluate_offer` -> `dc_avoid_offer_eval` -> `show_confirm` -> consent, 03 §4.2).
+    pub override_ready: Vec<AvoidReady>,
 }
 
 /// A usable avoid-chip `ok` and the refs it came with.
@@ -655,8 +658,23 @@ impl SearchPlanner {
     /// Cancels a running (or stuck, not yet cancelled) avoid-chip search in the slot.
     /// The slot stays occupied until its `search_finished`.
     pub fn cancel_avoid_in_slot(&mut self, now: u64, fx: &mut Effects) -> bool {
+        self.cancel_priority_in_slot(now, SearchPriority::AvoidChip, fx)
+    }
+
+    /// Cancels a running (or stuck, not yet cancelled) override search in the slot.
+    /// The slot stays occupied until its `search_finished`.
+    pub fn cancel_override_in_slot(&mut self, now: u64, fx: &mut Effects) -> bool {
+        self.cancel_priority_in_slot(now, SearchPriority::Override, fx)
+    }
+
+    fn cancel_priority_in_slot(
+        &mut self,
+        now: u64,
+        priority: SearchPriority,
+        fx: &mut Effects,
+    ) -> bool {
         match &self.slot {
-            Slot::Running { req } if req.priority == SearchPriority::AvoidChip => {
+            Slot::Running { req } if req.priority == priority => {
                 let req = req.clone();
                 Self::send_cancel(now, &req, fx);
                 self.slot = Slot::CancelRequested { req };
@@ -665,7 +683,7 @@ impl SearchPlanner {
             Slot::EngineStuck {
                 req,
                 cancel_sent: false,
-            } if req.priority == SearchPriority::AvoidChip => {
+            } if req.priority == priority => {
                 let req = req.clone();
                 Self::send_cancel(now, &req, fx);
                 self.slot = Slot::EngineStuck {
@@ -675,6 +693,24 @@ impl SearchPlanner {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Whether a request of `priority` is currently pending in the ad-hoc queue.
+    pub fn has_pending_priority(&self, priority: SearchPriority) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| p.priority == priority)
+    }
+
+    /// Drops a pending ad-hoc request of `priority` if waiting.
+    pub fn drop_pending_priority(&mut self, priority: SearchPriority) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.priority == priority)
+        {
+            self.pending = None;
         }
     }
 
@@ -722,9 +758,11 @@ impl SearchPlanner {
     /// dropped, and a running avoid-chip search for another route gets `cancel` (the slot
     /// stays occupied until its `search_finished`, whose `ok` is then `discarded_late`).
     pub fn on_route_changed(&mut self, now: u64, route_key: &RouteKey, fx: &mut Effects) {
+        let cancel_on_change =
+            |p: SearchPriority| matches!(p, SearchPriority::AvoidChip | SearchPriority::Override);
         match &self.slot {
             Slot::Running { req }
-                if req.priority == SearchPriority::AvoidChip && req.route_key != *route_key =>
+                if cancel_on_change(req.priority) && req.route_key != *route_key =>
             {
                 let req = req.clone();
                 Self::send_cancel(now, &req, fx);
@@ -733,7 +771,7 @@ impl SearchPlanner {
             Slot::EngineStuck {
                 req,
                 cancel_sent: false,
-            } if req.priority == SearchPriority::AvoidChip && req.route_key != *route_key => {
+            } if cancel_on_change(req.priority) && req.route_key != *route_key => {
                 let req = req.clone();
                 Self::send_cancel(now, &req, fx);
                 self.slot = Slot::EngineStuck {
@@ -949,6 +987,15 @@ impl SearchPlanner {
                 });
                 log(fx, at, "avoid_result_ready", Some(req_id), None)
             }
+            // Never committed here: evaluate_offer -> dc_avoid_offer_eval -> show_confirm -> consent (03 §4.2).
+            SearchOutcome::Ok if req.priority == SearchPriority::Override => {
+                fx.override_ready.push(AvoidReady {
+                    req_id: req_id.to_owned(),
+                    facts_ref: facts_ref.map(str::to_owned),
+                    base_facts_ref: base_facts_ref.map(str::to_owned),
+                });
+                log(fx, at, "override_result_ready", Some(req_id), None)
+            }
             SearchOutcome::Ok => log(fx, at, "search_result_unused", Some(req_id), None),
             other => log(
                 fx,
@@ -1033,6 +1080,7 @@ fn priority_name(p: SearchPriority) -> &'static str {
     match p {
         SearchPriority::Reroute => "reroute",
         SearchPriority::ExplicitPlan => "explicit_plan",
+        SearchPriority::Override => "override",
         SearchPriority::AvoidChip => "avoid_chip",
         SearchPriority::Comparison => "comparison",
     }

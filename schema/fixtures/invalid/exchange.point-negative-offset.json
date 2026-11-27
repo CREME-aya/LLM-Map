@@ -1,0 +1,17 @@
+{
+  "kind": "drive_diary",
+  "schema_version": 1,
+  "trip_id": "t1",
+  "started_at_unix_s": 1795651200,
+  "track": {
+    "segments": [
+      {
+        "points": [
+          [350000000, 1390000000, -1]
+        ]
+      }
+    ]
+  },
+  "avoided": { "right_unprotected": 0, "narrow_m": 0, "merges": 0 },
+  "history": []
+}

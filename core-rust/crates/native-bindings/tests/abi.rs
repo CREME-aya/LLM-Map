@@ -108,11 +108,15 @@ fn null_handle_and_bad_json() {
 }
 
 #[test]
-fn unimplemented_functions_are_explicit() {
+fn stateless_errors_and_invalid_handles() {
     unsafe {
         assert_eq!(
             take(dc_exchange_validate(din(b"{}")))["error"]["code"],
-            "E_UNIMPLEMENTED"
+            "E_SCHEMA"
+        );
+        assert_eq!(
+            take(dc_exchange_validate(din(b"nope")))["error"]["code"],
+            "E_SCHEMA"
         );
         assert_eq!(take(dc_rank(din(b"{}")))["error"]["code"], "E_SCHEMA");
         assert_eq!(take(dc_rank(din(b"nope")))["error"]["code"], "E_SCHEMA");
@@ -132,6 +136,49 @@ fn unimplemented_functions_are_explicit() {
         assert_eq!(
             take(dc_plan_candidates(ptr::null_mut(), din(b"{}")))["error"]["code"],
             "E_INVALID_HANDLE"
+        );
+    }
+}
+
+/// dc_exchange_validate through the C ABI: accepts valid IntentPreset / TripPlan / DriveDiary
+/// fixtures and rejects schema-invalid and semantic-invalid payloads with E_SCHEMA.
+#[test]
+fn exchange_validate_through_c_abi() {
+    unsafe {
+        for f in [
+            "exchange.intent-preset.min.json",
+            "exchange.trip-plan.min.json",
+            "exchange.drive-diary.min.json",
+        ] {
+            let raw = std::fs::read(schema_fixture_dir("valid").join(f)).unwrap();
+            let v = take(dc_exchange_validate(din(&raw)));
+            assert_eq!(v["ok"], true, "{f}: {v}");
+            assert_eq!(v["data"]["schema_version"], 1, "{f}: {v}");
+        }
+        for f in [
+            "exchange.unknown-field.json",
+            "exchange.weights-out-of-range.json",
+            "exchange.name-too-long.json",
+            "exchange.chips-over-max.json",
+            "exchange.vias-over-max.json",
+            "exchange.point-negative-offset.json",
+            "exchange.vehicle-entry-id-number.json",
+        ] {
+            let raw = std::fs::read(schema_fixture_dir("invalid").join(f)).unwrap();
+            let v = take(dc_exchange_validate(din(&raw)));
+            assert_eq!(v["error"]["code"], "E_SCHEMA", "{f}: {v}");
+        }
+        // Semantic invalid: hard_soft key not in chips -> E_SCHEMA
+        let bad_hs = br#"{"kind":"intent_preset","schema_version":1,"preset_id":"p1","name":"n","chips":["c1"],"hard_soft":{"c2":"hard"},"detour":"standard","weights_permille":{"right_turn":1000,"narrow_road":1000,"merge":1000}}"#;
+        assert_eq!(
+            take(dc_exchange_validate(din(bad_hs)))["error"]["code"],
+            "E_SCHEMA"
+        );
+        // Semantic invalid: cross-segment timestamp regression -> E_SCHEMA
+        let bad_ts = br#"{"kind":"drive_diary","schema_version":1,"trip_id":"t1","started_at_unix_s":100,"track":{"segments":[{"points":[[350000000,1390000000,10]]},{"points":[[350000000,1390000000,9]]}]},"avoided":{"right_unprotected":0,"narrow_m":0,"merges":0},"history":[]}"#;
+        assert_eq!(
+            take(dc_exchange_validate(din(bad_ts)))["error"]["code"],
+            "E_SCHEMA"
         );
     }
 }
@@ -786,5 +833,67 @@ fn p3_history_and_bmk_through_c_abi() {
         );
 
         dc_session_free(s);
+    }
+}
+
+/// dc_session_new with optional `resume: {route_bundle, route_key}` (04 §3.2):
+/// loads the route preserving route_revision (no req_id check), starts uncertain,
+/// transitions to tracking on an on-route fix, and increments route_revision on next commit.
+/// Invalid resume returns E_SCHEMA and sets *out_session = NULL.
+#[test]
+fn session_new_resume_through_c_abi() {
+    unsafe {
+        let bundle: Value = serde_json::from_slice(
+            &std::fs::read(schema_fixture_dir("valid").join("route-bundle.min.json")).unwrap(),
+        )
+        .unwrap();
+        let mut resumed_rk = bundle["route_key"].clone();
+        resumed_rk["route_revision"] = "4".into();
+        let cfg = serde_json::json!({
+            "resume": {
+                "route_bundle": bundle,
+                "route_key": resumed_rk,
+            }
+        });
+        let mut s = ptr::null_mut();
+        let v = take(dc_session_new(
+            din(&serde_json::to_vec(&cfg).unwrap()),
+            &mut s,
+        ));
+        assert_eq!(v, serde_json::json!({"ok": true, "data": {}}));
+        assert!(!s.is_null());
+
+        // First tick without fix -> uncertain, route_revision preserved as "4"
+        let o1 = take(dc_tick(s, din(br#"{"now_mono_ms": 100}"#)));
+        assert_eq!(o1["data"]["horizon"]["status"], "uncertain", "{o1}");
+        assert_eq!(o1["data"]["horizon"]["route_key"], resumed_rk);
+        assert_eq!(
+            o1["data"]["horizon"]["upcoming"][0]["maneuver"]["id"]["route_key"],
+            resumed_rk
+        );
+
+        // On-route fix -> tracking with same route_key ("4")
+        let o2 = take(dc_tick(
+            s,
+            din(br#"{"now_mono_ms": 200, "fix": {"at_mono_ms": 200, "lat_e7": 350000000, "lon_e7": 1390005483, "acc_cm": 300}}"#),
+        ));
+        assert_eq!(o2["data"]["horizon"]["status"], "tracking", "{o2}");
+        assert_eq!(o2["data"]["horizon"]["route_key"], resumed_rk);
+        dc_session_free(s);
+
+        // Invalid resume (route_revision "0") -> E_SCHEMA and *out_session = NULL
+        let bad_cfg = serde_json::json!({
+            "resume": {
+                "route_bundle": bundle,
+                "route_key": bundle["route_key"],
+            }
+        });
+        let mut s_bad = ptr::dangling_mut();
+        let v_bad = take(dc_session_new(
+            din(&serde_json::to_vec(&bad_cfg).unwrap()),
+            &mut s_bad,
+        ));
+        assert_eq!(v_bad["error"]["code"], "E_SCHEMA", "{v_bad}");
+        assert!(s_bad.is_null());
     }
 }

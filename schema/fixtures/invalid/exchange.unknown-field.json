@@ -1,0 +1,15 @@
+{
+  "kind": "intent_preset",
+  "schema_version": 1,
+  "preset_id": "preset-1",
+  "name": "extra key",
+  "chips": [],
+  "hard_soft": {},
+  "detour": "standard",
+  "weights_permille": {
+    "right_turn": 1000,
+    "narrow_road": 1000,
+    "merge": 1000
+  },
+  "extra": true
+}

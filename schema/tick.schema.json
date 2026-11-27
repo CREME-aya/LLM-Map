@@ -509,10 +509,11 @@
       ]
     },
     "SearchPriority": {
-      "description": "Single priority queue, highest first: reroute > explicit_plan > avoid_chip > comparison (03 §3.1).",
+      "description": "Single priority queue, highest first: reroute > explicit_plan > override > avoid_chip > comparison (03 §3.1, §4.2).",
       "enum": [
         "reroute",
         "explicit_plan",
+        "override",
         "avoid_chip",
         "comparison"
       ]
@@ -621,7 +622,7 @@
             },
             "fix": {
               "$ref": "#/$defs/Fix",
-              "description": "Current position for a reroute: the fix that confirmed the vehicle left the route (04 §3.1); Valhalla uses it as the new origin. Absent for other searches."
+              "description": "Current position for a reroute or override search (04 §3.1, 03 §4.2); Valhalla uses it as the new origin. Absent for other searches."
             }
           }
         },

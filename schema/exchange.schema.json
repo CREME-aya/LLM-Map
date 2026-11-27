@@ -1,0 +1,325 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slm-map.invalid/schema/exchange.schema.json",
+  "title": "exchange-v1 (IntentPreset / TripPlan / DriveDiary)",
+  "description": "exchange-v1 JSON payload shared between Android (Rust dc_exchange_validate) and Web (Zod). Source: docs 06 §4.2 (PR #22). All numeric limits are provisional. Cross-field / cross-segment rules enforced in Rust and Zod (not expressible in JSON Schema): (1) IntentPreset hard_soft keys must all be contained in chips; (2) DriveDiary total track points across all segments <= 20,000; (3) DriveDiary non-null t_offset_s values must be monotonically non-decreasing across all segments (same second allowed; null skipped). Zip expanded-size limit (16 MB) is enforced by Kotlin/Web before passing JSON.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/IntentPreset"
+    },
+    {
+      "$ref": "#/$defs/TripPlan"
+    },
+    {
+      "$ref": "#/$defs/DriveDiary"
+    }
+  ],
+  "$defs": {
+    "LatE7": {
+      "type": "integer",
+      "minimum": -900000000,
+      "maximum": 900000000
+    },
+    "LonE7": {
+      "type": "integer",
+      "minimum": -1800000000,
+      "maximum": 1800000000
+    },
+    "WeightPermille": {
+      "type": "integer",
+      "minimum": 250,
+      "maximum": 4000
+    },
+    "WeightsPermille": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "right_turn",
+        "narrow_road",
+        "merge"
+      ],
+      "properties": {
+        "right_turn": {
+          "$ref": "#/$defs/WeightPermille"
+        },
+        "narrow_road": {
+          "$ref": "#/$defs/WeightPermille"
+        },
+        "merge": {
+          "$ref": "#/$defs/WeightPermille"
+        }
+      }
+    },
+    "HardSoft": {
+      "enum": [
+        "hard",
+        "soft"
+      ]
+    },
+    "IntentPreset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema_version",
+        "preset_id",
+        "name",
+        "chips",
+        "hard_soft",
+        "detour",
+        "weights_permille"
+      ],
+      "properties": {
+        "kind": {
+          "const": "intent_preset"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "preset_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "chips": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "hard_soft": {
+          "type": "object",
+          "description": "Every key must be present in `chips` (enforced by Rust dc_exchange_validate and Web Zod).",
+          "propertyNames": {
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/HardSoft"
+          }
+        },
+        "detour": {
+          "enum": [
+            "standard",
+            "tight"
+          ]
+        },
+        "weights_permille": {
+          "$ref": "#/$defs/WeightsPermille"
+        }
+      }
+    },
+    "Place": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lat_e7",
+        "lon_e7"
+      ],
+      "properties": {
+        "lat_e7": {
+          "$ref": "#/$defs/LatE7"
+        },
+        "lon_e7": {
+          "$ref": "#/$defs/LonE7"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "vehicle_entry_id": {
+          "$ref": "common.schema.json#/$defs/U64Str"
+        }
+      }
+    },
+    "TripPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema_version",
+        "origin",
+        "vias",
+        "destination",
+        "history_mode"
+      ],
+      "properties": {
+        "kind": {
+          "const": "trip_plan"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "origin": {
+          "$ref": "#/$defs/Place"
+        },
+        "vias": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "$ref": "#/$defs/Place"
+          }
+        },
+        "destination": {
+          "$ref": "#/$defs/Place"
+        },
+        "preset_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "history_mode": {
+          "enum": [
+            "off",
+            "on"
+          ]
+        }
+      }
+    },
+    "TrackPoint": {
+      "description": "[lat_e7, lon_e7, t_offset_s | null]. Non-null t_offset_s must be non-decreasing across all segments.",
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/LatE7"
+        },
+        {
+          "$ref": "#/$defs/LonE7"
+        },
+        {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      ],
+      "items": false
+    },
+    "TrackSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "points"
+      ],
+      "properties": {
+        "points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrackPoint"
+          }
+        }
+      }
+    },
+    "DiaryTrack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segments"
+      ],
+      "properties": {
+        "segments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrackSegment"
+          }
+        }
+      }
+    },
+    "DiaryAvoided": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "right_unprotected",
+        "narrow_m",
+        "merges"
+      ],
+      "properties": {
+        "right_unprotected": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "narrow_m": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "merges": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "DiaryHistoryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "poi_id",
+        "outcome"
+      ],
+      "properties": {
+        "poi_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "interrupted",
+            "saved"
+          ]
+        }
+      }
+    },
+    "DriveDiary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema_version",
+        "trip_id",
+        "started_at_unix_s",
+        "track",
+        "avoided",
+        "history"
+      ],
+      "properties": {
+        "kind": {
+          "const": "drive_diary"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "trip_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "started_at_unix_s": {
+          "$ref": "common.schema.json#/$defs/UnixS"
+        },
+        "track": {
+          "$ref": "#/$defs/DiaryTrack"
+        },
+        "avoided": {
+          "$ref": "#/$defs/DiaryAvoided"
+        },
+        "history": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/$defs/DiaryHistoryEntry"
+          }
+        }
+      }
+    }
+  }
+}

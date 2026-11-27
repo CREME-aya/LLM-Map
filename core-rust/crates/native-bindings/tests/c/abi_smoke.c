@@ -43,7 +43,9 @@ int main(void) {
     fails += expect(dc_trip_score(in_str("{}")), "E_SCHEMA", "trip_score(empty)");
     fails += expect(dc_trip_score(in_str("{\"distance_m\":150000,\"eta_s\":3600,\"motorway_ratio_permille\":500,\"destination_kind\":\"castle\",\"outside_daily_area\":true,\"corridor_history_density\":\"high\",\"recently_declined_similar\":false,\"is_driving_reroute\":false}")),
         "\"show_card\":true", "trip_score");
-    fails += expect(dc_exchange_validate(in_str("{}")), "E_UNIMPLEMENTED", "exchange_validate");
+    fails += expect(dc_exchange_validate(in_str("{}")), "E_SCHEMA", "exchange_validate(empty)");
+    fails += expect(dc_exchange_validate(in_str("{\"kind\":\"intent_preset\",\"schema_version\":1,\"preset_id\":\"p1\",\"name\":\"night\",\"chips\":[\"c1\"],\"hard_soft\":{\"c1\":\"hard\"},\"detour\":\"tight\",\"weights_permille\":{\"right_turn\":2000,\"narrow_road\":1000,\"merge\":1000}}")),
+        "\"kind\":\"intent_preset\"", "exchange_validate");
     fails += expect(dc_tick(NULL, in_str("{}")), "E_INVALID_HANDLE", "tick(NULL)");
     dc_session_free(s);
     dc_session_free(NULL);

@@ -148,5 +148,5 @@ pub unsafe extern "C" fn dc_trip_score(trip_summary_json: DcIn) -> DcOut {
 #[no_mangle]
 pub unsafe extern "C" fn dc_exchange_validate(req_json: DcIn) -> DcOut {
     let inp = input(req_json);
-    DcOut::from_vec(guard(|| ops::unimplemented("dc_exchange_validate", inp)))
+    DcOut::from_vec(guard(|| ops::exchange_validate(inp)))
 }

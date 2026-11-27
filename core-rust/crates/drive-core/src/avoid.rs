@@ -53,6 +53,7 @@
 use crate::junction::{classify, JunctionClass};
 use contracts::facts::{AvoidDeclineReason, CandidateFacts};
 use contracts::horizon::{AvoidOffer, AvoidSummary, Avoided, Maneuver, ManeuverId};
+use contracts::override_types::{Detour, Weights};
 use contracts::RouteKey;
 
 /// `DetourPolicy` (03 §3.2, 07 §1; provisional initial values). Ratios in per-mille.
@@ -190,43 +191,58 @@ pub struct AvoidTarget {
     pub edge_pair: Option<(u64, u64)>,
 }
 
-/// Consent given (`commit` issued), the avoid route not loaded yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Override-specific L3 state carried across consent / undo so committing an override
+/// updates active L3 weights & detour and undoing it restores the previous values (03 §4.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverrideUndoMeta {
+    pub prev_l3_weights: Weights,
+    pub new_l3_weights: Weights,
+    pub prev_detour: Detour,
+    pub new_detour: Detour,
+}
+
+/// Consent given (`commit` issued), the avoid / override route not loaded yet.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Consent {
-    /// The avoid search's `req_id` (= the consent `commit`'s; `dc_route_commit` names it).
+    /// The avoid / override search's `req_id` (= the consent `commit`'s; `dc_route_commit` names it).
     pub req_id: String,
     pub offer_id: String,
     pub undo_req_id: String,
-    /// The route the avoid search started on (= the consent `commit`'s `route_key`).
+    /// The route the search started on (= the consent `commit`'s `route_key`).
     pub from_route_key: RouteKey,
     pub start_progress_cm: u32,
     pub consent_at_mono_ms: u64,
+    /// Present for L3 override consents (03 §4.2: divergence check at `dc_route_commit` +
+    /// weight/detour state transitions).
+    pub override_meta: Option<OverrideUndoMeta>,
 }
 
-/// The consented avoid route is current; "戻して" is possible until the window ends.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The consented avoid / override route is current; "戻して" is possible until the window ends.
+#[derive(Debug, Clone, PartialEq)]
 pub struct UndoWindow {
     pub offer_id: String,
     pub undo_req_id: String,
-    /// The avoid route's key (assigned by `dc_route_commit`).
+    /// The new route's key (assigned by `dc_route_commit`).
     pub route_key: RouteKey,
     pub consent_at_mono_ms: u64,
-    /// Divergence point on the avoid route (`along_route_cm`); `None` = unknown (no undo).
+    /// Divergence point on the new route (`along_route_cm`); `None` = unknown (no undo).
     pub divergence_cm: Option<u32>,
     /// `avoid_tried` of the original route when the avoid route was loaded (#22): restored
     /// when the undo brings that route back, so its junctions are not offered again.
     pub tried_before: Vec<ManeuverId>,
+    pub override_meta: Option<OverrideUndoMeta>,
 }
 
 /// The undo `commit` was issued; the original route body comes back with it (#22).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UndoReturn {
     pub undo_req_id: String,
     pub tried_before: Vec<ManeuverId>,
+    pub override_meta: Option<OverrideUndoMeta>,
 }
 
 /// Where the consent stands for "戻して".
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum UndoState {
     None,
     Consented(Consent),
@@ -243,22 +259,24 @@ pub fn undo_req_id(avoid_req_id: &str) -> String {
 /// (`NO_EFFECT` / `NO_PENDING_TARGET`; 03 §3.1). TODO(04 §2 / 05 §5): not named in docs.
 pub const UNDO_UNAVAILABLE_TEMPLATE_ID: &str = "undo_unavailable";
 
-/// Divergence point of the avoid route from the original one (03 §3.1 steps 1–3), as
-/// `along_route_cm` on the avoid route. Edges are `(directed edge_id, along_start,
-/// along_end)` in route order ([`crate::route::LoadedRoute::edge_spans`]).
-/// 1. The avoid route's first edge (it starts mid-edge, at the search-start position) is
-///    looked up among the original edges ahead of `start_progress_cm` (an edge ending after
-///    it, so the one the vehicle was on counts; not the current position: the vehicle
-///    moved during the search).
-/// 2. From that match both sequences are compared forward by edge id; the first avoid
-///    edge that differs is the divergence point (its `along_start`). Running past the end
-///    of the original route also counts as a difference.
-/// 3. No match, more than one match (a looping route), or no difference at all → `None`.
-pub fn divergence_cm(
+/// Provisional template id spoken when an L3 override finds no qualifying route or the
+/// vehicle already passed the divergence point at commit time ("この時間内では回避できる経路が
+/// ありません", 03 §4.2). TODO(04 §2 / 05 §5): not named in docs.
+pub const OVERRIDE_NO_ROUTE_TEMPLATE_ID: &str = "override_no_route";
+
+/// Divergence point of `avoid` from `original` (03 §3.1 steps 1–3), returning
+/// `(along_cm_on_original, along_cm_on_avoid)`.
+/// 1. `avoid[0]` is matched uniquely among `original` edges ending after `start_progress_cm`.
+/// 2. Both sequences are compared forward by edge id; the first differing edge gives:
+///    - `along_cm_on_original`: end of the last shared edge on `original` (= start of the next
+///      original edge if any),
+///    - `along_cm_on_avoid`: `along_start` of the first differing edge on `avoid`.
+/// 3. No match, ambiguous match (loop), or no difference → `None`.
+pub fn divergence_pair_cm(
     original: &[(u64, u32, u32)],
     avoid: &[(u64, u32, u32)],
     start_progress_cm: u32,
-) -> Option<u32> {
+) -> Option<(u32, u32)> {
     let first = avoid.first()?.0;
     let mut matches = original
         .iter()
@@ -274,9 +292,33 @@ pub fn divergence_cm(
         let a = avoid.get(k)?;
         match original.get(at + k) {
             Some(o) if o.0 == a.0 => k += 1,
-            _ => return Some(a.1),
+            _ => {
+                let orig_div = original[at + k - 1].2;
+                return Some((orig_div, a.1));
+            }
         }
     }
+}
+
+/// Divergence point of the avoid route from the original one (03 §3.1 steps 1–3), as
+/// `along_route_cm` on the avoid route.
+pub fn divergence_cm(
+    original: &[(u64, u32, u32)],
+    avoid: &[(u64, u32, u32)],
+    start_progress_cm: u32,
+) -> Option<u32> {
+    divergence_pair_cm(original, avoid, start_progress_cm).map(|(_, avoid_cm)| avoid_cm)
+}
+
+/// Divergence point of an override alternative from the current route (03 §4.2 item 3), as
+/// `along_route_cm` on the **original** (current) route, checked in `dc_route_commit` before
+/// replacing the route.
+pub fn divergence_on_original_cm(
+    original: &[(u64, u32, u32)],
+    alt: &[(u64, u32, u32)],
+    start_progress_cm: u32,
+) -> Option<u32> {
+    divergence_pair_cm(original, alt, start_progress_cm).map(|(orig_cm, _)| orig_cm)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -627,9 +669,10 @@ mod tests {
     fn divergence_point_rules() {
         // original A B1 B2 C, edges of 100; search started at 150 (in B1)
         let orig = spans(&[1, 2, 3, 4], 0, 100);
-        // avoid: B1 (partial 50) B2 D → diverges at its own along 150
+        // avoid: B1 (partial 50) B2 D → diverges at its own along 150 (original along 300)
         let avoid = vec![(2, 0, 50), (3, 50, 150), (9, 150, 250)];
         assert_eq!(divergence_cm(&orig, &avoid, 150), Some(150));
+        assert_eq!(divergence_on_original_cm(&orig, &avoid, 150), Some(300));
         // first edge not ahead of the start position (B1 ended at 200 <= 200)
         assert_eq!(divergence_cm(&orig, &avoid, 200), None);
         // not found

@@ -2,21 +2,30 @@
 
 use crate::align::{AlignConfig, AlignStats, Aligner, FixResult, Mode};
 use crate::avoid::{
-    self, AvoidConfig, AvoidState, AvoidTarget, Consent, DetourPolicy, UndoReturn, UndoState,
-    UndoWindow,
+    self, AvoidConfig, AvoidState, AvoidTarget, Consent, DetourPolicy, OverrideUndoMeta,
+    UndoReturn, UndoState, UndoWindow,
 };
-use crate::command_line::{self, Command, JpRef};
+use crate::command_line::{self, Command, JpRef, OvrArgs};
 use crate::history::{self, HistoryConfig, HistoryScheduler, PoiState, StepContext};
 use crate::horizon::{arrived, eta_range, EtaFactors, HorizonFrames};
 use crate::planner::{
     CommitGate, Effects, PlanCommitState, PlanSearch, SearchLimits, SearchPlanner,
 };
+use crate::rank;
 use crate::route::LoadedRoute;
 use contracts::facts::{AvoidDeclineReason, AvoidOfferEvalRequest, AvoidOfferEvalResult};
 use contracts::horizon::{HorizonStatus, ManeuverHorizon, ManeuverId, UPCOMING_MAX};
-use contracts::override_types::{RejectCode, ValidateOverrideRequest, ValidateOverrideResult};
+use contracts::override_types::{
+    Detour, IntentContract, JunctionMode, JunctionPreference, OverrideAction,
+    PersonalRoutingOverride, RejectCode, SchemaV1, ValidateOverrideRequest, ValidateOverrideResult,
+    Weights,
+};
 use contracts::plan::{PlanCandidates, TripPlanSnapshot};
-use contracts::route::{RouteCommitRequest, RouteCommitResult};
+use contracts::rank::{
+    DetourPolicyConfig, L3LevelScale, PenaltyPolicy, L2_PENALTY_PERMILLE_MAX,
+    L2_PENALTY_PERMILLE_MIN, MAX_DETOUR_RATIO_PERMILLE_MAX, MAX_DETOUR_RATIO_PERMILLE_MIN,
+};
+use contracts::route::{RouteCommitRequest, RouteCommitResult, SessionResume};
 use contracts::tick::{
     DismissReason, DistanceClass, EventBody, Fix, LogEvent, PlannerCmd, SaveForLaterReason,
     SearchPriority, TapAction, TextClass, ThermalStatus, TickInput, TickOutput, UiCmd, VoiceCmd,
@@ -24,6 +33,7 @@ use contracts::tick::{
 };
 use contracts::{ErrorCode, RouteKey};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 /// `dc_session_new` config. TODO(abi-v1): config contents are not specified anywhere;
 /// the provisional search limits (03 §3.1 / 07 §1) and the off-route thresholds (07 §1,
@@ -88,6 +98,17 @@ pub struct SessionConfig {
     pub p3_safety_margin_ms: u64,
     /// Window after `Completed` / `Interrupted` for L3 `BMK` (ms; 05 §6.2: 60 s, provisional).
     pub p3_bmk_window_ms: u64,
+    /// Minimum `score_ms` improvement required for an L3 override alternative to be offered
+    /// (ms; 03 §4.2 / 07 §1: 30 s = 30,000 ms, provisional).
+    pub override_min_improvement_ms: u64,
+    /// Lifetime of an L3 override utterance / confirmation screen (ms; 03 §4.2: 30 s = 30,000 ms).
+    pub override_expiry_ms: u64,
+    /// Optional `E_PANIC` session recovery payload (04 §3.2, PR #23): loads `route_bundle`
+    /// directly under the given `route_key` without incrementing `route_revision` or checking
+    /// `req_id`. Alignment starts in `uncertain`; P3 spoken log, `avoid_tried`, held results
+    /// and plan state are not carried over.
+    #[serde(default)]
+    pub resume: Option<SessionResume>,
 }
 
 impl Default for SessionConfig {
@@ -125,6 +146,9 @@ impl Default for SessionConfig {
             p3_tts_prep_ms: h.tts_prep_ms,
             p3_safety_margin_ms: h.safety_margin_ms,
             p3_bmk_window_ms: h.bmk_window_ms,
+            override_min_improvement_ms: 30_000,
+            override_expiry_ms: 30_000,
+            resume: None,
         }
     }
 }
@@ -249,6 +273,93 @@ enum CommitSource {
     },
 }
 
+/// Metadata for a pending L3 override route search / confirmation (03 §4.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverrideTarget {
+    pub override_id: String,
+    pub confirm_screen_id: String,
+    pub route_key: RouteKey,
+    pub expires_at_mono_ms: u64,
+    pub w_right: u64,
+    pub w_narrow: u64,
+    pub w_merge: u64,
+    pub prev_l3_weights: Weights,
+    pub new_l3_weights: Weights,
+    pub prev_detour: Detour,
+    pub new_detour: Detour,
+    pub max_detour_ratio_permille: Option<u64>,
+    pub has_jp_next: bool,
+    pub jp_edge_pair: Option<(u64, u64)>,
+    /// Branch decision deadline (`next_ref.deadline_mono_ms`, 20 s before the branch) when
+    /// `jp=next` was specified; enforced through search, evaluation, withdrawal, and consent.
+    pub jp_deadline_mono_ms: Option<u64>,
+    pub start_progress_cm: u32,
+}
+
+impl OverrideTarget {
+    /// True once either the 30 s override deadline (`>`) or the `jp=next` branch decision
+    /// deadline (`>=`) has passed.
+    pub fn is_expired(&self, t: u64) -> bool {
+        t > self.expires_at_mono_ms || self.jp_deadline_mono_ms.is_some_and(|d| t >= d)
+    }
+
+    /// Earliest monotonic instant at which this target becomes expired.
+    pub fn expiry_wake_mono_ms(&self) -> u64 {
+        let base = self.expires_at_mono_ms.saturating_add(1);
+        self.jp_deadline_mono_ms.map_or(base, |d| base.min(d))
+    }
+}
+
+/// Lifecycle of an L3 override that requires a route search (03 §4.2):
+/// `Queued` (from `dc_validate_override`) → `WaitingSlot` / `Searching` (`start{priority: override}`)
+/// → `Ready` (`evaluate_offer`) → `Confirming` (`show_confirm`, waiting for dict "はい" / `user_tap{confirm}`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum OverrideState {
+    Idle,
+    Queued {
+        target: OverrideTarget,
+    },
+    WaitingSlot {
+        target: OverrideTarget,
+    },
+    Searching {
+        req_id: String,
+        target: OverrideTarget,
+    },
+    Ready {
+        req_id: String,
+        target: OverrideTarget,
+    },
+    Confirming {
+        req_id: String,
+        target: OverrideTarget,
+    },
+}
+
+impl OverrideState {
+    pub fn target(&self) -> Option<&OverrideTarget> {
+        match self {
+            Self::Idle => None,
+            Self::Queued { target }
+            | Self::WaitingSlot { target }
+            | Self::Searching { target, .. }
+            | Self::Ready { target, .. }
+            | Self::Confirming { target, .. } => Some(target),
+        }
+    }
+}
+
+/// Validation and L3-state metadata for an issued override `commit{req_id}` that has not
+/// yet been settled by `dc_route_commit` or withdrawn by `cancel_commit` (03 §4.2).
+/// Retained independently of `Session::undo` so an expired undo attempt (> 5 s) never
+/// drops the divergence check or the new L3 weights/detour installation.
+#[derive(Debug, Clone, PartialEq)]
+struct PendingOverrideCommit {
+    offer_id: String,
+    start_progress_cm: u32,
+    meta: OverrideUndoMeta,
+}
+
 #[derive(Debug)]
 pub struct Session {
     planner: SearchPlanner,
@@ -263,18 +374,28 @@ pub struct Session {
     frames: HorizonFrames,
     /// `at_mono_ms` of the latest fix used (horizon `sampled_at_monotonic_ms`).
     last_fix_at: Option<u64>,
+    /// Latest non-out-of-order `Fix` received (attached to `start{priority: override}`, 03 §4.2).
+    last_fix: Option<Fix>,
     avoid_cfg: AvoidConfig,
     detour: DetourPolicy,
     avoid: AvoidState,
     /// Maneuvers of the current route an avoid chip was tried for (once each).
     avoid_tried: Vec<ManeuverId>,
-    /// "戻して" state of the last consent (03 §3.1).
+    /// Pending L3 override route search / confirmation state (03 §4.2).
+    override_state: OverrideState,
+    /// Active L3 weights and detour applied to the session (updated on override commit / undo).
+    active_l3_weights: Weights,
+    active_detour: Detour,
+    next_override_seq: u64,
+    override_min_improvement_ms: u64,
+    override_expiry_ms: u64,
+    /// "戻して" state of the last consent (03 §3.1, §4.2).
     undo: UndoState,
-    /// UiCmds raised outside `dc_tick` (a route commit removing an offer), sent with the
-    /// next tick.
+    /// UiCmds raised outside `dc_tick` (a route commit removing an offer, show_confirm, etc.),
+    /// sent with the next tick.
     pending_ui: Vec<UiCmd>,
-    /// Voice / planner commands raised outside `dc_tick` (`CXL` through
-    /// `dc_validate_override`), sent with the next tick.
+    /// Voice / planner commands raised outside `dc_tick` (`CXL` / override eval / divergence refusal),
+    /// sent with the next tick.
     pending_voice: Vec<VoiceCmd>,
     pending_planner: Vec<PlannerCmd>,
     pending_log: Vec<LogEvent>,
@@ -282,6 +403,9 @@ pub struct Session {
     /// (provisional req_id check, proposed to the team). Cleared when a route is loaded:
     /// every one of them was issued against the route that was current until then.
     issued_commits: Vec<(String, RouteKey)>,
+    /// Override divergence-check and L3-weight metadata for unsettled override commits,
+    /// tracked independently of the 5 s `undo` window.
+    pending_override_commits: BTreeMap<String, PendingOverrideCommit>,
     /// The undo `commit` issued, its route not loaded yet (#22).
     undo_return: Option<UndoReturn>,
     /// Soft-mode / drive-start speed threshold (cm/s; 07 §1: 222 = 8 km/h, provisional).
@@ -292,19 +416,35 @@ pub struct Session {
     drive_fast_since_mono_ms: Option<u64>,
     /// Latest `fix.at_mono_ms` seen by drive-start tracking (out-of-order fixes ignored).
     drive_last_fix_at_mono_ms: Option<u64>,
+    /// True once drive-start threshold has been met (8 km/h for 3 s, 07 §1).
+    is_driving: bool,
     /// P3 history commentary scheduler (05 §6.2).
     history: HistoryScheduler,
     /// Latest on-route fix satisfied `lateral_cm <= lateral_tol_cm` (reset on off/low-acc/route change).
     last_fix_lateral_ok: bool,
     /// Latest on-route fix had `acc_cm <= max_acc_cm` and usable bearing (speed >= heading_min_speed_cm_s).
     last_fix_acc_and_bearing_ok: bool,
+    /// Active proposal id (`override_id` or `AvoidOffer.offer_id`) captured on `asr_started`
+    /// per `utterance_id`, so dict "はい" consent never transfers to a proposal that appeared
+    /// or replaced the original during speech (03 §4.2, ADR-0007).
+    asr_targets: BTreeMap<String, Option<String>>,
 }
 
 impl Session {
     pub fn new(config: SessionConfig) -> Self {
+        Self::try_new(config).expect("invalid SessionConfig")
+    }
+
+    /// Builds a session, validating `config` and optionally loading `config.resume`
+    /// (`{route_bundle, route_key}`, 04 §3.2) without incrementing `route_revision`.
+    pub fn try_new(config: SessionConfig) -> Result<Self, CoreError> {
+        config
+            .validate()
+            .map_err(|e| CoreError::new(ErrorCode::Schema, format!("config: {e}")))?;
         let align_cfg = config.align();
         let history_cfg = config.history();
-        Self {
+        let avoid_cfg = config.avoid();
+        let mut session = Self {
             planner: SearchPlanner::new(config.limits()),
             last_now_mono_ms: None,
             current_route_key: None,
@@ -313,35 +453,88 @@ impl Session {
             route: None,
             aligner: Aligner::new(align_cfg),
             finished: false,
-            frames: HorizonFrames::new(config.eta_factors()),
+            frames: HorizonFrames::new(config.eta_factors(), avoid_cfg.deadline_before_ms),
             last_fix_at: None,
-            avoid_cfg: config.avoid(),
+            last_fix: None,
+            avoid_cfg,
             detour: DetourPolicy::default(),
             avoid: AvoidState::Idle,
             avoid_tried: Vec::new(),
+            override_state: OverrideState::Idle,
+            active_l3_weights: Weights::default(),
+            active_detour: Detour::Standard,
+            next_override_seq: 1,
+            override_min_improvement_ms: config.override_min_improvement_ms,
+            override_expiry_ms: config.override_expiry_ms,
             undo: UndoState::None,
             pending_ui: Vec::new(),
             pending_voice: Vec::new(),
             pending_planner: Vec::new(),
             pending_log: Vec::new(),
             issued_commits: Vec::new(),
+            pending_override_commits: BTreeMap::new(),
             undo_return: None,
             drive_start_speed_cm_s: config.drive_start_speed_cm_s,
             drive_start_hold_ms: config.drive_start_hold_ms,
             drive_fast_since_mono_ms: None,
             drive_last_fix_at_mono_ms: None,
+            is_driving: false,
             history: HistoryScheduler::new(history_cfg),
             last_fix_lateral_ok: false,
             last_fix_acc_and_bearing_ok: false,
+            asr_targets: BTreeMap::new(),
+        };
+        if let Some(resume) = config.resume {
+            let mut loaded = Self::load_resume(&resume)?;
+            loaded.assign_route_key(resume.route_key.clone());
+            session.current_route_key = Some(loaded.route_key.clone());
+            // Load corridor POIs into fresh history scheduler (consent OFF, 0 spoken).
+            session.history.on_route_changed(
+                0,
+                &loaded.history_pois,
+                &mut session.pending_voice,
+                &mut session.pending_ui,
+                &mut session.pending_log,
+            );
+            session.route = Some(loaded);
         }
+        Ok(session)
+    }
+
+    fn load_resume(resume: &SessionResume) -> Result<LoadedRoute, CoreError> {
+        if resume.route_key.route_revision.0 == 0 {
+            return Err(CoreError::new(
+                ErrorCode::Schema,
+                "resume.route_key.route_revision must be >= 1",
+            ));
+        }
+        let b_rk = &resume.route_bundle.route_key;
+        if b_rk.trip_id != resume.route_key.trip_id
+            || b_rk.trip_revision != resume.route_key.trip_revision
+            || b_rk.graph_version != resume.route_key.graph_version
+        {
+            return Err(CoreError::new(
+                ErrorCode::Schema,
+                "resume.route_bundle.route_key does not match resume.route_key",
+            ));
+        }
+        if b_rk.route_revision.0 != 0 && b_rk.route_revision != resume.route_key.route_revision {
+            return Err(CoreError::new(
+                ErrorCode::Schema,
+                format!(
+                    "resume.route_bundle.route_key.route_revision must be \"0\" or \"{}\", got \"{}\"",
+                    resume.route_key.route_revision.0, b_rk.route_revision.0
+                ),
+            ));
+        }
+        LoadedRoute::load(&resume.route_bundle)
+            .map_err(|e| CoreError::new(ErrorCode::Schema, format!("resume.route_bundle: {e}")))
     }
 
     pub fn from_json(config_json: &[u8]) -> Result<Self, CoreError> {
         let cfg: SessionConfig = serde_json::from_slice(config_json)
             .map_err(|e| CoreError::new(ErrorCode::Schema, format!("config: {e}")))?;
-        cfg.validate()
-            .map_err(|e| CoreError::new(ErrorCode::Schema, format!("config: {e}")))?;
-        Ok(Self::new(cfg))
+        Self::try_new(cfg)
     }
 
     pub fn aligner(&self) -> &Aligner {
@@ -441,11 +634,14 @@ impl Session {
         self.finished = false;
         self.frames.reset_route();
         self.last_fix_at = None;
+        self.last_fix = None;
         self.last_fix_lateral_ok = false;
         self.last_fix_acc_and_bearing_ok = false;
         self.reset_avoid();
+        self.reset_override();
         self.undo = UndoState::None;
         self.issued_commits.clear();
+        self.pending_override_commits.clear();
         self.undo_return = None;
         let now = self.last_now_mono_ms.unwrap_or(0);
         self.history.on_route_changed(
@@ -482,6 +678,21 @@ impl Session {
         &self.avoid
     }
 
+    /// The pending L3 override state (03 §4.2).
+    pub fn override_state(&self) -> &OverrideState {
+        &self.override_state
+    }
+
+    /// Active L3 weights applied to the session (03 §4.2).
+    pub fn active_l3_weights(&self) -> &Weights {
+        &self.active_l3_weights
+    }
+
+    /// Active L3 detour setting applied to the session (03 §4.2).
+    pub fn active_detour(&self) -> Detour {
+        self.active_detour
+    }
+
     /// The "戻して" state of the last consent (03 §3.1).
     pub fn undo_state(&self) -> &UndoState {
         &self.undo
@@ -498,6 +709,29 @@ impl Session {
         }
         self.avoid = AvoidState::Idle;
         self.avoid_tried.clear();
+    }
+
+    /// A new route: any pending override confirmation is dismissed (`dismiss{route_changed}`).
+    fn reset_override(&mut self) {
+        if let OverrideState::Confirming { target, .. } = &self.override_state {
+            self.pending_ui.push(UiCmd::Dismiss {
+                target_id: target.override_id.clone(),
+                reason: DismissReason::RouteChanged,
+            });
+        }
+        self.override_state = OverrideState::Idle;
+    }
+
+    /// Speak "この時間内では回避できる経路がありません" once (03 §4.2).
+    fn speak_override_no_route(&mut self, at: u64) {
+        let token = format!("{}-{at}", avoid::OVERRIDE_NO_ROUTE_TEMPLATE_ID);
+        self.history.note_p2_token(&token);
+        self.pending_voice.push(VoiceCmd::Speak {
+            token,
+            priority: VoicePriority::P2,
+            template_id: avoid::OVERRIDE_NO_ROUTE_TEMPLATE_ID.to_owned(),
+            params: std::collections::BTreeMap::new(),
+        });
     }
 
     /// `dc_route_commit` guard (team decision 2026-11-25): `route_key` is the one from
@@ -692,6 +926,47 @@ impl Session {
         };
         let mut loaded = LoadedRoute::load(&req.bundle)
             .map_err(|e| CoreError::new(ErrorCode::Schema, format!("route_bundle: {e}")))?;
+        let now = self.last_now_mono_ms.unwrap_or(0);
+        // 03 §4.2 item 3: for a consented L3 override, determine the divergence point here
+        // (CandidateFacts carries no edge sequence). If the vehicle has already reached or
+        // passed the divergence point on the current route, keep the current route unchanged
+        // and notify with "この時間内では回避できる経路がありません".
+        let committed_override_meta = match (
+            self.pending_override_commits.get(&req.req_id),
+            self.route.as_ref(),
+        ) {
+            (Some(pending), Some(old)) => {
+                let div_orig = avoid::divergence_on_original_cm(
+                    &old.edge_spans(),
+                    &loaded.edge_spans(),
+                    pending.start_progress_cm,
+                );
+                let past_divergence =
+                    div_orig.is_some_and(|d| self.aligner.progress_cm().is_some_and(|p| p >= d));
+                if past_divergence {
+                    let offer_id = pending.offer_id.clone();
+                    self.issued_commits.retain(|(r, _)| r != &req.req_id);
+                    self.pending_override_commits.remove(&req.req_id);
+                    if matches!(&self.undo, UndoState::Consented(c) if c.req_id == req.req_id) {
+                        self.undo = UndoState::None;
+                    }
+                    self.speak_override_no_route(now);
+                    self.pending_log.push(log_req(
+                        now,
+                        "override_commit_past_divergence",
+                        &req.req_id,
+                        &offer_id,
+                    ));
+                    return Err(CoreError::new(
+                        ErrorCode::Stale,
+                        "override divergence point already passed",
+                    ));
+                }
+                Some(pending.meta.clone())
+            }
+            (Some(pending), None) => Some(pending.meta.clone()),
+            (None, _) => None,
+        };
         loaded.assign_route_key(RouteKey {
             route_revision: contracts::U64Str(revision),
             ..bundle_key.clone()
@@ -703,7 +978,6 @@ impl Session {
             maneuvers: loaded.maneuvers.len() as u32,
         };
         let undo = self.undo_window_for(&req.req_id, &loaded);
-        let now = self.last_now_mono_ms.unwrap_or(0);
         let mut fx = Effects::default();
         self.planner
             .on_route_changed(now, &loaded.route_key, &mut fx);
@@ -729,6 +1003,11 @@ impl Session {
         self.last_fix_lateral_ok = false;
         self.last_fix_acc_and_bearing_ok = false;
         self.reset_avoid();
+        self.reset_override();
+        if let Some(meta) = committed_override_meta {
+            self.active_l3_weights = meta.new_l3_weights;
+            self.active_detour = meta.new_detour;
+        }
         // #22: the undo brings the original route back (the same body, by ordinal): its
         // junctions already tried stay tried, so the one just undone is not offered again.
         if let Some(r) = self.undo_return.take() {
@@ -744,18 +1023,23 @@ impl Session {
                         id
                     })
                     .collect();
+                if let Some(meta) = r.override_meta {
+                    self.active_l3_weights = meta.prev_l3_weights;
+                    self.active_detour = meta.prev_detour;
+                }
             }
         }
         self.undo = undo;
         self.issued_commits.clear();
+        self.pending_override_commits.clear();
         Ok(result)
     }
 
     /// The undo state after loading `loaded` (03 §3.1, team decision 2026-11-26): when this
-    /// commit loads the consented avoid route (its `req_id` is the consent commit's, so a
-    /// reroute committed against the same guard is never taken for it), the divergence
-    /// point is computed once, here, from the old route and the new one and kept for
-    /// "戻して". Any other commit (including the undo itself) ends the window.
+    /// commit loads the consented avoid / override route (its `req_id` is the consent
+    /// commit's, so a reroute committed against the same guard is never taken for it), the
+    /// divergence point is computed once, here, from the old route and the new one and kept
+    /// for "戻して". Any other commit (including the undo itself) ends the window.
     fn undo_window_for(&self, req_id: &str, loaded: &LoadedRoute) -> UndoState {
         let UndoState::Consented(c) = &self.undo else {
             return UndoState::None;
@@ -777,6 +1061,7 @@ impl Session {
                 c.start_progress_cm,
             ),
             tried_before: self.avoid_tried.clone(),
+            override_meta: c.override_meta.clone(),
         })
     }
 
@@ -811,6 +1096,7 @@ impl Session {
             let req_id = c.req_id.clone();
             let offer_id = c.offer_id.clone();
             self.issued_commits.retain(|(r, _)| *r != req_id);
+            self.pending_override_commits.remove(&req_id);
             let mut fx = Effects::default();
             self.planner.discard_held(at, "undo", &mut fx);
             log.append(&mut fx.log);
@@ -851,6 +1137,7 @@ impl Session {
         self.undo_return = Some(UndoReturn {
             undo_req_id: req_id.clone(),
             tried_before: w.tried_before.clone(),
+            override_meta: w.override_meta.clone(),
         });
         self.undo = UndoState::None;
         Ok(req_id)
@@ -969,7 +1256,14 @@ impl Session {
         // Time never goes backwards inside the core: clamp to the previous value and
         // record clock_regression (02 §2.1 / team decision 2026-11-24).
         let now = self.clamp_now(input.now_mono_ms, &mut extra_log);
-        // Status and remaining ETA as of `now`, before this tick's events / fix.
+        // Apply this tick's fix to alignment first so consent, undo, and search-finish
+        // checks inside `input.events` see the current tracking state and progress (never
+        // accepting consent on a tick whose fix confirms off-route or finishes the route).
+        // Reroute requests stay after `input.events` so a finishing search can settle first.
+        let tick_fix = input.fix;
+        if let Some(fix) = tick_fix {
+            self.on_fix_align(now, fix, &mut extra_log);
+        }
         self.refresh_eta(now);
         let gate = self.commit_gate(now);
 
@@ -1012,25 +1306,66 @@ impl Session {
                         &mut fx,
                     );
                     self.on_avoid_finished(now, at, &req_id, &mut fx, &mut extra_log);
+                    self.on_override_finished(now, at, &req_id, &mut fx, &mut extra_log);
                 }
                 EventBody::UserTap { target_id, action } => {
                     self.on_user_tap(now, at, &target_id, action, &mut fx, &mut extra_log);
                 }
+                EventBody::AsrStarted { utterance_id } => {
+                    let active_id = self.active_confirm_target_id();
+                    if self.asr_targets.len() >= 16 {
+                        if let Some(first) = self.asr_targets.keys().next().cloned() {
+                            self.asr_targets.remove(&first);
+                        }
+                    }
+                    self.asr_targets.insert(utterance_id, active_id);
+                }
+                EventBody::AsrFailed { utterance_id } => {
+                    self.asr_targets.remove(&utterance_id);
+                }
                 EventBody::AsrResult {
+                    utterance_id,
                     text_class: TextClass::Dict,
                     dict_norm: Some(norm),
-                    ..
                 } if avoid::is_dict_yes(&norm) => {
-                    // Consent to the offer on screen only (no offer → nothing; 04 §4.3).
-                    if matches!(self.avoid, AvoidState::Offered { .. }) {
+                    let captured = self.asr_targets.remove(&utterance_id);
+                    // Consent to the confirmation / offer on screen only (03 §4.2, 04 §4.3).
+                    // If `asr_started` recorded the proposal active at speech start, consent
+                    // never transfers to a proposal that replaced it or appeared afterwards.
+                    if let OverrideState::Confirming { req_id, target } = &self.override_state {
+                        if let Some(expected) = &captured {
+                            if expected.as_deref() != Some(target.override_id.as_str()) {
+                                extra_log.push(log_req(
+                                    at,
+                                    "override_consent_refused",
+                                    req_id,
+                                    "proposal_changed",
+                                ));
+                                continue;
+                            }
+                        }
+                        self.consent_override(now, at, "dict_yes", &mut fx, &mut extra_log);
+                    } else if let AvoidState::Offered { req_id, offer, .. } = &self.avoid {
+                        if let Some(expected) = &captured {
+                            if expected.as_deref() != Some(offer.offer_id.as_str()) {
+                                extra_log.push(log_req(
+                                    at,
+                                    "avoid_consent_refused",
+                                    req_id,
+                                    "proposal_changed",
+                                ));
+                                continue;
+                            }
+                        }
                         self.consent(now, at, "dict_yes", &mut fx, &mut extra_log);
                     }
                 }
                 EventBody::AsrResult {
+                    utterance_id,
                     text_class: TextClass::Dict,
                     dict_norm: Some(norm),
-                    ..
                 } if self.history.is_speaking() && history::is_dict_stop(&norm) => {
+                    self.asr_targets.remove(&utterance_id);
                     // 05 §6.2 (94ef3b6 / fffd429): while P3 is Speaking, P3_STOP phrases
                     // ("やめて" / "止めて" / "とめて" / "ストップ") stop P3 only and never
                     // trigger CXL (no undo / no offer dismissal).
@@ -1038,14 +1373,18 @@ impl Session {
                         .on_user_stop(at, &mut tick_voice, &mut extra_log);
                 }
                 EventBody::AsrResult {
+                    utterance_id,
                     text_class: TextClass::Dict,
                     dict_norm: Some(norm),
-                    ..
                 } if avoid::is_dict_cxl(&norm) => {
+                    self.asr_targets.remove(&utterance_id);
                     // 05 §6.2 (94ef3b6 / fffd429): "キャンセル" / "取り消し" / "取り消して" /
                     // "戻して" / "元に戻して" are always CXL (never stop P3); "やめて" also
                     // falls through here when P3 is not Speaking.
                     self.on_dict_cxl(now, at, &mut fx, &mut extra_log);
+                }
+                EventBody::AsrResult { utterance_id, .. } => {
+                    self.asr_targets.remove(&utterance_id);
                 }
                 EventBody::TtsStarted { token } => {
                     self.history.on_tts_started(
@@ -1099,8 +1438,8 @@ impl Session {
                 _ => {}
             }
         }
-        if let Some(fix) = input.fix {
-            self.on_fix(now, fix, &mut fx, &mut extra_log);
+        if let Some(fix) = tick_fix {
+            self.maybe_request_reroute(now, fix, &mut fx);
         }
         self.planner.on_now(now, &mut fx);
         self.avoid_budget(now, &mut fx, &mut extra_log);
@@ -1109,6 +1448,7 @@ impl Session {
         self.planner
             .release_held(now, gate, self.current_route_key.as_ref(), &mut fx);
         self.refresh_eta(now);
+        self.override_step(now, &mut fx, &mut extra_log);
         self.avoid_step(now, &mut fx, &mut extra_log);
         let horizon = self.next_horizon(now);
         self.history_step(now, &mut tick_voice, &mut fx.ui_cmds, &mut extra_log);
@@ -1198,10 +1538,87 @@ impl Session {
         };
     }
 
+    /// Active proposal id on screen (`override_id` or `AvoidOffer.offer_id`) for binding
+    /// `asr_started` -> `asr_result` dictionary confirmation (03 §4.2, ADR-0007).
+    fn active_confirm_target_id(&self) -> Option<String> {
+        if let OverrideState::Confirming { target, .. } = &self.override_state {
+            return Some(target.override_id.clone());
+        }
+        if let AvoidState::Offered { offer, .. } = &self.avoid {
+            return Some(offer.offer_id.clone());
+        }
+        None
+    }
+
+    /// The L3 override search `req_id` ended (03 §4.2): a usable `ok` with both `facts_ref`
+    /// and `base_facts_ref` while tracking and before expiry emits `evaluate_offer` and waits
+    /// for `dc_avoid_offer_eval`. Otherwise ends the attempt cleanly.
+    fn on_override_finished(
+        &mut self,
+        now: u64,
+        at: u64,
+        req_id: &str,
+        fx: &mut Effects,
+        log: &mut Vec<LogEvent>,
+    ) {
+        let OverrideState::Searching {
+            req_id: r, target, ..
+        } = &self.override_state
+        else {
+            return;
+        };
+        if r != req_id {
+            return;
+        }
+        let ready = fx.override_ready.iter().find(|a| a.req_id == req_id);
+        let tracking = self.horizon_status(now) == Some(HorizonStatus::Tracking);
+        let expired = target.is_expired(now);
+        let refs = ready.and_then(|a| Some((a.facts_ref.clone()?, a.base_facts_ref.clone()?)));
+        self.override_state =
+            if let (Some((facts_ref, base_facts_ref)), true, false) = (refs, tracking, expired) {
+                fx.planner_cmds.push(PlannerCmd::EvaluateOffer {
+                    req_id: r.clone(),
+                    facts_ref,
+                    base_facts_ref,
+                });
+                OverrideState::Ready {
+                    req_id: r.clone(),
+                    target: target.clone(),
+                }
+            } else {
+                let why = match ready {
+                    None => "search_unused",
+                    Some(_) if expired => "expired",
+                    Some(_) if !tracking => "not_tracking",
+                    Some(a) if a.facts_ref.is_none() => "no_facts_ref",
+                    Some(_) => "no_base_facts_ref",
+                };
+                log.push(log_req(at, "override_attempt_ended", req_id, why));
+                OverrideState::Idle
+            };
+    }
+
     /// Dictionary `CXL` (`asr_result{text_class: dict}` matching `avoid::DICT_CXL`,
-    /// when not intercepted as `P3_STOP` during P3 Speaking): dismisses an active avoid offer
-    /// or triggers the 5 s avoid undo (`try_undo`). Never stops P3 history commentary.
+    /// when not intercepted as `P3_STOP` during P3 Speaking): dismisses an active override
+    /// confirm or avoid offer, or triggers the 5 s undo (`try_undo`). Never stops P3 history
+    /// commentary.
     fn on_dict_cxl(&mut self, now: u64, at: u64, fx: &mut Effects, log: &mut Vec<LogEvent>) {
+        if let OverrideState::Confirming { req_id, target } = &self.override_state {
+            let override_id = target.override_id.clone();
+            let req_id = req_id.clone();
+            fx.ui_cmds.push(UiCmd::Dismiss {
+                target_id: override_id.clone(),
+                reason: DismissReason::Cancelled,
+            });
+            log.push(log_req(
+                at,
+                "override_confirm_cancelled",
+                &req_id,
+                &override_id,
+            ));
+            self.override_state = OverrideState::Idle;
+            return;
+        }
         if let AvoidState::Offered { req_id, offer, .. } = &self.avoid {
             let offer_id = offer.offer_id.clone();
             let req_id = req_id.clone();
@@ -1226,8 +1643,8 @@ impl Session {
         ));
     }
 
-    /// Consent to the chip: `user_tap{target_id: offer_id, action: avoid}` before the
-    /// deadline, while tracking, on the route the search started on → `commit`.
+    /// Consent via `user_tap`: `undo` for 5 s undo, `confirm` for an L3 override confirm
+    /// screen (`target_id = override_id | confirm_screen_id`), `avoid` for an avoid chip.
     fn on_user_tap(
         &mut self,
         now: u64,
@@ -1243,6 +1660,14 @@ impl Session {
             }
             return;
         }
+        if action == TapAction::Confirm {
+            if let OverrideState::Confirming { target, .. } = &self.override_state {
+                if target.override_id == target_id || target.confirm_screen_id == target_id {
+                    self.consent_override(now, at, "tap", fx, log);
+                    return;
+                }
+            }
+        }
         let AvoidState::Offered { offer, .. } = &self.avoid else {
             return;
         };
@@ -1255,6 +1680,173 @@ impl Session {
             return;
         }
         self.consent(now, at, "tap", fx, log);
+    }
+
+    /// Consent to the L3 override confirmation on screen at `at` (`user_tap{override_id |
+    /// confirm_screen_id, confirm}` or dictionary "はい"; 03 §4.2, ADR-0007): re-validates
+    /// deadline, tracking status, and `route_key`, then emits `commit{req_id, route_key,
+    /// undo_req_id}`.
+    fn consent_override(
+        &mut self,
+        now: u64,
+        at: u64,
+        source: &str,
+        fx: &mut Effects,
+        log: &mut Vec<LogEvent>,
+    ) {
+        let OverrideState::Confirming { req_id, target } = &self.override_state else {
+            return;
+        };
+        let refused = if target.is_expired(at) || target.is_expired(now) {
+            Some("deadline_passed")
+        } else if self.horizon_status(now) != Some(HorizonStatus::Tracking) {
+            Some("not_tracking")
+        } else if self.current_route_key.as_ref() != Some(&target.route_key) {
+            Some("route_key")
+        } else {
+            None
+        };
+        if let Some(why) = refused {
+            log.push(log_req(at, "override_consent_refused", req_id, why));
+            return;
+        }
+        let undo_req_id = avoid::undo_req_id(req_id);
+        fx.planner_cmds.push(PlannerCmd::Commit {
+            req_id: req_id.clone(),
+            route_key: target.route_key.clone(),
+            undo_req_id: Some(undo_req_id.clone()),
+        });
+        log.push(log_req(
+            at,
+            "override_consent_commit",
+            req_id,
+            &format!("{} source={source}", target.override_id),
+        ));
+        let override_meta = OverrideUndoMeta {
+            prev_l3_weights: target.prev_l3_weights.clone(),
+            new_l3_weights: target.new_l3_weights.clone(),
+            prev_detour: target.prev_detour,
+            new_detour: target.new_detour,
+        };
+        self.pending_override_commits.insert(
+            req_id.clone(),
+            PendingOverrideCommit {
+                offer_id: target.override_id.clone(),
+                start_progress_cm: target.start_progress_cm,
+                meta: override_meta.clone(),
+            },
+        );
+        self.undo = UndoState::Consented(Consent {
+            req_id: req_id.clone(),
+            offer_id: target.override_id.clone(),
+            undo_req_id,
+            from_route_key: target.route_key.clone(),
+            start_progress_cm: target.start_progress_cm,
+            consent_at_mono_ms: at,
+            override_meta: Some(override_meta),
+        });
+        self.override_state = OverrideState::Idle;
+    }
+
+    /// End-of-tick L3 override state machine (03 §4.2):
+    /// - cancels/dismisses on off-route / finished or 30 s expiry (`dismiss{expired}`),
+    /// - starts queued override search via `planner_cmds: start{priority: override, fix}` (1本),
+    /// - binds a delayed `Start{priority: override}` emitted after preempting lower priority.
+    fn override_step(&mut self, now: u64, fx: &mut Effects, log: &mut Vec<LogEvent>) {
+        let status = self.horizon_status(now);
+        let off = matches!(
+            status,
+            Some(HorizonStatus::OffRoute | HorizonStatus::Rerouting | HorizonStatus::Finished)
+        );
+        if off {
+            if let OverrideState::Searching { req_id, .. } = &self.override_state {
+                let req_id = req_id.clone();
+                self.planner.cancel_search(now, &req_id, fx);
+            }
+            self.planner.cancel_override_in_slot(now, fx);
+            self.planner.drop_pending_priority(SearchPriority::Override);
+        }
+        if let Some(target) = self.override_state.target() {
+            let expired = target.is_expired(now);
+            let route_mismatch = self.current_route_key.as_ref() != Some(&target.route_key);
+            if expired || off || route_mismatch {
+                if let OverrideState::Searching { req_id, .. } = &self.override_state {
+                    let req_id = req_id.clone();
+                    self.planner.cancel_search(now, &req_id, fx);
+                }
+                self.planner.drop_pending_priority(SearchPriority::Override);
+                let reason = if expired {
+                    DismissReason::Expired
+                } else {
+                    DismissReason::RouteChanged
+                };
+                if let OverrideState::Confirming { target, .. } = &self.override_state {
+                    fx.ui_cmds.push(UiCmd::Dismiss {
+                        target_id: target.override_id.clone(),
+                        reason,
+                    });
+                }
+                let what = if expired {
+                    "override_expired"
+                } else {
+                    "override_withdrawn"
+                };
+                log.push(log_at(now, what, None));
+                self.override_state = OverrideState::Idle;
+                return;
+            }
+        }
+        match std::mem::replace(&mut self.override_state, OverrideState::Idle) {
+            OverrideState::Queued { mut target } => {
+                if let Some(p) = self.aligner.progress_cm() {
+                    target.start_progress_cm = p;
+                }
+                let before = fx.planner_cmds.len();
+                self.planner.request(
+                    now,
+                    SearchPriority::Override,
+                    target.route_key.clone(),
+                    self.last_fix,
+                    fx,
+                );
+                let started = fx.planner_cmds[before..].iter().find_map(|c| match c {
+                    PlannerCmd::Start {
+                        req_id,
+                        priority: SearchPriority::Override,
+                        ..
+                    } => Some(req_id.clone()),
+                    _ => None,
+                });
+                self.override_state = if let Some(req_id) = started {
+                    OverrideState::Searching { req_id, target }
+                } else if self.planner.has_pending_priority(SearchPriority::Override) {
+                    OverrideState::WaitingSlot { target }
+                } else {
+                    OverrideState::Idle
+                };
+            }
+            OverrideState::WaitingSlot { mut target } => {
+                let started = fx.planner_cmds.iter().find_map(|c| match c {
+                    PlannerCmd::Start {
+                        req_id,
+                        priority: SearchPriority::Override,
+                        ..
+                    } => Some(req_id.clone()),
+                    _ => None,
+                });
+                self.override_state = if let Some(req_id) = started {
+                    if let Some(p) = self.aligner.progress_cm() {
+                        target.start_progress_cm = p;
+                    }
+                    OverrideState::Searching { req_id, target }
+                } else if self.planner.has_pending_priority(SearchPriority::Override) {
+                    OverrideState::WaitingSlot { target }
+                } else {
+                    OverrideState::Idle
+                };
+            }
+            other => self.override_state = other,
+        }
     }
 
     fn avoid_req_id(&self) -> Option<String> {
@@ -1318,6 +1910,7 @@ impl Session {
             from_route_key: target.route_key.clone(),
             start_progress_cm: target.start_progress_cm,
             consent_at_mono_ms: at,
+            override_meta: None,
         });
         self.avoid = AvoidState::Idle;
     }
@@ -1463,17 +2056,25 @@ impl Session {
         }
     }
 
-    /// `dc_avoid_offer_eval(s, {req_id, now_mono_ms, alt_facts, base_facts})` (02 §2.1 #11):
-    /// for the `req_id` of `evaluate_offer`, turns the waiting
-    /// avoid-chip result into an `AvoidOffer` on its `HorizonEntry` when it is still
-    /// before the deadline, the session is tracking and the alternative is within the
-    /// detour cap (`DetourPolicy`, base_eta = remaining ETA when the search started).
-    /// Any other outcome drops the result. The frame itself comes with the next `dc_tick`.
+    /// `dc_avoid_offer_eval(s, {req_id, now_mono_ms, alt_facts, base_facts})` (02 §2.1 #11,
+    /// 03 §4.2): evaluates a waiting avoid-chip or L3 override search result from
+    /// `evaluate_offer`.
+    /// - For an avoid chip: turns it into `AvoidOffer` on its `HorizonEntry` (04 §4.3).
+    /// - For an L3 override (03 §4.2): scores `base_facts` and `alt_facts` with the same
+    ///   override weights (`rank::score_candidate`), requires `base_score_ms - alt_score_ms >=
+    ///   override_min_improvement_ms` (30,000 ms provisional), within the override's
+    ///   `DetourPolicy`, and if `jp=next` was specified, not passing the target's
+    ///   `(edge_in, edge_out)`. On pass: queues `ui_cmds: show_confirm` for the next `dc_tick`.
+    ///   On failure: speaks `override_no_route` ("この時間内では回避できる経路がありません").
     pub fn avoid_offer_eval(&mut self, req: &AvoidOfferEvalRequest) -> AvoidOfferEvalResult {
         let now = self
             .last_now_mono_ms
             .map_or(req.now_mono_ms, |p| p.max(req.now_mono_ms));
         let declined = |reason| AvoidOfferEvalResult::Declined { reason };
+        if matches!(&self.override_state, OverrideState::Ready { req_id, .. } if *req_id == req.req_id)
+        {
+            return self.eval_override_offer(now, req);
+        }
         // A search still running, an offer already shown, or another search's req_id is
         // left as it is.
         if !matches!(&self.avoid, AvoidState::Ready { req_id, .. } if *req_id == req.req_id) {
@@ -1510,6 +2111,117 @@ impl Session {
         }
     }
 
+    fn eval_override_offer(
+        &mut self,
+        now: u64,
+        req: &AvoidOfferEvalRequest,
+    ) -> AvoidOfferEvalResult {
+        let OverrideState::Ready { req_id, target } =
+            std::mem::replace(&mut self.override_state, OverrideState::Idle)
+        else {
+            unreachable!("checked by caller");
+        };
+        if self.horizon_status(now) != Some(HorizonStatus::Tracking) {
+            return AvoidOfferEvalResult::Declined {
+                reason: AvoidDeclineReason::NotTracking,
+            };
+        }
+        if target.is_expired(now) {
+            return AvoidOfferEvalResult::Declined {
+                reason: AvoidDeclineReason::DeadlinePassed,
+            };
+        }
+        if req.alt_facts.graph_version != target.route_key.graph_version
+            || req.base_facts.graph_version != target.route_key.graph_version
+        {
+            return AvoidOfferEvalResult::Declined {
+                reason: AvoidDeclineReason::GraphMismatch,
+            };
+        }
+        let fail_no_route = |this: &mut Self, reason: AvoidDeclineReason| {
+            this.speak_override_no_route(now);
+            this.pending_log.push(log_req(
+                now,
+                "override_eval_declined",
+                &req_id,
+                &format!("{reason:?}"),
+            ));
+            AvoidOfferEvalResult::Declined { reason }
+        };
+        if !req.alt_facts.legal || !req.alt_facts.complete {
+            return fail_no_route(self, AvoidDeclineReason::NotLegalOrComplete);
+        }
+        if target.has_jp_next {
+            let Some((edge_in, edge_out)) = target.jp_edge_pair else {
+                return fail_no_route(self, AvoidDeclineReason::TargetEdgesUnknown);
+            };
+            if req
+                .alt_facts
+                .junctions
+                .iter()
+                .any(|j| j.edge_in.0 == edge_in && j.edge_out.0 == edge_out)
+            {
+                return fail_no_route(self, AvoidDeclineReason::TargetNotAvoided);
+            }
+        }
+        let detour_policy = rank::effective_detour_policy(
+            &DetourPolicyConfig::default(),
+            target.max_detour_ratio_permille,
+        );
+        let tight = target.new_detour == Detour::Tight;
+        if !detour_policy.within(req.base_facts.eta_ms, req.alt_facts.eta_ms, tight) {
+            return fail_no_route(self, AvoidDeclineReason::OverDetourCap);
+        }
+        let penalties = PenaltyPolicy::default();
+        let (base_score_ms, _) = rank::score_candidate(
+            &req.base_facts,
+            &penalties,
+            target.w_right,
+            target.w_narrow,
+            target.w_merge,
+        );
+        let (alt_score_ms, _) = rank::score_candidate(
+            &req.alt_facts,
+            &penalties,
+            target.w_right,
+            target.w_narrow,
+            target.w_merge,
+        );
+        let improvement_ms = base_score_ms.saturating_sub(alt_score_ms);
+        if improvement_ms < self.override_min_improvement_ms {
+            return fail_no_route(self, AvoidDeclineReason::InsufficientImprovement);
+        }
+        let delta_eta_ms = i64::try_from(req.alt_facts.eta_ms)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(i64::try_from(req.base_facts.eta_ms).unwrap_or(i64::MAX));
+        let confirm_screen_id = target.confirm_screen_id.clone();
+        let override_id = target.override_id.clone();
+        let expires_at_mono_ms = target.expires_at_mono_ms;
+        self.pending_ui.push(UiCmd::ShowConfirm {
+            confirm_screen_id: confirm_screen_id.clone(),
+            override_id: override_id.clone(),
+            expires_at_mono_ms,
+        });
+        self.pending_log.push(log_req(
+            now,
+            "override_confirm_offered",
+            &req_id,
+            &format!("{override_id} improvement_ms={improvement_ms}"),
+        ));
+        self.override_state = OverrideState::Confirming {
+            req_id: req_id.clone(),
+            target,
+        };
+        AvoidOfferEvalResult::OverrideOffered {
+            confirm_screen_id,
+            override_id,
+            alt_route_id: req_id,
+            delta_eta_ms,
+            score_improvement_ms: improvement_ms,
+            expires_at_mono_ms,
+        }
+    }
+
     /// Soft-mode entry / drive-start tracking (02 §2.1 #9, 03 §3.1, 07 §1):
     /// `speed_cm_s >= drive_start_speed_cm_s` (default 222 cm/s = 8 km/h) continuously for
     /// `drive_start_hold_ms` (default 3000 ms) closes the current plan's commit window
@@ -1531,15 +2243,22 @@ impl Session {
         }
         let since = *self.drive_fast_since_mono_ms.get_or_insert(at);
         if at.saturating_sub(since) >= self.drive_start_hold_ms {
+            self.is_driving = true;
             self.planner.close_plan_commit_driving();
         }
     }
 
-    /// On-route alignment of one fix (04 §3.1); confirms off-route and requests the reroute
-    /// with this fix as the new origin.
-    fn on_fix(&mut self, now: u64, fix: Fix, fx: &mut Effects, log: &mut Vec<LogEvent>) {
+    /// On-route alignment of one fix (04 §3.1); updates tracking / off-route / drive-start
+    /// state before this tick's events are evaluated.
+    fn on_fix_align(&mut self, now: u64, fix: Fix, log: &mut Vec<LogEvent>) {
         // Tracked even before the first route is committed.
         self.observe_drive_start(&fix);
+        if self
+            .last_fix
+            .is_none_or(|prev| fix.at_mono_ms >= prev.at_mono_ms)
+        {
+            self.last_fix = Some(fix);
+        }
         let Some(route) = self.route.as_ref() else {
             return;
         };
@@ -1618,6 +2337,15 @@ impl Session {
         }
         // Off-route invalidates the remaining ETA before the reroute starts (→ long).
         self.refresh_eta(now);
+    }
+
+    /// Requests a reroute with `fix` as the new origin once off-route is confirmed and no
+    /// reroute is already in flight (called after `input.events` so a finishing search can
+    /// settle before any new reroute starts).
+    fn maybe_request_reroute(&mut self, now: u64, fix: Fix, fx: &mut Effects) {
+        if self.route.is_none() || self.finished {
+            return;
+        }
         if self.aligner.off_confirmed() && !self.planner.has_reroute() {
             if let Some(key) = self.current_route_key.clone() {
                 self.planner
@@ -1677,7 +2405,8 @@ impl Session {
                     .issued_commits
                     .push((req_id.clone(), route_key.clone())),
                 PlannerCmd::CancelCommit { req_id } => {
-                    self.issued_commits.retain(|(r, _)| r != req_id)
+                    self.issued_commits.retain(|(r, _)| r != req_id);
+                    self.pending_override_commits.remove(req_id);
                 }
                 _ => {}
             }
@@ -1692,6 +2421,9 @@ impl Session {
                 } => *budget_deadline_mono_ms,
                 _ => None,
             },
+            self.override_state
+                .target()
+                .map(OverrideTarget::expiry_wake_mono_ms),
             stale_at,
             self.frames.last_ref_expires_at(),
             self.frames.window_expires_at(),
@@ -1727,9 +2459,10 @@ impl Session {
         )
     }
 
-    /// `dc_validate_override` skeleton. Implemented: SYNTAX, NO_PENDING_TARGET, UNKNOWN_REF
-    /// (no refs available yet). Everything else returns E_UNIMPLEMENTED.
-    /// Note: `YES` from the SLM never confirms anything (consent = dict match in Rust or tap).
+    /// `dc_validate_override` (02 §2.1 #7, 03 §4.1 / §4.2): deterministic Safety Gate for the
+    /// SLM's 1-line command code.
+    /// - Note: SLM `YES` never confirms a route change (consent = Rust dictionary match "はい"
+    ///   or `user_tap`, ADR-0007).
     pub fn validate_override(
         &mut self,
         req: ValidateOverrideRequest,
@@ -1739,80 +2472,394 @@ impl Session {
             Ok(c) => c,
             Err(_) => return rejected(RejectCode::Syntax),
         };
+        let at = req.utterance_mono_ms;
+        let now = self.last_now_mono_ms.map_or(at, |p| p.max(at));
         match cmd {
-            // CXL without a pending offer: "戻して" of an avoid switch confirmed within 5 s
-            // (03 §3.1). The commit / refusal phrase goes out with the next dc_tick.
-            Command::Cxl if req.pending_offer_id.is_none() => {
-                let at = req.utterance_mono_ms;
-                let now = self.last_now_mono_ms.map_or(at, |p| p.max(at));
-                let mut cmds = Vec::new();
-                let mut log = Vec::new();
-                let r = self.try_undo(now, at, None, &mut cmds, &mut log);
-                if let Err(code) = r {
-                    self.undo_refused(at, code, &mut log);
-                }
-                self.pending_planner.extend(cmds);
-                self.pending_log.extend(log);
-                match r {
-                    Ok(req_id) => Ok(ValidateOverrideResult::Undone { req_id }),
-                    Err(code) => rejected(code),
-                }
-            }
+            Command::Cxl => self.handle_cxl_override(now, at, req.pending_offer_id.as_deref()),
             // L3 BMK ("あとで詳しく", 03 §4.1, 05 §6.2): target is the currently Speaking POI,
             // otherwise the most recent Completed / Interrupted POI within p3_bmk_window_ms
             // (default 60 s). Never guesses another POI -> NO_PENDING_TARGET.
-            Command::Bmk => {
-                let at = req.utterance_mono_ms;
-                match self.history.resolve_bmk_target(at) {
-                    Some(poi_id) => {
-                        self.pending_ui.push(UiCmd::SaveForLater {
-                            poi_id: poi_id.clone(),
-                            reason: SaveForLaterReason::Bmk,
-                        });
-                        self.pending_log.push(log_at(
-                            at,
-                            "p3_bmk_saved",
-                            Some(format!("poi_id={poi_id}")),
-                        ));
-                        Ok(ValidateOverrideResult::Bookmarked { poi_id })
-                    }
-                    None => {
-                        self.pending_log.push(log_at(
-                            at,
-                            "p3_bmk_rejected",
-                            Some("NO_PENDING_TARGET".to_owned()),
-                        ));
-                        rejected(RejectCode::NoPendingTarget)
-                    }
+            Command::Bmk => match self.history.resolve_bmk_target(at) {
+                Some(poi_id) => {
+                    self.pending_ui.push(UiCmd::SaveForLater {
+                        poi_id: poi_id.clone(),
+                        reason: SaveForLaterReason::Bmk,
+                    });
+                    self.pending_log.push(log_at(
+                        at,
+                        "p3_bmk_saved",
+                        Some(format!("poi_id={poi_id}")),
+                    ));
+                    Ok(ValidateOverrideResult::Bookmarked { poi_id })
+                }
+                None => {
+                    self.pending_log.push(log_at(
+                        at,
+                        "p3_bmk_rejected",
+                        Some("NO_PENDING_TARGET".to_owned()),
+                    ));
+                    rejected(RejectCode::NoPendingTarget)
+                }
+            },
+            // SLM YES never confirms anything (03 §4.2, ADR-0007).
+            Command::Yes => {
+                let has_target = req.pending_offer_id.is_some()
+                    || matches!(self.override_state, OverrideState::Confirming { .. })
+                    || matches!(self.avoid, AvoidState::Offered { .. });
+                if !has_target {
+                    rejected(RejectCode::NoPendingTarget)
+                } else {
+                    self.pending_log.push(log_at(
+                        at,
+                        "slm_yes_ignored",
+                        Some("reconfirm_only".into()),
+                    ));
+                    rejected(RejectCode::NoEffect)
                 }
             }
-            // NO_PENDING_TARGET = YES / NO without a target (team decision #3).
-            // TODO(drive-core): pending offers should come from session state, not only the
-            // request field.
-            Command::Yes | Command::No if req.pending_offer_id.is_none() => {
+            Command::No => {
+                if let Some(res) = self.dismiss_active_confirm(at, req.pending_offer_id.as_deref())
+                {
+                    return Ok(res);
+                }
                 rejected(RejectCode::NoPendingTarget)
             }
-            // A missing last junction skips only the profile proposal (03 §4.1).
-            Command::Ovr(a) if a.jp == Some(JpRef::Next) => {
-                if let Some(reference) = self.frames.refs().and_then(|refs| refs.next.as_ref()) {
-                    if self.frames.frame_seq() != req.ref_frame_seq {
+            Command::Noop | Command::Why => rejected(RejectCode::NoEffect),
+            Command::Ovr(args) => self.validate_ovr(now, req, args),
+        }
+    }
+
+    fn dismiss_active_confirm(
+        &mut self,
+        at: u64,
+        pending_offer_id: Option<&str>,
+    ) -> Option<ValidateOverrideResult> {
+        if let OverrideState::Confirming { req_id, target } = &self.override_state {
+            if pending_offer_id
+                .is_none_or(|p| p == target.override_id || p == target.confirm_screen_id)
+            {
+                let override_id = target.override_id.clone();
+                let req_id = req_id.clone();
+                self.pending_ui.push(UiCmd::Dismiss {
+                    target_id: override_id.clone(),
+                    reason: DismissReason::Cancelled,
+                });
+                self.pending_log.push(log_req(
+                    at,
+                    "override_confirm_cancelled",
+                    &req_id,
+                    &override_id,
+                ));
+                self.override_state = OverrideState::Idle;
+                return Some(ValidateOverrideResult::Undone { req_id });
+            }
+        }
+        if let AvoidState::Offered { req_id, offer, .. } = &self.avoid {
+            if pending_offer_id.is_none_or(|p| p == offer.offer_id) {
+                let offer_id = offer.offer_id.clone();
+                let req_id = req_id.clone();
+                self.pending_ui.push(UiCmd::Dismiss {
+                    target_id: offer_id.clone(),
+                    reason: DismissReason::Cancelled,
+                });
+                self.pending_log
+                    .push(log_req(at, "avoid_offer_cancelled", &req_id, &offer_id));
+                self.avoid = AvoidState::Idle;
+                return Some(ValidateOverrideResult::Undone { req_id });
+            }
+        }
+        None
+    }
+
+    fn handle_cxl_override(
+        &mut self,
+        now: u64,
+        at: u64,
+        pending_offer_id: Option<&str>,
+    ) -> Result<ValidateOverrideResult, CoreError> {
+        if let Some(res) = self.dismiss_active_confirm(at, pending_offer_id) {
+            return Ok(res);
+        }
+        if pending_offer_id.is_none() {
+            // Cancel an in-flight override search if one exists.
+            match std::mem::replace(&mut self.override_state, OverrideState::Idle) {
+                OverrideState::Searching { req_id, .. } => {
+                    let mut fx = Effects::default();
+                    self.planner.cancel_search(now, &req_id, &mut fx);
+                    self.pending_planner.extend(fx.planner_cmds);
+                    self.pending_log.extend(fx.log);
+                    return Ok(ValidateOverrideResult::Undone { req_id });
+                }
+                OverrideState::Queued { target } | OverrideState::WaitingSlot { target } => {
+                    self.planner.drop_pending_priority(SearchPriority::Override);
+                    return Ok(ValidateOverrideResult::Undone {
+                        req_id: target.override_id,
+                    });
+                }
+                OverrideState::Ready { req_id, .. } => {
+                    return Ok(ValidateOverrideResult::Undone { req_id });
+                }
+                OverrideState::Idle | OverrideState::Confirming { .. } => {}
+            }
+            // Otherwise: "戻して" of an avoid / override switch confirmed within 5 s (03 §3.1).
+            let mut cmds = Vec::new();
+            let mut log = Vec::new();
+            let r = self.try_undo(now, at, None, &mut cmds, &mut log);
+            if let Err(code) = r {
+                self.undo_refused(at, code, &mut log);
+            }
+            self.pending_planner.extend(cmds);
+            self.pending_log.extend(log);
+            return match r {
+                Ok(req_id) => Ok(ValidateOverrideResult::Undone { req_id }),
+                Err(code) => Ok(ValidateOverrideResult::Rejected { code }),
+            };
+        }
+        Ok(ValidateOverrideResult::Rejected {
+            code: RejectCode::NoPendingTarget,
+        })
+    }
+
+    fn validate_ovr(
+        &mut self,
+        now: u64,
+        req: ValidateOverrideRequest,
+        args: OvrArgs,
+    ) -> Result<ValidateOverrideResult, CoreError> {
+        let rejected = |code| Ok(ValidateOverrideResult::Rejected { code });
+        if !req.contract.is_object() {
+            return Err(CoreError::new(
+                ErrorCode::Schema,
+                "validate_override: contract must be a JSON object",
+            ));
+        }
+        let contract: IntentContract = serde_json::from_value(req.contract).map_err(|e| {
+            CoreError::new(
+                ErrorCode::Schema,
+                format!("validate_override contract: {e}"),
+            )
+        })?;
+        // Validate optional numeric ranges in contract (same rules as dc_rank / 03 §5).
+        let l2_range = L2_PENALTY_PERMILLE_MIN..=L2_PENALTY_PERMILLE_MAX;
+        let l2_rc = contract.right_turn_penalty_permille.unwrap_or(1_000);
+        let l2_nr = contract.narrow_road_penalty_permille.unwrap_or(1_000);
+        let l2_mg = contract.merge_penalty_permille.unwrap_or(1_000);
+        if !l2_range.contains(&l2_rc) || !l2_range.contains(&l2_nr) || !l2_range.contains(&l2_mg) {
+            return Err(CoreError::new(
+                ErrorCode::Schema,
+                "validate_override: L2 *_penalty_permille must be in 250..=4000",
+            ));
+        }
+        if let Some(r) = contract.max_detour_ratio_permille {
+            if !(MAX_DETOUR_RATIO_PERMILLE_MIN..=MAX_DETOUR_RATIO_PERMILLE_MAX).contains(&r) {
+                return Err(CoreError::new(
+                    ErrorCode::Schema,
+                    "validate_override: max_detour_ratio_permille must be in 1000..=1350",
+                ));
+            }
+        }
+        if contract.through_ref.is_some() && self.is_driving {
+            return rejected(RejectCode::ForbiddenWhileDriving);
+        }
+
+        // 1. STALE_REVISION on route_key (always checked, 03 §4.2).
+        let Some(current_rk) = self.current_route_key.clone() else {
+            return rejected(RejectCode::StaleRevision);
+        };
+        if let Some(ref c_rk) = contract.route_key {
+            if *c_rk != current_rk {
+                return rejected(RejectCode::StaleRevision);
+            }
+        }
+
+        // 2. EXPIRED: now_mono_ms > utterance_mono_ms + 30 s (03 §4.2).
+        let expires_at_mono_ms = req
+            .utterance_mono_ms
+            .saturating_add(self.override_expiry_ms);
+        if now > expires_at_mono_ms {
+            return rejected(RejectCode::Expired);
+        }
+
+        // 3. jp=next / jp=last resolution and ref_frame_seq staleness (03 §4.1 / §4.2).
+        // `ref_frame_seq` is checked ONLY when `jp` is specified AND the referenced `refs`
+        // entry changed since `ref_frame_seq`. Weight/detour-only OVR never fails on frame_seq.
+        let mut junction_preferences = Vec::new();
+        let mut jp_edge_pair: Option<(u64, u64)> = None;
+        let mut jp_deadline_mono_ms: Option<u64> = None;
+        let mut review_proposal: Option<serde_json::Value> = None;
+        match args.jp {
+            Some(JpRef::Next) => {
+                let cur_next = self.frames.refs().and_then(|r| r.next.as_ref()).cloned();
+                if req.ref_frame_seq != self.frames.frame_seq() {
+                    let Some(old_refs) = self.frames.refs_at(req.ref_frame_seq) else {
+                        return rejected(RejectCode::StaleRevision);
+                    };
+                    let old_id = old_refs.next.as_ref().map(|j| (&j.ref_, &j.maneuver_id));
+                    let cur_id = cur_next.as_ref().map(|j| (&j.ref_, &j.maneuver_id));
+                    if old_id != cur_id {
                         return rejected(RejectCode::StaleRevision);
                     }
-                    if req.utterance_mono_ms >= reference.deadline_mono_ms {
-                        return rejected(RejectCode::Expired);
-                    }
-                    return Err(CoreError::new(
-                        ErrorCode::Unimplemented,
-                        "override safety gate pending",
-                    ));
                 }
-                rejected(RejectCode::UnknownRef)
+                let Some(next_ref) = cur_next else {
+                    return rejected(RejectCode::UnknownRef);
+                };
+                if now >= next_ref.deadline_mono_ms
+                    || req.utterance_mono_ms >= next_ref.deadline_mono_ms
+                {
+                    return rejected(RejectCode::Expired);
+                }
+                jp_deadline_mono_ms = Some(next_ref.deadline_mono_ms);
+                jp_edge_pair = self.route.as_ref().and_then(|r| {
+                    r.maneuvers
+                        .iter()
+                        .find(|m| m.id == next_ref.maneuver_id)
+                        .and_then(|m| r.edge_pair_at(m.anchor.along_route_cm))
+                });
+                junction_preferences.push(JunctionPreference {
+                    ref_: next_ref.ref_,
+                    mode: JunctionMode::AvoidIfPractical,
+                });
             }
-            _ => Err(CoreError::new(
-                ErrorCode::Unimplemented,
-                "parsed; contract / Safety Gate / revision checks not implemented",
-            )),
+            Some(JpRef::Last) => {
+                let cur_last = self.frames.refs().and_then(|r| r.last.as_ref()).cloned();
+                if req.ref_frame_seq != self.frames.frame_seq() {
+                    let Some(old_refs) = self.frames.refs_at(req.ref_frame_seq) else {
+                        return rejected(RejectCode::StaleRevision);
+                    };
+                    let old_id = old_refs.last.as_ref().map(|p| (&p.ref_, &p.maneuver_id));
+                    let cur_id = cur_last.as_ref().map(|p| (&p.ref_, &p.maneuver_id));
+                    if old_id != cur_id {
+                        return rejected(RejectCode::StaleRevision);
+                    }
+                }
+                // 03 §4.1: jp=last missing is not an error — simply produce no review_proposal.
+                if let Some(passed) = cur_last {
+                    review_proposal = Some(serde_json::json!({
+                        "origin": "jp_last",
+                        "ref": passed.ref_,
+                        "maneuver_id": passed.maneuver_id,
+                        "passed_at_mono_ms": passed.passed_at_mono_ms,
+                        "passed_along_cm": passed.passed_along_cm,
+                    }));
+                }
+            }
+            None => {}
         }
+
+        // 4. NO_EFFECT: expanded 3-axis weights equal current (L2 × active L3), detour
+        // unchanged, and no `jp` specified (03 §4.2).
+        let scale = L3LevelScale::default();
+        let cur_l3 = contract
+            .current_l3_weights
+            .unwrap_or_else(|| self.active_l3_weights.clone());
+        let cur_detour = contract.current_detour.unwrap_or(self.active_detour);
+        let new_l3 = Weights {
+            crossing_right: args.rc.or(cur_l3.crossing_right),
+            narrow_road: args.nr.or(cur_l3.narrow_road),
+            merge: args.mg.or(cur_l3.merge),
+        };
+        let new_detour = args.dt.unwrap_or(cur_detour);
+        let cur_w = (
+            rank::combined_weight_permille(l2_rc, cur_l3.crossing_right, &scale),
+            rank::combined_weight_permille(l2_nr, cur_l3.narrow_road, &scale),
+            rank::combined_weight_permille(l2_mg, cur_l3.merge, &scale),
+        );
+        let new_w = (
+            rank::combined_weight_permille(l2_rc, new_l3.crossing_right, &scale),
+            rank::combined_weight_permille(l2_nr, new_l3.narrow_road, &scale),
+            rank::combined_weight_permille(l2_mg, new_l3.merge, &scale),
+        );
+        let weights_changed = new_w != cur_w;
+        let detour_changed = new_detour != cur_detour;
+        let has_jp_next = args.jp == Some(JpRef::Next);
+        if !weights_changed && !detour_changed && args.jp.is_none() {
+            return rejected(RejectCode::NoEffect);
+        }
+
+        let override_id = format!("ovr-{}", self.next_override_seq);
+        self.next_override_seq += 1;
+        let intent_contract_id = contract
+            .intent_contract_id
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "default".to_owned());
+        let plan_request_id = contract
+            .plan_request_id
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.planner.plan().map(|p| p.plan_request_id.clone()))
+            .unwrap_or_else(|| "drive".to_owned());
+        let override_ = PersonalRoutingOverride {
+            schema_version: SchemaV1,
+            intent_contract_id,
+            plan_request_id,
+            trip_revision: current_rk.trip_revision,
+            action: OverrideAction::SuggestRoutePreference,
+            weights: new_l3.clone(),
+            junction_preferences,
+            through_ref: None,
+            detour: new_detour,
+            expires_at_mono_ms,
+        };
+
+        // 5. Route search needed? `jp=last` alone records S12 proposal without changing route.
+        let needs_route_search = weights_changed || detour_changed || has_jp_next;
+        if needs_route_search {
+            // Supersede any previous pending override (consent never carries over, ADR-0007).
+            match std::mem::replace(&mut self.override_state, OverrideState::Idle) {
+                OverrideState::Confirming { target, .. } => {
+                    self.pending_ui.push(UiCmd::Dismiss {
+                        target_id: target.override_id,
+                        reason: DismissReason::Superseded,
+                    });
+                }
+                OverrideState::Searching { req_id, .. } => {
+                    let mut fx = Effects::default();
+                    self.planner.cancel_search(now, &req_id, &mut fx);
+                    self.pending_planner.extend(fx.planner_cmds);
+                    self.pending_log.extend(fx.log);
+                }
+                OverrideState::WaitingSlot { .. } | OverrideState::Queued { .. } => {
+                    self.planner.drop_pending_priority(SearchPriority::Override);
+                }
+                OverrideState::Idle | OverrideState::Ready { .. } => {}
+            }
+            let confirm_screen_id = format!("confirm-{override_id}");
+            self.override_state = OverrideState::Queued {
+                target: OverrideTarget {
+                    override_id: override_id.clone(),
+                    confirm_screen_id,
+                    route_key: current_rk.clone(),
+                    expires_at_mono_ms,
+                    w_right: new_w.0,
+                    w_narrow: new_w.1,
+                    w_merge: new_w.2,
+                    prev_l3_weights: cur_l3,
+                    new_l3_weights: new_l3,
+                    prev_detour: cur_detour,
+                    new_detour,
+                    max_detour_ratio_permille: contract.max_detour_ratio_permille,
+                    has_jp_next,
+                    jp_edge_pair,
+                    jp_deadline_mono_ms,
+                    start_progress_cm: self.aligner.progress_cm().unwrap_or(0),
+                },
+            };
+        }
+
+        self.pending_log.push(log_at(
+            req.utterance_mono_ms,
+            "override_applied",
+            Some(format!(
+                "override_id={override_id} utterance_id={} search={needs_route_search}",
+                req.utterance_id
+            )),
+        ));
+        Ok(ValidateOverrideResult::Applied {
+            override_id,
+            override_,
+            review_proposal,
+            route_key: current_rk,
+            expires_at_mono_ms,
+        })
     }
 }
 
