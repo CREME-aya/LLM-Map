@@ -1,0 +1,14 @@
+{
+  "kind": "intent_preset",
+  "schema_version": 1,
+  "preset_id": "preset-1",
+  "name": "12345678901234567890123456789012345678901",
+  "chips": [],
+  "hard_soft": {},
+  "detour": "standard",
+  "weights_permille": {
+    "right_turn": 1000,
+    "narrow_road": 1000,
+    "merge": 1000
+  }
+}

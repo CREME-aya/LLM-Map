@@ -5,6 +5,7 @@ pub mod align;
 pub mod avoid;
 pub mod candidates;
 pub mod command_line;
+pub mod exchange;
 pub mod geo;
 pub mod history;
 pub mod horizon;

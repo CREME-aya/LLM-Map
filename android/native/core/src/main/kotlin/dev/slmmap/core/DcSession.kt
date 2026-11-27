@@ -137,6 +137,14 @@ class DcSession private constructor(private var handle: Long) : Closeable {
         fun tripScore(reqJson: ByteArray): ByteArray =
             DcNative.tripScore(reqJson) ?: throw OutOfMemoryError("dc_core: tripScore result ByteArray allocation failed")
 
+        /**
+         * Stateless dc_exchange_validate: validates exchange-v1 JSON (IntentPreset / TripPlan /
+         * DriveDiary; schema/exchange.schema.json; 02 §2.1 #12, 06 §4.2). Enforce the 16 MB
+         * expanded-size limit when unzipping .drivediary before passing the extracted JSON here.
+         */
+        fun exchangeValidate(reqJson: ByteArray): ByteArray =
+            DcNative.exchangeValidate(reqJson) ?: throw OutOfMemoryError("dc_core: exchangeValidate result ByteArray allocation failed")
+
         /** Returns the session, or the error envelope bytes from dc_session_new. */
         fun open(configJson: ByteArray): Result<DcSession> {
             check(DcNative.abiVersion() == DcNative.EXPECTED_ABI_VERSION) { "dc_core ABI mismatch" }

@@ -203,7 +203,5 @@ pub unsafe extern "system" fn Java_dev_slmmap_core_DcNative_exchangeValidate(
     _c: jclass,
     input: jbyteArray,
 ) -> jbyteArray {
-    stateless(env, input, |b| {
-        ops::unimplemented("dc_exchange_validate", b)
-    })
+    stateless(env, input, ops::exchange_validate)
 }

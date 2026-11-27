@@ -37,7 +37,8 @@ public final class JniSmoke {
         check("rank", DcNative.rank(b("{\"facts\":[{\"candidate_id\":\"c1\",\"label\":\"baseline\",\"plan_request_id\":\"p1\",\"graph_version\":\"g\",\"fingerprint\":\"fp1\",\"legal\":true,\"complete\":true,\"eta_ms\":600000,\"length_m\":5000,\"counts\":{\"right_unprotected\":0,\"right_signal_unknown_protection\":0,\"right_signal_unknown\":0,\"right_protected\":0,\"right_entry\":1,\"merges\":0},\"narrow_m\":{\"confirmed\":0,\"inferred\":0},\"unknown_width_residential_m\":0,\"unknown_length_m\":0,\"junctions\":[],\"through_anchors\":[]}]}")), "\"score_ms\":690000");
         check("tripScore bad", DcNative.tripScore(b("{}")), "E_SCHEMA");
         check("tripScore", DcNative.tripScore(b("{\"distance_m\":150000,\"eta_s\":3600,\"motorway_ratio_permille\":500,\"destination_kind\":\"castle\",\"outside_daily_area\":true,\"corridor_history_density\":\"high\",\"recently_declined_similar\":false,\"is_driving_reroute\":false}")), "\"show_card\":true");
-        check("exchangeValidate", DcNative.exchangeValidate(b("{}")), "E_UNIMPLEMENTED");
+        check("exchangeValidate bad", DcNative.exchangeValidate(b("{}")), "E_SCHEMA");
+        check("exchangeValidate", DcNative.exchangeValidate(b("{\"kind\":\"intent_preset\",\"schema_version\":1,\"preset_id\":\"p1\",\"name\":\"night\",\"chips\":[\"c1\"],\"hard_soft\":{\"c1\":\"hard\"},\"detour\":\"tight\",\"weights_permille\":{\"right_turn\":2000,\"narrow_road\":1000,\"merge\":1000}}")), "\"kind\":\"intent_preset\"");
         // large payload pass-through (≈1 MB) still round-trips as a ByteArray
         StringBuilder sb = new StringBuilder("{\"now_mono_ms\":20,\"events\":[");
         for (int i = 0; i < 20000; i++) { if (i > 0) sb.append(','); sb.append("{\"at_mono_ms\":20,\"kind\":\"low_memory\"}"); }

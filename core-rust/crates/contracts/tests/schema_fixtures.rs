@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 const BASE: &str = "https://slm-map.invalid/schema/";
-const SCHEMAS: [&str; 9] = [
+const SCHEMAS: [&str; 10] = [
     "common",
     "trip-plan-snapshot",
     "candidate-facts",
@@ -19,6 +19,7 @@ const SCHEMAS: [&str; 9] = [
     "route-bundle",
     "route-comparison",
     "trip-score",
+    "exchange",
 ];
 
 fn schema_dir() -> PathBuf {
@@ -304,6 +305,37 @@ fn rust_mirror_agrees_on_trip_score() {
         }
     }
     assert!(seen >= 4, "trip-score fixtures found: {seen}");
+}
+
+/// contracts::exchange::ExchangeDocument agrees with exchange.schema.json on every
+/// valid and invalid fixture (shared with Web Zod, 06 §4.2).
+#[test]
+fn rust_mirror_agrees_on_exchange() {
+    use contracts::exchange::ExchangeDocument;
+    let c = compile("exchange");
+    let mut seen = 0;
+    for kind in ["valid", "invalid"] {
+        for (schema, path) in fixtures(kind) {
+            if schema != "exchange" {
+                continue;
+            }
+            seen += 1;
+            let f = path.file_name().unwrap().to_string_lossy().to_string();
+            let v = load(&path);
+            let parsed = serde_json::from_value::<ExchangeDocument>(v.clone());
+            if kind == "valid" {
+                assert_eq!(errors(&c, &v), Vec::<String>::new(), "{f}");
+                let doc = parsed.unwrap_or_else(|e| panic!("serde {f}: {e}"));
+                let back = serde_json::to_value(&doc).unwrap();
+                assert_eq!(errors(&c, &back), Vec::<String>::new(), "round trip {f}");
+                assert_eq!(back, v, "exact round trip {f}");
+            } else {
+                assert!(!c.is_valid(&v), "schema should reject {f}");
+                assert!(parsed.is_err(), "serde should reject {f}");
+            }
+        }
+    }
+    assert!(seen >= 10, "exchange fixtures found: {seen}");
 }
 
 #[test]

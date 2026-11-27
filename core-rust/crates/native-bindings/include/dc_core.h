@@ -183,7 +183,15 @@ typedef struct dc_session dc_session;
           *   no_pending_result|not_tracking|deadline_passed|graph_mismatch|not_legal_or_complete
           *   |target_edges_unknown|target_not_avoided|not_fewer_hazards|over_detour_cap
           *   |insufficient_improvement}. Result shape provisional. */
-/* 12 */ dc_out   dc_exchange_validate(dc_in req_json);                        /* {kind, payload} (TODO: E_UNIMPLEMENTED) */
+/* 12 */ dc_out   dc_exchange_validate(dc_in req_json);
+         /* in : exchange-v1 JSON (schema/exchange.schema.json; 06 §4.2):
+          *      kind = "intent_preset" | "trip_plan" | "drive_diary", schema_version = 1,
+          *      additionalProperties: false on every level. Integer lat_e7/lon_e7, U64Str IDs.
+          *      Semantic checks shared with Web Zod: IntentPreset hard_soft keys subset of chips,
+          *      weights_permille in 250..=4000, DriveDiary total track points across all segments
+          *      <= 20,000, non-null t_offset_s non-decreasing across all segments (same second ok,
+          *      null skipped). (16 MB expanded zip limit is enforced by Kotlin/Web before extraction.)
+          * out: validated exchange-v1 document (or E_SCHEMA). */
 
 #ifdef __cplusplus
 }

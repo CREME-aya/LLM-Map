@@ -1,0 +1,8 @@
+{
+  "kind": "trip_plan",
+  "schema_version": 1,
+  "origin": { "lat_e7": 350000000, "lon_e7": 1390000000, "vehicle_entry_id": 42 },
+  "vias": [],
+  "destination": { "lat_e7": 351000000, "lon_e7": 1391000000 },
+  "history_mode": "off"
+}

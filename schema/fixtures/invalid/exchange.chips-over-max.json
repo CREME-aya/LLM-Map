@@ -1,0 +1,14 @@
+{
+  "kind": "intent_preset",
+  "schema_version": 1,
+  "preset_id": "preset-1",
+  "name": "too many chips",
+  "chips": ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"],
+  "hard_soft": {},
+  "detour": "standard",
+  "weights_permille": {
+    "right_turn": 1000,
+    "narrow_road": 1000,
+    "merge": 1000
+  }
+}

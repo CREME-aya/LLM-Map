@@ -1,0 +1,14 @@
+{
+  "kind": "intent_preset",
+  "schema_version": 1,
+  "preset_id": "preset-1",
+  "name": "bad weight",
+  "chips": [],
+  "hard_soft": {},
+  "detour": "standard",
+  "weights_permille": {
+    "right_turn": 4001,
+    "narrow_road": 1000,
+    "merge": 1000
+  }
+}

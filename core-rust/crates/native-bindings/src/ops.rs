@@ -179,16 +179,17 @@ pub fn trip_score(input: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Placeholder for functions whose logic is not in this skeleton.
-/// Still checks that the input is well-formed JSON so the transport can be tested.
-pub fn unimplemented(name: &str, input: &[u8]) -> Vec<u8> {
-    if let Err(e) = serde_json::from_slice::<serde_json::Value>(input) {
-        return envelope_err(ErrorCode::Schema, &format!("{name}: {e}"));
+/// `dc_exchange_validate(json)` → validated `ExchangeDocument` (02 §2.1 #12, 06 §4.2,
+/// `schema/exchange.schema.json`). Validates `IntentPreset`, `TripPlan`, or `DriveDiary`
+/// (strict unknown fields, WGS84 e7 integer coordinates, `hard_soft` keys ⊆ `chips`,
+/// `weights_permille` 250..=4000, total track points <= 20,000, non-decreasing `t_offset_s`
+/// across all segments). Note: the 16 MB expanded zip limit is enforced by Kotlin/Web before
+/// passing the extracted JSON bytes.
+pub fn exchange_validate(input: &[u8]) -> Vec<u8> {
+    match drive_core::exchange::validate_json(input) {
+        Ok(doc) => envelope_ok(&doc),
+        Err(e) => err(e),
     }
-    envelope_err(
-        ErrorCode::Unimplemented,
-        &format!("{name}: TODO(abi-v1) not implemented"),
-    )
 }
 
 #[cfg(test)]
