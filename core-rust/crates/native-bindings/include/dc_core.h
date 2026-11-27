@@ -59,11 +59,13 @@ typedef struct dc_session dc_session;
           * -> {"result":"applied", override_id, override, review_proposal?, route_key, expires_at_mono_ms}
           *  | {"result":"rejected", code: SYNTAX|UNKNOWN_REF|STALE_REVISION|EXPIRED
           *                               |FORBIDDEN_WHILE_DRIVING|NO_EFFECT|NO_PENDING_TARGET}
-          *  | {"result":"undone", req_id}       (CXL undo within 5 s, 03 §3.1; shape provisional)
+          *  | {"result":"undone", req_id}       (CXL undo within 5 s or dismiss active confirm/offer, 03 §3.1/§4.2)
           *  | {"result":"bookmarked", poi_id}   (L3 BMK targeting Speaking or <= 60 s Completed/Interrupted POI,
           *                                       05 §6.2; emits save_for_later{poi_id, bmk} on next dc_tick;
-          *                                       shape provisional; else REJECTED NO_PENDING_TARGET)
-          * (skeleton: SYNTAX / NO_PENDING_TARGET / UNKNOWN_REF / CXL undo / BMK; else E_UNIMPLEMENTED) */
+          *                                       else REJECTED NO_PENDING_TARGET)
+          * Applied OVR requiring a route search queues 1 planner_cmds start{priority: override, fix} on the next
+          * dc_tick (priority: reroute > explicit_plan > override > avoid_chip > comparison); jp=last alone records
+          * review_proposal without changing the route (03 §4.1/§4.2). */
 /* 8  */ dc_out   dc_trip_score(dc_in trip_summary_json);
          /* in : {distance_m, eta_s, motorway_ratio_permille (0..=1000), destination_kind,
           *       outside_daily_area, corridor_history_density, recently_declined_similar, is_driving_reroute,
@@ -167,17 +169,20 @@ typedef struct dc_session dc_session;
 /* 11 */ dc_out   dc_avoid_offer_eval(dc_session* s, dc_in req_json);
           /* {req_id, now_mono_ms, alt_facts: CandidateFacts, base_facts: CandidateFacts}
           *   Call for planner_cmds evaluate_offer{req_id, facts_ref, base_facts_ref}: alt_facts
-          *   behind facts_ref, base_facts behind base_facts_ref (docs 2a8a727). Another req_id
-          *   than the waiting avoid search -> declined{no_pending_result}.
-          * → {result: "offered", avoid_offer: AvoidOffer} (shown on its HorizonEntry from the
-          *   next dc_tick; dismiss{expired} at the deadline) | {result: "declined", reason:
+          *   behind facts_ref, base_facts behind base_facts_ref (docs 2a8a727, 03 §4.2). Another req_id
+          *   than the waiting avoid/override search -> declined{no_pending_result}.
+          * → {result: "offered", avoid_offer: AvoidOffer} (avoid_chip: shown on HorizonEntry from next
+          *   dc_tick; dismiss{expired} at deadline)
+          * | {result: "override_offered", confirm_screen_id, override_id, alt_route_id, delta_eta_ms,
+          *    score_improvement_ms, expires_at_mono_ms} (L3 override: same override weights scored via
+          *   dc_rank score_ms, >= 30,000 ms improvement, DetourPolicy, jp edge-pair check; emits
+          *   ui_cmds show_confirm on next dc_tick; consent via dict "はい" or user_tap{confirm} ->
+          *   commit{req_id, route_key, undo_req_id}; 30 s expiry -> dismiss{expired}; failure or
+          *   dc_route_commit past divergence -> voice_cmds speak{template_id: override_no_route})
+          * | {result: "declined", reason:
           *   no_pending_result|not_tracking|deadline_passed|graph_mismatch|not_legal_or_complete
-          *   |target_edges_unknown|target_not_avoided|not_fewer_hazards|over_detour_cap}.
-          *   04 §4.3 item 2: (a) the target's (edge_in, edge_out) must not be in
-          *   alt_facts.junctions; (b) against base_facts, for a right-turn target fewer avoid
-          *   right turns (right_unprotected + right_signal_unknown_protection +
-          *   right_signal_unknown) and narrow_m (confirmed + inferred) not longer; for a narrow
-          *   target shorter narrow_m and avoid right turns not more. Result shape provisional. */
+          *   |target_edges_unknown|target_not_avoided|not_fewer_hazards|over_detour_cap
+          *   |insufficient_improvement}. Result shape provisional. */
 /* 12 */ dc_out   dc_exchange_validate(dc_in req_json);                        /* {kind, payload} (TODO: E_UNIMPLEMENTED) */
 
 #ifdef __cplusplus

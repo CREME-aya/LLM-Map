@@ -98,24 +98,40 @@ pub struct AvoidOfferEvalRequest {
 }
 
 /// Result of `dc_avoid_offer_eval`, tagged by `"result"` like `dc_validate_override`.
-/// `offered`: the `AvoidOffer` now sits on its `HorizonEntry` (the next `dc_tick` returns
-/// the frame; the horizon is the only place it is shown). `declined`: no offer, the waiting
-/// result is dropped. TODO(abi-v1): the result shape is not in docs (provisional).
+/// - `offered`: avoid-chip `AvoidOffer` now sits on its `HorizonEntry` (shown from the next
+///   `dc_tick`; the horizon is the only place it is shown).
+/// - `override_offered`: L3 override passed scoring / detour / `jp` checks (03 §4.2); the next
+///   `dc_tick` emits `ui_cmds: show_confirm{confirm_screen_id, override_id, expires_at_mono_ms}`.
+/// - `declined`: no offer, the waiting result is dropped.
+///
+/// TODO(abi-v1): the result shape is not in docs (provisional).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum AvoidOfferEvalResult {
-    Offered { avoid_offer: AvoidOffer },
-    Declined { reason: AvoidDeclineReason },
+    Offered {
+        avoid_offer: AvoidOffer,
+    },
+    OverrideOffered {
+        confirm_screen_id: String,
+        override_id: String,
+        alt_route_id: String,
+        delta_eta_ms: i64,
+        score_improvement_ms: u64,
+        expires_at_mono_ms: MonoMs,
+    },
+    Declined {
+        reason: AvoidDeclineReason,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AvoidDeclineReason {
-    /// No avoid-chip search result is waiting for evaluation (or `req_id` is not it).
+    /// No avoid-chip / override search result is waiting for evaluation (or `req_id` is not it).
     NoPendingResult,
     /// The session is not `tracking` (03 §3.1: results are used only while tracking).
     NotTracking,
-    /// The decision deadline (20 s before the branch, from `earliest`) has passed.
+    /// The decision deadline (20 s before the branch for avoid chip, or 30 s for override) passed.
     DeadlinePassed,
     /// `alt_facts.graph_version` is not the current route's.
     GraphMismatch,
@@ -130,4 +146,7 @@ pub enum AvoidDeclineReason {
     /// 04 §4.3 (b): against `base_facts`, the alternative does not have fewer avoid targets,
     /// or its `narrow_m` is longer.
     NotFewerHazards,
+    /// 03 §4.2 / 07 §1: L3 override alternative's `score_ms` did not improve over `base_facts`
+    /// by at least the minimum improvement threshold (30,000 ms provisional).
+    InsufficientImprovement,
 }

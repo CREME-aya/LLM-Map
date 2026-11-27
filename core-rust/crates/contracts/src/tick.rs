@@ -390,15 +390,16 @@ pub enum RankReason {
     BudgetExpired,
 }
 
-/// Single priority queue order (03 §3.1 table; team decision 2026-11-24 for the JSON names).
-/// Highest first: `reroute` (逸脱再探索) > `explicit_plan` (明示計画) > `avoid_chip`
-/// (回避チップ) > `comparison` (比較探索). `Ord` follows the same order (higher wins);
-/// variant order below is therefore lowest → highest.
+/// Single priority queue order (03 §3.1 table, §4.2; team decision 2026-11-24 for the JSON names).
+/// Highest first: `reroute` (逸脱再探索) > `explicit_plan` (明示計画) > `override`
+/// (L3 音声上書き探索) > `avoid_chip` (回避チップ) > `comparison` (比較探索).
+/// `Ord` follows the same order (higher wins); variant order below is therefore lowest → highest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchPriority {
     Comparison,
     AvoidChip,
+    Override,
     ExplicitPlan,
     Reroute,
 }

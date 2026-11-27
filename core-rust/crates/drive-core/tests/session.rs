@@ -41,22 +41,21 @@ fn validate_override_skeleton_rules() {
     );
     assert_eq!(
         rejected(&mut s, "OVR jp=next", None),
-        Some(RejectCode::UnknownRef)
+        Some(RejectCode::StaleRevision)
     );
     assert_eq!(
-        s.validate_override(req("OVR rc=H jp=last", None))
-            .unwrap_err()
-            .code,
-        ErrorCode::Unimplemented
+        rejected(&mut s, "OVR rc=H jp=last", None),
+        Some(RejectCode::StaleRevision)
     );
-    // Not implemented yet → explicit E_UNIMPLEMENTED, never a silent "applied".
-    let e = s.validate_override(req("OVR rc=H", None)).unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unimplemented);
+    assert_eq!(
+        rejected(&mut s, "OVR rc=H", None),
+        Some(RejectCode::StaleRevision)
+    );
     // YES with a pending offer must still not confirm anything here.
-    assert!(!matches!(
-        s.validate_override(req("YES", Some("o1"))),
-        Ok(ValidateOverrideResult::Applied { .. })
-    ));
+    assert_eq!(
+        rejected(&mut s, "YES", Some("o1")),
+        Some(RejectCode::NoEffect)
+    );
 }
 
 #[test]

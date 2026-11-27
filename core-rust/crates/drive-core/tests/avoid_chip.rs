@@ -460,6 +460,9 @@ fn alternative_must_avoid_the_target_and_not_add_hazards() {
                 assert_eq!(*s.avoid_state(), AvoidState::Idle, "dropped");
                 Some(reason)
             }
+            AvoidOfferEvalResult::OverrideOffered { .. } => {
+                panic!("unexpected override offer in avoid chip test")
+            }
         }
     };
     let (_, gv, base) = ready();
@@ -600,6 +603,9 @@ fn narrow_target_b_rule_checks_narrow_m_strictly_and_right_turns_non_increasing(
         }) {
             AvoidOfferEvalResult::Offered { .. } => None,
             AvoidOfferEvalResult::Declined { reason } => Some(reason),
+            AvoidOfferEvalResult::OverrideOffered { .. } => {
+                panic!("unexpected override offer in avoid chip test")
+            }
         }
     };
     // Narrow shorter (119 < 120) with the same right-turn count (1 == 1) → offered!

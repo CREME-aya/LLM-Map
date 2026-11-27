@@ -574,6 +574,7 @@ mod tick {
         for priority in [
             SearchPriority::Reroute,
             SearchPriority::ExplicitPlan,
+            SearchPriority::Override,
             SearchPriority::AvoidChip,
             SearchPriority::Comparison,
         ] {
@@ -713,6 +714,7 @@ mod tick {
             ser(vec![
                 serde_json::to_value(SearchPriority::Reroute).unwrap(),
                 serde_json::to_value(SearchPriority::ExplicitPlan).unwrap(),
+                serde_json::to_value(SearchPriority::Override).unwrap(),
                 serde_json::to_value(SearchPriority::AvoidChip).unwrap(),
                 serde_json::to_value(SearchPriority::Comparison).unwrap(),
             ])

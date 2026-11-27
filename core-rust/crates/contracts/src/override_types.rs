@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 /// Request of dc_validate_override (docs v1.2 02 §2.1 / 03 §4.2:
 /// `{code_line, contract, utterance_id, utterance_mono_ms, ref_frame_seq, pending_offer_id?}`).
-/// TODO(abi-v1): `contract` shape (IntentContract) is not defined; kept as raw JSON.
+/// `contract` (`IntentContract`) is kept as raw JSON at the wire boundary so `{}` remains
+/// accepted; `drive-core` reads the provisional typed fields of [`IntentContract`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateOverrideRequest {
@@ -18,6 +19,31 @@ pub struct ValidateOverrideRequest {
     pub ref_frame_seq: u64,
     #[serde(default)]
     pub pending_offer_id: Option<String>,
+}
+
+/// Provisional typed view of `ValidateOverrideRequest.contract` (`IntentContract`, 03 §4.2).
+/// Every field is optional so `{}` works with defaults (`1000` per-mille L2 weights, current
+/// session route_key / L3 weights / detour). Unknown keys are ignored for forward
+/// compatibility while `IntentContract` has no formal JSON Schema yet.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct IntentContract {
+    pub intent_contract_id: Option<String>,
+    pub plan_request_id: Option<String>,
+    /// If present, must equal the session's current `route_key` (else `STALE_REVISION`).
+    pub route_key: Option<RouteKey>,
+    /// Optional L2 profile weights in per-mille (250..=4000, default 1000; 03 §5).
+    pub right_turn_penalty_permille: Option<u64>,
+    pub narrow_road_penalty_permille: Option<u64>,
+    pub merge_penalty_permille: Option<u64>,
+    /// Optional user detour cap ratio in per-mille (1000..=1350; 03 §5).
+    pub max_detour_ratio_permille: Option<u64>,
+    /// Optional override of the session's current active L3 weights (for stateless / custom checks).
+    pub current_l3_weights: Option<Weights>,
+    /// Optional override of the session's current active detour setting.
+    pub current_detour: Option<Detour>,
+    /// Forbidden while driving (03 §4.2 `FORBIDDEN_WHILE_DRIVING`).
+    pub through_ref: Option<String>,
 }
 
 /// Rejection reasons (03 §4.2, 7 kinds). Fixed uppercase strings as written in the docs.
